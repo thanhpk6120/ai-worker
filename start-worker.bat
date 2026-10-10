@@ -7,11 +7,10 @@ echo         AI WORKER - AUTONOMOUS MULTI-AGENT PIPELINE SERVER
 echo ========================================================================
 echo.
 echo [*] Starting AI Worker Server...
-echo [*] Workspace: D:\Thanhpk\AI\ai-worker
+set "PROJECT_ROOT=%~dp0"
+cd /d "%PROJECT_ROOT%"
+echo [*] Thư mục làm việc: %PROJECT_ROOT%
 echo.
-
-cd /d "D:\Thanhpk\AI\ai-worker"
-
 set "NODE_CMD=node"
 where node >nul 2>nul
 if %errorlevel% neq 0 (
