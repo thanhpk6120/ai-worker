@@ -1149,10 +1149,26 @@ const executeStep = async (id) => {
     }
 
     if (job.status === 'IMPLEMENT') {
+      const prevContext = fileManager.loadPreviousContext(workspacePath, taskCode);
+      const devPlanText = (prevContext && prevContext.dev_plan) || '';
+      const isReadOnlyOrVerification =
+        /không phát sinh can thiệp mã nguồn|không cần sửa.*mã nguồn|không chỉnh sửa.*mã nguồn|không can thiệp.*mã nguồn/i.test(devPlanText) ||
+        /^(kiểm tra|xác minh|test|check|ping|khảo sát)\s/i.test(job.prompt || '');
+
+      if (isReadOnlyOrVerification) {
+        jobEventBus.emitJobLog(id, {
+          text: `\n[2/4] >>> [IMPLEMENT] Phân tích Dev Plan xác nhận: Task thuộc diện Thẩm định / Vận hành / Không phát sinh can thiệp mã nguồn.\n[IMPLEMENT] Đã hoàn tất thẩm định phạm vi. Tự động chuyển tiếp trực tiếp sang bước [TESTING] để kiểm tra thực tế!\n`
+        });
+        db.updateJob(id, { status: 'TESTING', current_step: 'TESTING' });
+        jobEventBus.emitJobStatus(id, { status: 'TESTING' });
+        setTimeout(() => executeStep(id), 200);
+        return;
+      }
+
       const implementAgent = agentMapping.IMPLEMENT || 'claude-code';
       const implementPrompt = promptTemplateManager.buildPrompt({
         step: 'implement', taskCode, userPrompt: job.prompt || '', workspacePath, featureDir,
-        previousContext: fileManager.loadPreviousContext(workspacePath, taskCode)
+        previousContext: prevContext
       });
       jobEventBus.emitJobLog(id, { text: `\n[2/4] >>> [IMPLEMENT] Bắt đầu triển khai bằng Agent: ${implementAgent}...\n[IMPLEMENT] Đang viết mã nguồn theo Dev Plan...\n` });
       const impProgressTimer = setInterval(() => {
@@ -1169,8 +1185,9 @@ const executeStep = async (id) => {
           });
         } catch (execErr) {
           jobEventBus.emitJobLog(id, { text: `[IMPLEMENT] Cảnh báo thực thi: ${execErr.message}\n` });
+        } finally {
+          clearInterval(impProgressTimer);
         }
-        clearInterval(impProgressTimer);
         jobEventBus.emitJobLog(id, { text: `\n[IMPLEMENT] Hoàn tất triển khai mã nguồn.\n` });
       } else {
         clearInterval(impProgressTimer);

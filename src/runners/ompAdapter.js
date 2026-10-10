@@ -17,7 +17,7 @@ class OmpAdapter extends BaseAdapter {
    */
   buildArgs(prompt, options = {}) {
     const extraArgs = Array.isArray(options.extraArgs) ? options.extraArgs : [];
-    return ['-p', prompt, ...extraArgs];
+    return ['-p', prompt, '--auto-approve', ...extraArgs];
   }
 }
 
