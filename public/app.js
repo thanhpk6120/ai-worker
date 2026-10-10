@@ -1065,9 +1065,9 @@
       e.type === 'ui' ||
       (e.file_path && (e.file_path.endsWith('.png') || e.file_path.endsWith('.webp') || e.file_path.endsWith('.jpg')))
     );
-    const apiEvidences = state.evidences.filter((e) => e.evidence_type === 'API_TEST' || e.type === 'api');
-    const logEvidences = state.evidences.filter((e) => e.evidence_type === 'SERVICE_LOG' || e.type === 'logs');
-    const dbEvidences = state.evidences.filter((e) => e.evidence_type === 'DB_QUERY' || e.type === 'db');
+    const apiEvidences = state.evidences.filter((e) => e.evidence_type === 'API_TEST' || e.type === 'API_TEST' || e.type === 'api' || (e.file_path && e.file_path.includes('api')));
+    const logEvidences = state.evidences.filter((e) => e.evidence_type === 'SERVICE_LOG' || e.evidence_type === 'LOG_TRACE' || e.type === 'LOG_TRACE' || e.type === 'logs' || (e.file_path && (e.file_path.endsWith('.log') || e.file_path.endsWith('.txt'))));
+    const dbEvidences = state.evidences.filter((e) => e.evidence_type === 'DB_QUERY' || e.evidence_type === 'DB_ASSERT' || e.type === 'DB_QUERY' || e.type === 'DB_ASSERT' || e.type === 'db' || (e.file_path && (e.file_path.includes('db') || e.file_path.includes('assert'))));
 
     // 1. UI Screenshots
     if (uiGallery) {

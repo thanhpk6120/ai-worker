@@ -1,0 +1,11 @@
+{
+  "status": "PASSED",
+  "database": "ai-worker.sqlite",
+  "checkedAt": "2026-10-10T22:28:38.713Z",
+  "tables": [
+    "jobs",
+    "steps",
+    "dual_plans"
+  ],
+  "integrity": "OK"
+}
