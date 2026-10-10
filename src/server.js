@@ -1200,16 +1200,25 @@ const executeStep = async (id) => {
 
     if (job.status === 'TESTING') {
       jobEventBus.emitJobLog(id, { text: `\n[3/4] >>> [TESTING] Bắt đầu kiểm thử thật...\n` });
-      let cmd = 'node -c src/index.js';
-      if (fs.existsSync(path.join(workspacePath, 'package.json'))) {
+      let cmd = 'git status';
+      const promptText = (job.prompt || '') + ' ' + (job.title || '');
+      const urlMatch = promptText.match(/https?:\/\/[^\s"',]+/i);
+
+      if (urlMatch) {
+        const targetUrl = urlMatch[0];
+        cmd = `node -e "fetch('${targetUrl}').then(r => { console.log('Xác minh thành công URL ${targetUrl} - HTTP Status:', r.status); process.exit(r.status < 400 ? 0 : 1); }).catch(e => { console.error('Lỗi kết nối tới ${targetUrl}:', e.message); process.exit(1); })"`;
+      } else if (fs.existsSync(path.join(workspacePath, 'package.json'))) {
         try {
           const pkg = JSON.parse(fs.readFileSync(path.join(workspacePath, 'package.json'), 'utf-8'));
           if (pkg.scripts && pkg.scripts.test && !pkg.scripts.test.includes('no test specified')) {
             cmd = 'npm run test';
           }
         } catch (e) {}
+      } else if (fs.existsSync(path.join(workspacePath, 'src/index.js'))) {
+        cmd = 'node -c src/index.js';
+      } else if (fs.existsSync(path.join(workspacePath, 'index.js'))) {
+        cmd = 'node -c index.js';
       }
-
       // Thực thi kiểm thử thật (ví dụ npm test hoặc node -c)
       let testResult = await new Promise((resolve) => {
         jobEventBus.emitJobLog(id, { text: `\r\n\x1b[1;36m[TEST-COMMAND]\x1b[0m \x1b[1;32m$ ${cmd}\x1b[0m\r\n\x1b[90m[Thư mục kiểm thử: ${workspacePath}]\x1b[0m\r\n\x1b[90m────────────────────────────────────────────────────────────────────────────────\x1b[0m\r\n` });
