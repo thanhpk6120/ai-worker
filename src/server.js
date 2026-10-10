@@ -1059,7 +1059,7 @@ const executeStep = async (id) => {
   try {
     if (job.status === 'PLANNING') {
       const planningAgent = agentMapping.PLANNING || 'claude-code';
-      const answeredQuestions = (db.getQuestionsByJobId(id) || []).filter(q => q.status === 'ANSWERED');
+      db.updateJob(id, { runner: planningAgent });
       let clarificationContext = '';
       if (answeredQuestions.length > 0) {
         clarificationContext = '\n## CÁC YÊU CẦU ĐÃ ĐƯỢC NGƯỜI DÙNG GIẢI ĐÁP (CLARIFICATION ANSWERS):\n' +
@@ -1070,9 +1070,9 @@ const executeStep = async (id) => {
         step: 'planning', taskCode, userPrompt: (job.prompt || '') + clarificationContext, workspacePath, featureDir,
         previousContext: fileManager.loadPreviousContext(workspacePath, taskCode)
       });
-      jobEventBus.emitJobLog(id, { text: `\n[1/4] >>> [PLANNING] Kích hoạt lập kế hoạch song song (Dual Planning) với Agent: ${planningAgent}\n[PLANNING] Nạp template prompt planning.md...\n[PLANNING] Agent đang phân tích mã nguồn và thiết lập Kế hoạch (Vui lòng đợi khoảng 15-30 giây)...\n` });
+      jobEventBus.emitJobLog(id, { text: `\n[1/4] >>> 🤖 [PLANNING] Kích hoạt lập kế hoạch song song (Dual Planning) với Agent: ${planningAgent}\n[PLANNING] Nạp template prompt planning.md...\n[PLANNING] Agent đang phân tích mã nguồn và thiết lập Kế hoạch (Vui lòng đợi khoảng 15-30 giây)...\n` });
       const planProgressTimer = setInterval(() => {
-        jobEventBus.emitJobLog(id, { text: `\x1b[90m[PLANNING] Agent đang tiếp tục xử lý phân tích và tổng hợp Kế hoạch...\x1b[0m\r\n` });
+        jobEventBus.emitJobLog(id, { text: `\x1b[90m🤖 [PLANNING] Agent đang tiếp tục xử lý phân tích và tổng hợp Kế hoạch...\x1b[0m\r\n` });
       }, 12000);
       const runner = runnerRegistry.getAvailableRunner(planningAgent);
       if (runner) {
@@ -1140,9 +1140,10 @@ const executeStep = async (id) => {
 
       // Nếu không còn câu hỏi PENDING (hoặc các câu hỏi đã được giải đáp xong):
       // Tự động hoàn thành Kế hoạch và chuyển tiếp sang bước IMPLEMENT để chạy tiếp
-      db.updateJob(id, { status: 'IMPLEMENT', current_step: 'IMPLEMENT', had_pending: (answeredQuestions.length > 0 ? 1 : (job.had_pending || 0)) });
-      jobEventBus.emitJobStatus(id, { status: 'IMPLEMENT' });
-      jobEventBus.emitJobLog(id, { text: `\n[PLANNING -> IMPLEMENT] Hoàn tất Kế hoạch sau khi làm rõ. Tự động chuyển tiếp sang triển khai mã nguồn (IMPLEMENT)...\n` });
+      const implementAgent = agentMapping.IMPLEMENT || 'claude-code';
+      db.updateJob(id, { status: 'IMPLEMENT', current_step: 'IMPLEMENT', runner: implementAgent, had_pending: (answeredQuestions.length > 0 ? 1 : (job.had_pending || 0)) });
+      jobEventBus.emitJobStatus(id, { status: 'IMPLEMENT', runner: implementAgent });
+      jobEventBus.emitJobLog(id, { text: `\n[PLANNING -> IMPLEMENT] Hoàn tất Kế hoạch sau khi làm rõ. Tự động chuyển tiếp sang triển khai mã nguồn (IMPLEMENT) với 🤖 Agent: ${implementAgent}...\n` });
       setTimeout(() => executeStep(id), 100);
       return;
     }
@@ -1156,10 +1157,11 @@ const executeStep = async (id) => {
 
       if (isReadOnlyOrVerification) {
         jobEventBus.emitJobLog(id, {
-          text: `\n[2/4] >>> [IMPLEMENT] Phân tích Dev Plan xác nhận: Task thuộc diện Thẩm định / Vận hành / Không phát sinh can thiệp mã nguồn.\n[IMPLEMENT] Đã hoàn tất thẩm định phạm vi. Tự động chuyển tiếp trực tiếp sang bước [TESTING] để kiểm tra thực tế!\n`
+          text: `\n[2/4] >>> 🤖 [IMPLEMENT] Phân tích Dev Plan xác nhận: Task thuộc diện Thẩm định / Vận hành / Không phát sinh can thiệp mã nguồn.\n[IMPLEMENT] Đã hoàn tất thẩm định phạm vi. Tự động chuyển tiếp trực tiếp sang bước [TESTING] để kiểm tra thực tế!\n`
         });
-        db.updateJob(id, { status: 'TESTING', current_step: 'TESTING' });
-        jobEventBus.emitJobStatus(id, { status: 'TESTING' });
+        const testAgent = agentMapping.TESTING || 'test-runner';
+        db.updateJob(id, { status: 'TESTING', current_step: 'TESTING', runner: testAgent });
+        jobEventBus.emitJobStatus(id, { status: 'TESTING', runner: testAgent });
         setTimeout(() => executeStep(id), 200);
         return;
       }
@@ -1169,11 +1171,10 @@ const executeStep = async (id) => {
         step: 'implement', taskCode, userPrompt: job.prompt || '', workspacePath, featureDir,
         previousContext: prevContext
       });
-      jobEventBus.emitJobLog(id, { text: `\n[2/4] >>> [IMPLEMENT] Bắt đầu triển khai bằng Agent: ${implementAgent}...\n[IMPLEMENT] Đang viết mã nguồn theo Dev Plan...\n` });
+      db.updateJob(id, { runner: implementAgent });
       const impProgressTimer = setInterval(() => {
-        jobEventBus.emitJobLog(id, { text: `[IMPLEMENT] Agent đang tiếp tục viết mã nguồn...\n` });
+        jobEventBus.emitJobLog(id, { text: `🤖 [IMPLEMENT] Agent đang tiếp tục viết mã nguồn...\n` });
       }, 6000);
-
       const runner = runnerRegistry.getAvailableRunner(implementAgent);
       if (runner) {
         try {
@@ -1199,8 +1200,9 @@ const executeStep = async (id) => {
     }
 
     if (job.status === 'TESTING') {
-      jobEventBus.emitJobLog(id, { text: `\n[3/4] >>> [TESTING] Bắt đầu kiểm thử thật...\n` });
-      let cmd = 'git status';
+      const testAgent = agentMapping.TESTING || 'test-runner';
+      db.updateJob(id, { runner: testAgent });
+      jobEventBus.emitJobLog(id, { text: `\n[3/4] >>> 🤖 [TESTING] Bắt đầu kiểm thử thật với Runner/Agent: ${testAgent}...\n` });
       const promptText = (job.prompt || '') + ' ' + (job.title || '');
       const urlMatch = promptText.match(/https?:\/\/[^\s"',]+/i);
 
@@ -1233,9 +1235,10 @@ const executeStep = async (id) => {
 
       // Nếu có lỗi -> FIXING
       if (testResult.code !== 0) {
-        jobEventBus.emitJobLog(id, { text: `\n[TESTING] Kiểm thử phát hiện lỗi. Chuyển sang FIXING.\n` });
-        db.updateJob(id, { status: 'FIXING', current_step: 'FIXING', error_message: 'Kiểm thử thất bại.\n' + testResult.output.substring(0, 300) });
-        jobEventBus.emitJobStatus(id, { status: 'FIXING' });
+        const fixAgent = agentMapping.FIXING || 'omp';
+        jobEventBus.emitJobLog(id, { text: `\n[TESTING] Kiểm thử phát hiện lỗi. Chuyển sang FIXING với 🤖 Agent: ${fixAgent}.\n` });
+        db.updateJob(id, { status: 'FIXING', current_step: 'FIXING', runner: fixAgent, error_message: 'Kiểm thử thất bại.\n' + testResult.output.substring(0, 300) });
+        jobEventBus.emitJobStatus(id, { status: 'FIXING', runner: fixAgent });
         setTimeout(() => executeStep(id), 100);
         return;
       }
@@ -1301,9 +1304,10 @@ const executeStep = async (id) => {
       jobEventBus.emitJobEvidence(id, { evidence: dbEv });
       jobEventBus.emitJobLog(id, { text: `\n[TESTING] Đã lưu bằng chứng kiểm thử thật vào thư mục feature evidence!\n` });
 
-      db.updateJob(id, { status: 'DONE', current_step: 'COMPLETED', completed_at: new Date().toISOString() });
-      jobEventBus.emitJobDone(id, { status: 'DONE', message: `Task ${taskCode} đã hoàn thành kiểm thử.` });
-      jobEventBus.emitJobLog(id, { text: `\n================================================================================\n[4/4] >>> [DONE] Nhiệm vụ ${taskCode} ĐÃ HOÀN THÀNH TOÀN DIỆN VÀ NGHIỆM THU THÀNH CÔNG!\n================================================================================\n` });
+      const currentRunner = job.runner || (agentMapping.IMPLEMENT || 'claude-code');
+      db.updateJob(id, { status: 'DONE', current_step: 'COMPLETED', runner: currentRunner, completed_at: new Date().toISOString() });
+      jobEventBus.emitJobDone(id, { status: 'DONE', runner: currentRunner, message: `Task ${taskCode} đã hoàn thành kiểm thử.` });
+      jobEventBus.emitJobLog(id, { text: `\n================================================================================\n[4/4] >>> 🏆 [DONE] Nhiệm vụ ${taskCode} ĐÃ HOÀN THÀNH TOÀN DIỆN VÀ NGHIỆM THU THÀNH CÔNG!\n================================================================================\n` });
       return;
     }
 
@@ -1314,8 +1318,8 @@ const executeStep = async (id) => {
         previousContext: fileManager.loadPreviousContext(workspacePath, taskCode),
         errorLogs: job.error_message || ''
       });
-      jobEventBus.emitJobLog(id, { text: `\n[ERROR] Phát hiện sự cố. Đang sửa lỗi với Agent: ${fixingAgent}...\n` });
-
+      db.updateJob(id, { runner: fixingAgent });
+      jobEventBus.emitJobLog(id, { text: `\n[ERROR] Phát hiện sự cố. Đang sửa lỗi với 🤖 Agent: ${fixingAgent}...\n` });
       const runner = runnerRegistry.getAvailableRunner(fixingAgent);
       if (runner) {
         await runner.execute({

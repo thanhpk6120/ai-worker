@@ -607,7 +607,7 @@
         const status = (job.status || 'TO DO').toUpperCase();
         const statusClass = STATUS_CLASSES[status] || 'status-todo';
         const title = escapeHtml(job.title || job.prompt || 'Untitled Job');
-        const runner = escapeHtml(job.runner || 'claude');
+        const runner = escapeHtml(getEffectiveAgentForJob(job));
         const repo = escapeHtml(job.repo_path || './');
         const timeAgo = formatTimeAgo(job.created_at);
         const taskCodeDisplay = job.task_code
@@ -695,7 +695,9 @@
 
     const runnerBadge = document.getElementById('activeJobRunnerBadge');
     if (runnerBadge) {
-      runnerBadge.textContent = job.runner || 'claude';
+      const currentRunner = getEffectiveAgentForJob(job);
+      runnerBadge.innerHTML = `<i class="fa-solid fa-robot text-sky-400 mr-1.5"></i><span>${escapeHtml(currentRunner)}</span>`;
+      runnerBadge.title = `Agent hiện tại: ${currentRunner} (cho bước ${job.status || 'TO DO'})`;
     }
 
     const titleEl = document.getElementById('activeJobTitle');
@@ -1826,6 +1828,19 @@
       .replace(/'/g, '&#039;');
   }
 
+  function getEffectiveAgentForJob(job) {
+    if (!job) return 'claude-code';
+    const status = (job.status || '').toUpperCase();
+    const mapping = state.agentMapping || {};
+    if (status === 'PLANNING') return mapping.PLANNING || 'claude-code';
+    if (status === 'IMPLEMENT') return mapping.IMPLEMENT || 'omp';
+    if (status === 'TESTING') return mapping.TESTING || 'test-runner';
+    if (status === 'FIXING') return mapping.FIXING || 'omp';
+    if (status === 'DONE') {
+      return job.runner || mapping.IMPLEMENT || mapping.PLANNING || 'claude-code';
+    }
+    return job.runner || mapping.PLANNING || 'claude-code';
+  }
   function formatMarkdownContent(markdownText) {
     if (!markdownText) return '';
     if (window.marked && typeof window.marked.parse === 'function') {
@@ -1932,7 +1947,7 @@
         }
       }
       if (mapping) {
-        const planEl = document.getElementById('settingPlanningRunner');
+        state.agentMapping = mapping;
         const impEl = document.getElementById('settingImplementRunner');
         const testEl = document.getElementById('settingTestingRunner');
         const fixEl = document.getElementById('settingFixingRunner');
@@ -1949,7 +1964,7 @@
         if (cached) {
           const parsed = JSON.parse(cached);
           const mapping = parsed.agent_mapping || parsed;
-          const planEl = document.getElementById('settingPlanningRunner');
+          state.agentMapping = mapping;
           const impEl = document.getElementById('settingImplementRunner');
           const testEl = document.getElementById('settingTestingRunner');
           const fixEl = document.getElementById('settingFixingRunner');
