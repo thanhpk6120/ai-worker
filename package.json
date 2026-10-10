@@ -1,0 +1,28 @@
+{
+  "name": "ai-worker",
+  "version": "1.0.0",
+  "description": "> **Hệ thống Quản lý, Điều phối & Thực thi Headless AI Agent Code với Web Dashboard Trực quan, Live Terminal, Dual Planning, Trạng thái PENDING Tương Tác (Chỉ trong Planning) & Multi-Verification Evidence Gate**",
+  "main": "index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test tests/**/*.test.js",
+    "test:pipeline": "node scripts/verify-subprocess-pipeline.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thanhpk6120/ai-worker.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/thanhpk6120/ai-worker/issues"
+  },
+  "homepage": "https://github.com/thanhpk6120/ai-worker#readme",
+  "dependencies": {
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "tree-kill": "^1.2.2"
+  }
+}

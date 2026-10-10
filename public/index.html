@@ -1,0 +1,1080 @@
+<!DOCTYPE html>
+<html lang="vi" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Worker - Autonomous Multi-Agent Pipeline</title>
+
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#f0f9ff',
+              100: '#e0f2fe',
+              400: '#38bdf8',
+              500: '#0ea5e9',
+              600: '#0284c7',
+              700: '#0369a1',
+            },
+            surface: {
+              800: '#1e293b',
+              850: '#162032',
+              900: '#0f172a',
+              950: '#080d1a',
+            }
+          },
+          animation: {
+            'pulse-fast': 'pulse 1.2s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+            'glow': 'glow 2s ease-in-out infinite alternate',
+          },
+          keyframes: {
+            glow: {
+              '0%': { boxShadow: '0 0 5px rgba(56, 189, 248, 0.3)' },
+              '100%': { boxShadow: '0 0 18px rgba(56, 189, 248, 0.8)' },
+            }
+          }
+        }
+      }
+    };
+  </script>
+
+  <!-- Font Awesome Icons CDN -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+
+  <!-- xterm.js CDN -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+
+  <!-- diff2html CDN -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/diff2html/bundles/css/diff2html.min.css" />
+  <script src="https://cdn.jsdelivr.net/npm/diff2html/bundles/js/diff2html-ui.min.js"></script>
+  <!-- marked CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+  <!-- Custom CSS -->
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body class="bg-surface-950 text-slate-200 min-h-screen flex flex-col font-sans antialiased overflow-hidden selection:bg-brand-500 selection:text-white">
+
+  <!-- ==================== TOP NAVIGATION HEADER ==================== -->
+  <header class="h-16 border-b border-slate-800 bg-surface-900/90 backdrop-blur-md px-5 flex items-center justify-between shrink-0 z-30 shadow-md">
+    <!-- Brand Logo -->
+    <div class="flex items-center gap-3">
+      <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-brand-600 via-indigo-600 to-purple-600 flex items-center justify-center shadow-lg shadow-brand-500/20">
+        <i class="fa-solid fa-microchip text-white text-lg"></i>
+      </div>
+      <div>
+        <div class="flex items-center gap-2">
+          <span class="font-bold text-lg tracking-tight text-white bg-gradient-to-r from-sky-400 via-indigo-300 to-purple-400 bg-clip-text text-transparent">AI Worker</span>
+          <span class="text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-brand-500/10 text-brand-400 border border-brand-500/20">v5.0</span>
+        </div>
+        <p class="text-xs text-slate-400 hidden sm:block">Autonomous Multi-Agent Pipeline &amp; Verification Hub</p>
+      </div>
+    </div>
+
+    <!-- Center System Status Badges -->
+    <div class="hidden md:flex items-center gap-3 bg-surface-850 px-3.5 py-1.5 rounded-full border border-slate-800 text-xs">
+      <div class="flex items-center gap-2">
+        <span id="systemStatusDot" class="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
+        <span id="systemStatusText" class="font-medium text-emerald-400">Server Online</span>
+      </div>
+      <span class="text-slate-600">|</span>
+      <div class="flex items-center gap-1.5 text-slate-400">
+        <i class="fa-regular fa-clock text-slate-500"></i>
+        <span>Uptime:</span>
+        <span id="systemUptime" class="text-slate-300 font-mono">00:00:00</span>
+      </div>
+      <span class="text-slate-600">|</span>
+      <div class="flex items-center gap-1.5 text-slate-400">
+        <i class="fa-solid fa-layer-group text-slate-500"></i>
+        <span>Workers:</span>
+        <span id="activeWorkersCount" class="text-brand-400 font-mono font-semibold">0</span>
+        <span class="text-slate-500">/</span>
+        <span id="maxConcurrency" class="text-slate-400 font-mono">3</span>
+      </div>
+    </div>
+
+    <!-- Header Actions -->
+    <div class="flex items-center gap-2.5">
+      <!-- Refresh List Button -->
+      <button id="btnRefreshJobs" class="p-2 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-400 hover:text-white border border-slate-700 text-xs transition" title="Làm mới danh sách Task">
+        <i class="fa-solid fa-arrows-rotate"></i>
+      </button>
+
+      <!-- Settings Button -->
+      <!-- Workspace Management Button -->
+      <button id="btnOpenWorkspaceManagerModal" class="p-2 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-300 hover:text-white border border-slate-700 text-xs transition flex items-center gap-1.5 shadow-sm" title="Quản lý Workspace & Thư mục Features">
+        <i class="fa-solid fa-folder-tree text-amber-400"></i>
+        <span class="hidden sm:inline font-medium">Workspaces</span>
+      </button>
+
+      <button id="btnOpenSettingsModal" class="p-2 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-300 hover:text-white border border-slate-700 text-xs transition flex items-center gap-1.5 shadow-sm" title="Cài đặt Runner Pipeline">
+        <i class="fa-solid fa-gear"></i>
+        <span class="hidden sm:inline font-medium">Cài đặt</span>
+      </button>
+
+      <!-- Create Job Primary Button -->
+      <button id="btnOpenCreateModal" class="px-3.5 py-1.5 rounded-lg bg-gradient-to-r from-brand-600 via-indigo-600 to-purple-600 hover:from-brand-500 hover:to-indigo-500 text-white font-semibold text-xs shadow-lg shadow-brand-500/25 transition flex items-center gap-2 active:scale-95">
+        <i class="fa-solid fa-plus text-xs"></i>
+        <span class="hidden sm:inline">Tạo Task Mới</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- ==================== 2-COLUMN MAIN LAYOUT ==================== -->
+  <div class="flex-1 flex overflow-hidden">
+
+    <!-- ==================== LEFT SIDEBAR: JOBS LIST (~320px) ==================== -->
+    <aside class="w-80 md:w-88 shrink-0 bg-surface-900 border-r border-slate-800 flex flex-col h-full z-20">
+      <!-- Search & Status Filter -->
+      <div class="p-3 border-b border-slate-800 space-y-2 bg-surface-900/50">
+        <div class="relative">
+          <i class="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-xs"></i>
+          <input type="text" id="jobSearchInput" placeholder="Tìm Task theo ID, Tiêu đề, Repo..." class="w-full bg-surface-800 border border-slate-700/80 rounded-lg pl-8 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition">
+        </div>
+
+        <div class="flex items-center justify-between text-xs">
+          <span class="text-slate-400 text-[11px] font-medium uppercase tracking-wider">Trạng thái:</span>
+          <select id="statusFilter" name="statusFilterSelect" class="bg-surface-800 border border-slate-700/80 rounded-md px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-brand-500 cursor-pointer">
+            <option value="ALL">Tất cả (All)</option>
+            <option value="TO DO">TO DO</option>
+            <option value="PLANNING">PLANNING</option>
+            <option value="IMPLEMENT">IMPLEMENT</option>
+            <option value="TESTING">TESTING</option>
+            <option value="FIXING">FIXING</option>
+            <option value="PENDING">Chờ giải đáp / Pending</option>
+            <option value="DONE">DONE (Hoàn thành)</option>
+            <option value="FAILED">FAILED (Thất bại)</option>
+            <option value="CANCELLED">CANCELLED (Đã hủy)</option>
+            <option value="ARCHIVED">ARCHIVED (Lưu trữ)</option>
+          </select>
+          <select id="statusFilterSelect" class="hidden"></select>
+          <script>
+            (function() {
+              const sf = document.getElementById('statusFilter');
+              const sfs = document.getElementById('statusFilterSelect');
+              if (sf && sfs) {
+                sf.addEventListener('change', function() {
+                  sfs.value = sf.value;
+                  sfs.dispatchEvent(new Event('change'));
+                });
+              }
+            })();
+          </script>
+        </div>
+      </div>
+
+      <!-- Jobs List Counter Bar -->
+      <div class="px-3.5 py-1.5 bg-surface-850 border-b border-slate-800/80 flex items-center justify-between text-[11px] text-slate-400">
+        <span>Danh sách Task</span>
+        <span id="jobsCountBadge" class="font-mono bg-slate-800 px-1.5 py-0.5 rounded text-slate-300">0 jobs</span>
+      </div>
+
+      <!-- Scrollable Jobs Container -->
+      <div id="jobsListContainer" style="overflow-y: auto; max-height: calc(100vh - 175px);" class="flex-1 custom-scrollbar divide-y divide-slate-800/60 p-2 space-y-1.5 custom-scrollbar">
+        <!-- Rendered dynamically by JS -->
+        <div class="text-center py-12 text-slate-500 text-xs">
+          <i class="fa-solid fa-spinner fa-spin text-lg mb-2"></i>
+          <p>Đang tải danh sách công việc...</p>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ==================== MAIN DASHBOARD CONTAINER (RIGHT) ==================== -->
+    <main class="flex-1 flex flex-col bg-surface-950 overflow-y-auto custom-scrollbar relative">
+
+      <!-- EMPTY STATE (Khi chưa chọn Job) -->
+      <div id="emptyJobState" class="flex-1 flex flex-col items-center justify-center p-8 text-center">
+        <div class="w-20 h-20 rounded-2xl bg-surface-900 border border-slate-800 flex items-center justify-center text-slate-600 mb-4 shadow-xl">
+          <i class="fa-solid fa-robot text-3xl text-brand-400"></i>
+        </div>
+        <h3 class="text-lg font-bold text-white mb-1">Chưa chọn Task nào</h3>
+        <p class="text-xs text-slate-400 max-w-md mb-5 leading-relaxed">
+          Hãy chọn một Job từ danh sách bên trái để theo dõi tiến trình Multi-Agent Pipeline, hoặc bấm nút dưới đây để khởi tạo công việc mới.
+        </p>
+        <button id="btnEmptyCreateJob" class="px-4 py-2 rounded-lg bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold shadow-lg shadow-brand-500/25 transition flex items-center gap-2">
+          <i class="fa-solid fa-plus"></i>
+          <span>Tạo Task Mới Ngay</span>
+        </button>
+      </div>
+
+      <!-- ACTIVE JOB DETAIL CONTAINER (Khi đã chọn Job) -->
+      <!-- ACTIVE JOB DETAIL CONTAINER (Khi đã chọn Job) -->
+      <div id="activeJobContainer" class="hidden flex-1 flex flex-col p-2 md:p-3 space-y-3 w-full">
+
+        <!-- 1. JOB DETAIL HEADER & META BAR -->
+        <section class="bg-surface-900 border border-slate-800 rounded-xl p-4 shadow-lg">
+          <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+            <!-- Left: Title & Meta -->
+            <div class="space-y-1.5 flex-1 min-w-0">
+              <div class="flex flex-wrap items-center gap-2">
+                <span id="activeJobIdBadge" class="font-mono text-xs px-2 py-0.5 rounded bg-slate-800 text-brand-400 border border-slate-700">job_id</span>
+                <span id="activeJobStatusBadge" class="status-badge status-todo">TO DO</span>
+                <span id="activeJobRunnerBadge" class="text-xs px-2 py-0.5 rounded bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 font-mono">claude</span>
+                <span id="activeJobFixingBadge" class="hidden text-xs px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 font-mono animate-pulse">Fixing: 1/3</span>
+              </div>
+              <h2 id="activeJobTitle" class="text-base sm:text-lg font-bold text-white truncate">Job Title Here</h2>
+              
+              <!-- Meta Row -->
+              <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-400 pt-1">
+                <div class="flex items-center gap-1.5">
+                  <i class="fa-regular fa-folder text-slate-500"></i>
+                  <span class="text-slate-500">Repo:</span>
+                  <span id="activeJobRepo" class="text-slate-300 font-mono truncate max-w-xs">./</span>
+                </div>
+                <div class="flex items-center gap-1.5">
+                  <i class="fa-solid fa-code-branch text-slate-500"></i>
+                  <span class="text-slate-500">Branch:</span>
+                  <span id="activeJobBranch" class="text-slate-300 font-mono">main</span>
+                </div>
+                <div class="flex items-center gap-1.5">
+                  <i class="fa-regular fa-clock text-slate-500"></i>
+                  <span class="text-slate-500">Tạo:</span>
+                  <span id="activeJobCreatedAt" class="text-slate-300">--</span>
+                </div>
+                <div class="flex items-center gap-1.5">
+                  <i class="fa-solid fa-stopwatch text-slate-500"></i>
+                  <span class="text-slate-500">Thời lượng:</span>
+                  <span id="activeJobDuration" class="text-slate-300 font-mono font-medium">0s</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Right: Action Buttons -->
+            <div class="flex flex-wrap items-center gap-2 shrink-0">
+              <!-- Cụm Sửa Trạng Thái Task -->
+              <div class="flex items-center gap-1.5 bg-surface-800 border border-slate-700 rounded-lg px-2 py-1">
+                <label for="taskStatusSelect" class="text-[11px] text-slate-400">Status:</label>
+                <select id="taskStatusSelect" class="bg-surface-700 border border-slate-600 rounded px-1.5 py-0.5 text-xs text-slate-200 focus:outline-none focus:border-brand-500 cursor-pointer">
+                  <option value="TO DO">TO DO</option>
+                  <option value="PLANNING">PLANNING</option>
+                  <option value="IMPLEMENT">IMPLEMENT</option>
+                  <option value="TESTING">TESTING</option>
+                  <option value="FIXING">FIXING</option>
+                  <option value="PENDING">PENDING</option>
+                  <option value="DONE">DONE</option>
+                  <option value="FAILED">FAILED</option>
+                  <option value="CANCELLED">CANCELLED</option>
+                </select>
+                <button id="btnUpdateStatus" class="px-2 py-0.5 rounded bg-brand-600 hover:bg-brand-500 text-white text-[11px] font-semibold transition flex items-center gap-1 shadow" title="Lưu Status">
+                  <i class="fa-solid fa-floppy-disk"></i>
+                  <span>Lưu</span>
+                </button>
+              </div>
+
+              <!-- Nút Sửa Task (Chỉnh sửa thông tin Task) -->
+              <button id="btnEditTask" class="px-3 py-1.5 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 text-xs font-semibold transition flex items-center gap-1.5" title="Chỉnh sửa thông tin Task">
+                <i class="fa-solid fa-pen-to-square"></i>
+                <span>Sửa Task</span>
+              </button>
+    <button id="btnDeleteTask" class="px-3 py-1.5 rounded-lg bg-rose-600/10 hover:bg-rose-600/20 text-rose-400 hover:text-rose-300 border border-rose-600/30 text-xs font-semibold transition flex items-center gap-1.5" title="Xóa Task">
+                <i class="fa-solid fa-trash-can"></i>
+                <span>Xóa Task</span>
+              </button>
+
+              <!-- Nút Kích hoạt Task (Chỉ sáng khi Task ở TO DO) -->
+              <button id="btnStartTask" class="px-4 py-1.5 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-bold shadow-lg shadow-emerald-500/20 transition flex items-center gap-1.5 active:scale-95 disabled:opacity-40 disabled:pointer-events-none">
+                <i class="fa-solid fa-play"></i>
+                <span>Chạy Pipeline</span>
+              </button>
+
+              <!-- Nút Hủy Task (Sáng khi task đang chạy) -->
+              <button id="btnCancelTask" class="px-3 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 text-xs font-medium transition flex items-center gap-1.5 disabled:opacity-40 disabled:pointer-events-none">
+                <i class="fa-solid fa-ban"></i>
+                <span>Hủy bỏ</span>
+              </button>
+
+              <!-- Nút Refresh thủ công -->
+              <button id="btnRefreshActiveJob" class="p-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-400 hover:text-white border border-slate-700 text-xs transition" title="Làm mới trạng thái">
+                <i class="fa-solid fa-arrows-rotate"></i>
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <!-- PENDING ALERT BANNER (HUMAN-IN-THE-LOOP & DUAL PLAN APPROVAL) -->
+        <div id="pendingAlertBanner" class="hidden p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg animate-in fade-in duration-200">
+          <div class="flex items-start gap-3">
+            <div class="w-8 h-8 rounded-lg bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0 border border-amber-500/40">
+              <i class="fa-solid fa-circle-question text-base"></i>
+            </div>
+            <div>
+              <div class="font-bold text-xs sm:text-sm text-amber-300">Task đang ở trạng thái PENDING (Chờ duyệt kế hoạch / Trả lời câu hỏi)</div>
+              <p id="pendingAlertText" class="text-xs text-amber-200/80 mt-0.5">Agent đã hoàn thành bước lập kế hoạch và đang chờ bạn xem xét duyệt kế hoạch để chuyển sang IMPLEMENT hoặc trả lời câu hỏi làm rõ.</p>
+            </div>
+          </div>
+          <div class="flex items-center gap-2 shrink-0">
+            <button id="btnOpenPendingQuestion" class="px-3.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-semibold text-xs shadow transition flex items-center gap-1.5">
+              <i class="fa-solid fa-comment-dots"></i>
+              <span>Trả lời câu hỏi</span>
+            </button>
+            <button id="btnApproveDualPlan" class="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-lg shadow-emerald-500/20 transition flex items-center gap-1.5 active:scale-95">
+              <i class="fa-solid fa-check-double"></i>
+              <span>Duyệt kế hoạch & Chạy IMPLEMENT</span>
+            </button>
+          </div>
+        </div>
+        <!-- 2. PIPELINE STEPPER BAR COMPONENT -->
+        <section class="bg-surface-900 border border-slate-800 rounded-xl p-4 shadow-md">
+          <div class="flex items-center justify-between mb-3">
+            <h4 class="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
+              <i class="fa-solid fa-diagram-project text-brand-400"></i>
+              <span>Pipeline Execution Lifecycle</span>
+            </h4>
+            <div id="stepperStatusSummary" class="text-xs text-slate-400 font-mono">
+              Bước: <span id="currentStepName" class="text-brand-400 font-semibold">PLANNING</span>
+            </div>
+          </div>
+
+          <!-- Visual Stepper Progress Track -->
+          <div class="relative py-2 px-1" id="stepperProgressTrackWrapper">
+            <!-- SVG Canvas vẽ đường nối xuyên tâm và đường vòm khi bypass -->
+            <svg id="stepperSvgOverlay" class="absolute top-0 left-0 w-full h-full pointer-events-none z-0 overflow-visible"></svg>
+
+            <!-- Stepper Nodes Container (7 Nodes) -->
+            <div class="flex items-center justify-between relative z-10 w-full" id="stepperNodesContainer">
+              <!-- 1. TO DO -->
+              <div class="stepper-item" data-step="TO DO" id="stepNode_TODO">
+                <div class="stepper-circle"><i class="fa-regular fa-circle text-xs"></i></div>
+                <div class="stepper-label">1. TO DO</div>
+                <div class="stepper-sublabel">Khởi tạo</div>
+              </div>
+
+              <!-- 2. PLANNING -->
+              <div class="stepper-item" data-step="PLANNING" id="stepNode_PLANNING">
+                <div class="stepper-circle"><i class="fa-solid fa-brain text-xs"></i></div>
+                <div class="stepper-label">2. PLANNING</div>
+                <div class="stepper-sublabel">Lập Dual Plan</div>
+              </div>
+
+              <!-- 2.1 PENDING (Làm rõ Q&A) -->
+              <div class="stepper-item untouched" data-step="PENDING" id="stepNode_PENDING">
+                <div class="stepper-circle"><i class="fa-solid fa-circle-question text-xs"></i></div>
+                <div class="stepper-label">PENDING</div>
+                <div class="stepper-sublabel">Làm rõ Q&A</div>
+              </div>
+
+              <!-- 3. IMPLEMENT -->
+              <div class="stepper-item" data-step="IMPLEMENT" id="stepNode_IMPLEMENT">
+                <div class="stepper-circle"><i class="fa-solid fa-code text-xs"></i></div>
+                <div class="stepper-label">3. IMPLEMENT</div>
+                <div class="stepper-sublabel">Viết mã nguồn</div>
+              </div>
+
+              <!-- 4. TESTING -->
+              <div class="stepper-item" data-step="TESTING" id="stepNode_TESTING">
+                <div class="stepper-circle"><i class="fa-solid fa-flask-vial text-xs"></i></div>
+                <div class="stepper-label">4. TESTING</div>
+                <div class="stepper-sublabel">Thẩm định 4 kênh</div>
+              </div>
+
+              <!-- 5. FIXING -->
+              <div class="stepper-item untouched" data-step="FIXING" id="stepNode_FIXING">
+                <div class="stepper-circle"><i class="fa-solid fa-wrench text-xs"></i></div>
+                <div class="stepper-label">5. FIXING</div>
+                <div class="stepper-sublabel">Sửa lỗi lặp</div>
+              </div>
+
+              <!-- 6. DONE -->
+              <div class="stepper-item" data-step="DONE" id="stepNode_DONE">
+                <div class="stepper-circle"><i class="fa-solid fa-check text-xs"></i></div>
+                <div class="stepper-label">6. DONE</div>
+                <div class="stepper-sublabel">Hoàn thành</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 3. MAIN WORKSPACE SPLIT (DUAL PLANNING / TERMINAL & VERIFICATION) -->
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-4">
+
+          <!-- LEFT COLUMN (7 Cols): Dual Plan Tabs & Live Terminal -->
+          <div class="lg:col-span-7 flex flex-col space-y-4">
+
+            <!-- Card: Dual Plan & Terminal Container -->
+            <div class="bg-surface-900 border border-slate-800 rounded-xl overflow-hidden shadow-md flex flex-col h-[560px]">
+              <!-- Tabs Navigation Header -->
+              <div class="flex items-center justify-between bg-surface-850 border-b border-slate-800 px-3 py-2">
+                <div class="flex items-center gap-1">
+                  <button id="tabBtnTerminal" class="tab-btn active" data-tab="terminal">
+                    <i class="fa-solid fa-terminal mr-1.5"></i>
+                    <span>Live Terminal</span>
+                    <span id="termPulseDot" class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse ml-1 inline-block"></span>
+                  </button>
+                  <button id="tabDevPlanBtn" class="tab-btn" data-tab="dev-plan">
+                    <i class="fa-solid fa-file-code mr-1.5"></i>
+                    <span>Dev Plan</span>
+                  </button>
+                  <button id="tabTestPlanBtn" class="tab-btn" data-tab="test-plan">
+                    <i class="fa-solid fa-clipboard-check mr-1.5"></i>
+                    <span>Test Plan</span>
+                  </button>
+                  <!-- Legacy tab IDs for backward compatibility -->
+                  <span id="tabBtnDevPlan" class="hidden"></span>
+                  <span id="tabBtnTestPlan" class="hidden"></span>
+                </div>
+
+                <!-- Terminal Specific Toolbar Controls -->
+                <div id="terminalToolbar" class="flex items-center gap-1.5">
+                  <button id="btnToggleAutoScroll" class="px-2 py-1 rounded text-[11px] bg-surface-800 text-emerald-400 border border-slate-700 hover:bg-surface-750 transition" title="Bật/Tắt tự động cuộn theo log">
+                    <i class="fa-solid fa-arrow-down-long mr-1"></i> Auto-scroll: <span id="autoScrollState">ON</span>
+                  </button>
+                  <button id="btnClearTerminal" class="p-1 px-2 rounded text-[11px] bg-surface-800 text-slate-400 hover:text-white border border-slate-700 transition" title="Xóa màn hình Terminal">
+                    <i class="fa-solid fa-trash-can"></i>
+                  </button>
+                  <button id="btnCopyTerminalLog" class="p-1 px-2 rounded text-[11px] bg-surface-800 text-slate-400 hover:text-white border border-slate-700 transition" title="Sao chép toàn bộ logs">
+                    <i class="fa-regular fa-copy"></i>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Tab Contents -->
+              <div class="flex-1 relative overflow-hidden bg-surface-950">
+                <!-- 1. Live Terminal View (xterm.js) -->
+                <div id="terminalTabContent" class="tab-content active h-full w-full p-2">
+                  <div id="xtermContainer" class="h-full w-full rounded-lg overflow-hidden bg-[#0a0f1d]"></div>
+                </div>
+
+                <!-- 2. Dev Plan View (Markdown Preview) -->
+                <div id="devPlanTabContent" class="tab-content hidden h-full w-full overflow-y-auto p-4 custom-scrollbar">
+                  <div id="devPlanMarkdownContainer" class="markdown-body text-xs text-slate-300 space-y-3">
+                    <div id="devPlanContent">
+                      <div class="text-center py-12 text-slate-500">
+                        <i class="fa-solid fa-file-circle-question text-3xl mb-2 text-slate-600"></i>
+                        <p>Chưa có Dev Plan cho Task này.</p>
+                        <p class="text-[11px] text-slate-600">Dev Plan sẽ được sinh ra ở bước PLANNING.</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 3. Test Plan View (Markdown Preview) -->
+                <div id="testPlanTabContent" class="tab-content hidden h-full w-full overflow-y-auto p-4 custom-scrollbar">
+                  <div id="testPlanMarkdownContainer" class="markdown-body text-xs text-slate-300 space-y-3">
+                    <div id="testPlanContent">
+                      <div class="text-center py-12 text-slate-500">
+                        <i class="fa-solid fa-vial-circle-check text-3xl mb-2 text-slate-600"></i>
+                        <p>Chưa có Test Plan cho Task này.</p>
+                        <p class="text-[11px] text-slate-600">Test Plan mô tả kịch bản CloakBrowser, mock data, API checkpoints.</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+          </div>
+
+          <!-- RIGHT COLUMN (5 Cols): Multi-Verification Evidence Hub -->
+          <div class="lg:col-span-5 flex flex-col space-y-4">
+
+            <!-- Card: Multi-Verification Hub -->
+            <div class="bg-surface-900 border border-slate-800 rounded-xl overflow-hidden shadow-md flex flex-col h-[560px]">
+              <!-- Verification Header & Sub-Tabs -->
+              <div class="bg-surface-850 border-b border-slate-800 p-2.5">
+                <div class="flex items-center justify-between mb-2">
+                  <h4 class="text-xs font-bold text-white flex items-center gap-1.5">
+                    <i class="fa-solid fa-shield-halved text-brand-400"></i>
+                    <span>Multi-Verification Evidence Hub</span>
+                  </h4>
+                  <span id="evidenceCountBadge" class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-surface-800 text-slate-400 border border-slate-700">0 mục</span>
+                </div>
+
+                <!-- 4 Sub-Tabs for Evidence -->
+                <div class="grid grid-cols-4 gap-1 text-[11px]">
+                  <button class="evidence-tab-btn active" data-subtab="ui">
+                    <i class="fa-regular fa-image"></i>
+                    <span>UI Screens</span>
+                  </button>
+                  <button class="evidence-tab-btn" data-subtab="api">
+                    <i class="fa-solid fa-network-wired"></i>
+                    <span>API Test</span>
+                  </button>
+                  <button class="evidence-tab-btn" data-subtab="logs">
+                    <i class="fa-regular fa-file-lines"></i>
+                    <span>Logs</span>
+                  </button>
+                  <button class="evidence-tab-btn" data-subtab="db">
+                    <i class="fa-solid fa-database"></i>
+                    <span>DB Assert</span>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Evidence Sub-Tab Contents Container -->
+              <div class="flex-1 overflow-y-auto p-3 custom-scrollbar bg-surface-950/60">
+
+                <!-- 1. UI EVIDENCE SUB-TAB (Screenshots Gallery) -->
+                <div id="subtabUiEvidence" class="evidence-pane active">
+                  <div id="uiEvidenceGallery" class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <!-- Dynamic screenshots from CloakBrowser -->
+                    <div class="col-span-2 text-center py-12 text-slate-500 text-xs">
+                      <i class="fa-regular fa-images text-2xl mb-2 text-slate-600"></i>
+                      <p>Chưa có ảnh chụp màn hình kiểm thử UI.</p>
+                      <p class="text-[11px] text-slate-600">Ảnh chụp CloakBrowser sẽ xuất hiện tại bước TESTING.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 2. API TEST SUB-TAB (HTTP assertions) -->
+                <div id="subtabApiEvidence" class="evidence-pane hidden space-y-2">
+                  <div id="apiEvidenceList" class="space-y-2">
+                    <!-- Dynamic API results table -->
+                    <div class="text-center py-12 text-slate-500 text-xs">
+                      <i class="fa-solid fa-server text-2xl mb-2 text-slate-600"></i>
+                      <p>Chưa có kết quả API Test.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 3. SERVICE LOGS SUB-TAB (Log sniffer) -->
+                <div id="subtabLogsEvidence" class="evidence-pane hidden space-y-2">
+                  <div id="logsEvidenceList" class="space-y-2">
+                    <div class="text-center py-12 text-slate-500 text-xs">
+                      <i class="fa-solid fa-shield-virus text-2xl mb-2 text-slate-600"></i>
+                      <p>Chưa phát hiện lỗi Service Runtime.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 4. DATABASE QUERY RESULTS SUB-TAB -->
+                <div id="subtabDbEvidence" class="evidence-pane hidden space-y-2">
+                  <div id="dbEvidenceList" class="space-y-2">
+                    <div class="text-center py-12 text-slate-500 text-xs">
+                      <i class="fa-solid fa-table-list text-2xl mb-2 text-slate-600"></i>
+                      <p>Chưa có dữ liệu đối soát Database.</p>
+                    </div>
+                  </div>
+                </div>
+
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+      </div>
+
+    </main>
+  </div>
+
+  <!-- ==================== MODAL 1: INTERACTIVE QUESTION (HUMAN-IN-THE-LOOP) ==================== -->
+  <div id="questionModal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm hidden">
+    <div class="bg-surface-900 border border-amber-500/40 rounded-2xl max-w-lg w-full p-5 shadow-2xl shadow-amber-500/10 flex flex-col space-y-4 animate-in fade-in zoom-in-95 duration-150">
+      
+      <!-- Modal Header -->
+      <div class="flex items-start justify-between gap-3 border-b border-slate-800 pb-3">
+        <div class="flex items-center gap-2.5">
+          <div class="w-9 h-9 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center border border-amber-500/30">
+            <i class="fa-solid fa-circle-question text-base"></i>
+          </div>
+          <div>
+            <h3 class="text-sm font-bold text-white">Yêu cầu Làm rõ Kế hoạch (Clarification)</h3>
+            <p class="text-[11px] text-amber-300/80">Agent đang chờ phản hồi từ bạn tại bước PLANNING</p>
+          </div>
+        </div>
+        <button id="btnCloseQuestionModal" class="text-slate-400 hover:text-white p-1 rounded transition">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+
+      <!-- Question Body -->
+      <div id="questionListContainer" class="space-y-4 max-h-[60vh] overflow-y-auto custom-scrollbar p-1">
+        <!-- Dynamic questions injected by JS -->
+      </div>
+      <!-- Modal Footer -->
+      <div class="flex items-center justify-end gap-2.5 border-t border-slate-800 pt-3">
+        <button id="btnDismissQuestion" class="px-3 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-300 text-xs font-medium transition">
+          Bỏ qua lúc này
+        </button>
+        <button id="btnAnswerQuestion" class="px-4 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs shadow-lg shadow-amber-500/20 transition flex items-center gap-1.5 active:scale-95">
+          <i class="fa-solid fa-paper-plane"></i>
+          <span>Gửi Trả Lời &amp; Tiếp Tục Chạy</span>
+        </button>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ==================== MODAL 2: CREATE NEW JOB MODAL ==================== -->
+  <div id="createJobModal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm hidden">
+    <div class="bg-surface-900 border border-slate-800 rounded-2xl max-w-2xl w-full p-5 shadow-2xl flex flex-col max-h-[90vh] overflow-y-auto custom-scrollbar">
+      
+      <!-- Header -->
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3 mb-4">
+        <div class="flex items-center gap-2.5">
+          <div class="w-8 h-8 rounded-lg bg-brand-500/20 text-brand-400 flex items-center justify-center border border-brand-500/30">
+            <i class="fa-solid fa-plus text-sm"></i>
+          </div>
+          <div>
+            <h3 class="text-sm font-bold text-white">Khởi tạo Task Mới (Create AI Worker Task)</h3>
+            <p class="text-xs text-slate-400">Cấu hình Multi-Agent Pipeline &amp; Tham số thực thi</p>
+          </div>
+        </div>
+        <button id="btnCloseCreateModal" class="text-slate-400 hover:text-white p-1 rounded transition">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+
+      <!-- Form Body -->
+      <form id="createJobForm" class="space-y-4">
+        <!-- Alert báo lỗi tạo folder/task nếu có -->
+        <div id="createJobErrorAlert" class="hidden p-3 bg-rose-500/10 border border-rose-500/30 rounded-lg text-xs text-rose-300 leading-relaxed"></div>
+        <div class="space-y-1">
+          <label class="block text-xs font-semibold text-slate-300">Mã Task <span class="text-rose-400">*</span></label>
+          <input type="text" id="createTaskCode" required placeholder="Ví dụ: TASK-101, AUTH-01..." class="w-full bg-surface-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition">
+        </div>
+
+        <!-- Title & Prompt -->
+        <div class="space-y-1">
+          <label class="block text-xs font-semibold text-slate-300">Yêu cầu / Prompt thực thi <span class="text-rose-400">*</span></label>
+          <textarea id="createJobPrompt" rows="3" required placeholder="Mô tả cụ thể tính năng, bug fix hoặc kịch bản cần thực hiện..." class="w-full bg-surface-800 border border-slate-700 rounded-lg p-2.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition resize-none"></textarea>
+        </div>
+
+        <!-- Workspace Selection & Git Base Branch -->
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div class="sm:col-span-2 space-y-1">
+            <div class="flex items-center justify-between">
+              <label class="block text-xs font-semibold text-slate-300">Workspace <span class="text-rose-400">*</span></label>
+              <button type="button" id="btnOpenNewWorkspaceModal" class="text-[11px] text-brand-400 hover:text-brand-300 font-medium flex items-center gap-1 transition">
+                <i class="fa-solid fa-plus text-[10px]"></i> Thêm Workspace
+              </button>
+            </div>
+            <select id="createTaskWorkspace" required class="w-full bg-surface-800 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-brand-500 transition cursor-pointer">
+              <option value="" disabled selected>-- Chọn Workspace --</option>
+            </select>
+            <!-- Feature Path Preview -->
+            <div id="featurePathPreview" class="hidden mt-1.5 p-2 bg-surface-900 border border-brand-500/20 rounded-md text-[10px] text-slate-400 font-mono break-all leading-tight">
+              Thư mục lưu: <span class="text-brand-300">...</span>
+            </div>
+            <!-- Legacy hidden input -->
+            <input type="hidden" id="createJobRepo" value="./">
+          </div>
+          <div class="space-y-1">
+            <label class="block text-xs font-semibold text-slate-300">Git Base Branch</label>
+            <input type="text" id="createJobBranch" value="main" placeholder="main" class="w-full bg-surface-800 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 font-mono placeholder-slate-500 focus:outline-none focus:border-brand-500 transition">
+          </div>
+        </div>
+
+
+        <!-- Timeout & Retry Limits -->
+        <div class="grid grid-cols-2 gap-3">
+          <div class="space-y-1">
+            <label class="block text-xs font-semibold text-slate-300">Timeout (phút)</label>
+            <input type="number" id="createJobTimeout" min="1" max="120" value="15" class="w-full bg-surface-800 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-brand-500">
+          </div>
+          <div class="space-y-1">
+            <label class="block text-xs font-semibold text-slate-300">Max Fixing Retries</label>
+            <input type="number" id="createJobMaxRetries" min="0" max="10" value="3" class="w-full bg-surface-800 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-brand-500">
+          </div>
+        </div>
+
+        <!-- Footer Actions -->
+        <div class="flex items-center justify-end gap-2 pt-3 border-t border-slate-800">
+          <button type="button" id="btnCancelCreateModal" class="px-3.5 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-300 text-xs font-medium transition">
+            Hủy bỏ
+          </button>
+          <button type="submit" id="btnSubmitCreateJob" class="px-4 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white font-semibold text-xs shadow-lg shadow-brand-500/20 transition flex items-center gap-1.5 active:scale-95">
+            <i class="fa-solid fa-rocket"></i>
+            <span>Tạo Task</span>
+          </button>
+        </div>
+      </form>
+
+    </div>
+  </div>
+
+  <!-- ==================== MODAL 3: LIGHTBOX PREVIEW MODAL ==================== -->
+  <div id="lightboxModal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/90 backdrop-blur-md hidden">
+    <div class="relative max-w-5xl w-full max-h-[90vh] flex flex-col items-center">
+      <button id="btnCloseLightbox" class="absolute -top-10 right-0 text-slate-300 hover:text-white text-lg p-1 transition">
+        <i class="fa-solid fa-xmark"></i> Đóng
+      </button>
+      <img id="lightboxImage" src="" alt="Screenshot" class="max-w-full max-h-[80vh] rounded-lg border border-slate-700 shadow-2xl object-contain">
+      <div id="lightboxCaption" class="mt-2 text-xs text-slate-300 text-center font-mono bg-surface-900/90 px-3 py-1 rounded border border-slate-800">
+        Caption here
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== MODAL 4: RAW JSON MODAL ==================== -->
+  <div id="rawJsonModal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm hidden">
+    <div class="bg-surface-900 border border-slate-800 rounded-2xl max-w-3xl w-full p-5 shadow-2xl flex flex-col max-h-[85vh]">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3 mb-3">
+        <h3 class="text-sm font-bold text-white flex items-center gap-2">
+          <i class="fa-solid fa-code text-brand-400"></i>
+          <span>Raw Job JSON Data</span>
+        </h3>
+        <div class="flex items-center gap-2">
+          <button id="btnCopyRawJson" class="px-2.5 py-1 rounded bg-surface-800 text-slate-300 hover:text-white border border-slate-700 text-xs transition">
+            <i class="fa-regular fa-copy mr-1"></i> Copy JSON
+          </button>
+          <button id="btnCloseRawJson" class="text-slate-400 hover:text-white p-1 rounded transition">
+            <i class="fa-solid fa-xmark"></i>
+          </button>
+        </div>
+      </div>
+      <pre id="rawJsonContent" class="flex-1 overflow-y-auto p-3 rounded-lg bg-surface-950 text-xs font-mono text-emerald-400 border border-slate-800/80 custom-scrollbar select-text"></pre>
+    </div>
+  </div>
+
+  <!-- ==================== MODAL 5: PIPELINE RUNNER SETTINGS MODAL ==================== -->
+  <div id="settingsModal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm hidden">
+    <div class="bg-surface-900 border border-slate-800 rounded-2xl max-w-lg w-full p-5 shadow-2xl flex flex-col space-y-4 animate-in fade-in zoom-in-95 duration-150">
+      <!-- Header -->
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <div class="flex items-center gap-2.5">
+          <div class="w-8 h-8 rounded-lg bg-indigo-500/20 text-indigo-400 flex items-center justify-center border border-indigo-500/30">
+            <i class="fa-solid fa-gear text-sm"></i>
+          </div>
+          <div>
+            <h3 class="text-sm font-bold text-white">Cài Đặt Runner Theo Bước Pipeline</h3>
+            <p class="text-[11px] text-slate-400">Chỉ định CLI Runner mặc định cho từng bước trong chu trình</p>
+          </div>
+        </div>
+        <button id="btnCloseSettingsModal" class="text-slate-400 hover:text-white p-1 rounded transition">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+
+      <!-- Body: 4 Step Runners -->
+      <div class="space-y-3 py-1">
+        <!-- Planning -->
+        <div class="flex items-center justify-between gap-4 p-2.5 rounded-lg bg-surface-850 border border-slate-800/80">
+          <div class="min-w-0">
+            <div class="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+              <i class="fa-solid fa-lightbulb text-amber-400 text-[11px]"></i>
+              <span>1. Planning (Lập Kế Hoạch)</span>
+            </div>
+            <p class="text-[11px] text-slate-500">Phân tích yêu cầu, sinh dev_plan &amp; test_plan</p>
+          </div>
+          <select id="settingPlanningRunner" class="bg-surface-800 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-brand-500 cursor-pointer">
+            <option value="claude-code" selected>claude-code</option>
+            <option value="opencode">opencode</option>
+            <option value="omp">omp</option>
+            <option value="codex-cli">codex-cli</option>
+            <option value="antigravity-cli">antigravity-cli</option>
+          </select>
+        </div>
+
+        <!-- Implement -->
+        <div class="flex items-center justify-between gap-4 p-2.5 rounded-lg bg-surface-850 border border-slate-800/80">
+          <div class="min-w-0">
+            <div class="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+              <i class="fa-solid fa-code text-sky-400 text-[11px]"></i>
+              <span>2. Implement (Viết Code)</span>
+            </div>
+            <p class="text-[11px] text-slate-500">Thực thi thay đổi mã nguồn theo dev_plan</p>
+          </div>
+          <select id="settingImplementRunner" class="bg-surface-800 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-brand-500 cursor-pointer">
+            <option value="claude-code" selected>claude-code</option>
+            <option value="opencode">opencode</option>
+            <option value="omp">omp</option>
+            <option value="codex-cli">codex-cli</option>
+            <option value="antigravity-cli">antigravity-cli</option>
+          </select>
+        </div>
+
+        <!-- Testing -->
+        <div class="flex items-center justify-between gap-4 p-2.5 rounded-lg bg-surface-850 border border-slate-800/80">
+          <div class="min-w-0">
+            <div class="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+              <i class="fa-solid fa-vial-circle-check text-emerald-400 text-[11px]"></i>
+              <span>3. Testing (Kiểm Thử &amp; Bằng Chứng)</span>
+            </div>
+            <p class="text-[11px] text-slate-500">Chạy testcase, browser Cloak, chụp screenshot</p>
+          </div>
+          <select id="settingTestingRunner" class="bg-surface-800 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-brand-500 cursor-pointer">
+            <option value="claude-code" selected>claude-code</option>
+            <option value="opencode">opencode</option>
+            <option value="omp">omp</option>
+            <option value="codex-cli">codex-cli</option>
+            <option value="antigravity-cli">antigravity-cli</option>
+          </select>
+        </div>
+
+        <!-- Fixing -->
+        <div class="flex items-center justify-between gap-4 p-2.5 rounded-lg bg-surface-850 border border-slate-800/80">
+          <div class="min-w-0">
+            <div class="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+              <i class="fa-solid fa-wrench text-rose-400 text-[11px]"></i>
+              <span>4. Fixing (Sửa Lỗi Tự Động)</span>
+            </div>
+            <p class="text-[11px] text-slate-500">Fix lỗi khi có failure và lặp lại verification</p>
+          </div>
+          <select id="settingFixingRunner" class="bg-surface-800 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-brand-500 cursor-pointer">
+            <option value="claude-code" selected>claude-code</option>
+            <option value="opencode">opencode</option>
+            <option value="omp">omp</option>
+            <option value="codex-cli">codex-cli</option>
+            <option value="antigravity-cli">antigravity-cli</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Footer Actions -->
+      <div class="flex items-center justify-end gap-2 pt-3 border-t border-slate-800">
+        <button type="button" id="btnCancelSettingsModal" class="px-3.5 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-300 text-xs font-medium transition">
+          Hủy bỏ
+        </button>
+        <button type="button" id="btnSaveSettings" class="px-4 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white font-semibold text-xs shadow-lg shadow-brand-500/20 transition flex items-center gap-1.5 active:scale-95">
+          <i class="fa-solid fa-check"></i>
+          <span>Lưu Cài Đặt</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== MODAL 6: WORKSPACE MANAGEMENT MODAL ==================== -->
+  <div id="workspaceModal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm hidden">
+    <div class="bg-surface-900 border border-slate-800 rounded-2xl max-w-lg w-full p-5 shadow-2xl flex flex-col space-y-4 animate-in fade-in zoom-in-95 duration-150">
+      <!-- Header -->
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <div class="flex items-center gap-2.5">
+          <div class="w-8 h-8 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center border border-emerald-500/30">
+            <i class="fa-solid fa-folder-plus text-sm"></i>
+          </div>
+          <div>
+            <h3 class="text-sm font-bold text-white">Quản Lý Workspace</h3>
+            <p class="text-[11px] text-slate-400">Thêm thư mục dự án làm không gian làm việc</p>
+          </div>
+        </div>
+        <button id="btnCloseWorkspaceModal" class="text-slate-400 hover:text-white p-1 rounded transition">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+
+      <!-- Form Fields -->
+      <div class="space-y-3 py-1">
+        <div class="space-y-1">
+          <label class="block text-xs font-semibold text-slate-300">Tên Workspace <span class="text-rose-400">*</span></label>
+          <input type="text" id="workspaceNameInput" placeholder="Ví dụ: Backend Service, Frontend App..." class="w-full bg-surface-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-brand-500 transition">
+        </div>
+
+        <div class="space-y-1">
+          <label class="block text-xs font-semibold text-slate-300">Đường dẫn thư mục (Folder Path) <span class="text-rose-400">*</span></label>
+          <input type="text" id="workspacePathInput" placeholder="Ví dụ: D:/Thanhpk/AI/my-repo hoặc ./" class="w-full bg-surface-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 font-mono placeholder-slate-500 focus:outline-none focus:border-brand-500 transition">
+        </div>
+
+        <!-- Browse Folder Hierarchy -->
+        <div class="space-y-1.5">
+          <label class="block text-[11px] font-semibold text-slate-400 flex items-center justify-between">
+            <span>Duyệt thư mục trực quan:</span>
+            <span class="text-[10px] text-slate-500 font-normal">Click để chọn</span>
+          </label>
+          <div id="workspaceBrowseList" class="bg-surface-800 border border-slate-700 rounded-lg p-2 max-h-40 overflow-y-auto custom-scrollbar space-y-1 text-xs">
+            <div class="text-slate-500 text-center py-3 text-[11px]">
+              <i class="fa-regular fa-folder-open mb-1"></i>
+              <p>Nhập đường dẫn để duyệt danh sách thư mục con...</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Footer Actions -->
+      <div class="flex items-center justify-end gap-2 pt-3 border-t border-slate-800">
+        <button type="button" id="btnCancelWorkspaceModal" class="px-3.5 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-300 text-xs font-medium transition">
+          Hủy bỏ
+        </button>
+        <button type="button" id="btnSubmitWorkspace" class="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs shadow-lg shadow-emerald-500/20 transition flex items-center gap-1.5 active:scale-95">
+          <i class="fa-solid fa-plus"></i>
+          <span>Tạo Workspace</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== MODAL CHỈNH SỬA TASK (KHI Ở TO DO) ==================== -->
+  <div id="editTaskModal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm hidden">
+    <div class="bg-surface-900 border border-slate-800 rounded-xl max-w-lg w-full p-5 shadow-2xl space-y-4">
+      <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+        <h3 class="text-sm font-bold text-white flex items-center gap-2">
+          <i class="fa-solid fa-pen-to-square text-indigo-400"></i>
+          <span>Chỉnh sửa thông tin Task</span>
+        </h3>
+        <button id="btnCloseEditModal" class="text-slate-400 hover:text-white transition"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <form id="editTaskForm" class="space-y-3">
+        <!-- Alert báo lỗi sửa task/folder nếu có -->
+        <div id="editTaskErrorAlert" class="hidden p-3 bg-rose-500/10 border border-rose-500/30 rounded-lg text-xs text-rose-300 leading-relaxed"></div>
+        <div>
+          <label class="block text-xs font-semibold text-slate-300 mb-1">Mã Task <span class="text-rose-400">*</span></label>
+          <input type="text" id="editTaskCode" required class="w-full bg-surface-800 border border-slate-700 rounded-lg p-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-slate-300 mb-1">Tiêu đề Task</label>
+          <input type="text" id="editTaskTitle" class="w-full bg-surface-800 border border-slate-700 rounded-lg p-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-slate-300 mb-1">Yêu cầu / Prompt thực thi <span class="text-rose-400">*</span></label>
+          <textarea id="editTaskPrompt" rows="4" required class="w-full bg-surface-800 border border-slate-700 rounded-lg p-2 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 resize-none"></textarea>
+        </div>
+        <div class="flex justify-end gap-2 pt-2 border-t border-slate-800">
+          <button type="button" id="btnCancelEditModal" class="px-3.5 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-300 text-xs font-medium transition">Hủy</button>
+          <button type="submit" id="btnSubmitEditTask" class="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition flex items-center gap-1.5">
+            <i class="fa-solid fa-floppy-disk"></i>
+            <span>Lưu thay đổi</span>
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+
+  <!-- ==================== MODAL: QUẢN LÝ WORKSPACE & THƯ MỤC FEATURES ==================== -->
+  <div id="modalWorkspaceManager" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm hidden">
+    <div class="bg-surface-900 border border-slate-800 rounded-2xl max-w-4xl w-full p-5 shadow-2xl flex flex-col max-h-[90vh] space-y-4 animate-in fade-in zoom-in-95 duration-150">
+      <!-- Header -->
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <div class="flex items-center gap-2.5">
+          <div class="w-9 h-9 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center border border-amber-500/30">
+            <i class="fa-solid fa-folder-tree text-base"></i>
+          </div>
+          <div>
+            <h3 class="text-sm font-bold text-white">Quản lý Workspace &amp; Thư mục Features</h3>
+            <p class="text-[11px] text-slate-400">Cấu hình danh mục dự án, thư mục chứa tài liệu features và đặt không gian mặc định</p>
+          </div>
+        </div>
+        <button id="btnCloseWorkspaceManagerModal" class="text-slate-400 hover:text-white p-1.5 rounded-lg hover:bg-surface-800 transition">
+          <i class="fa-solid fa-xmark text-base"></i>
+        </button>
+      </div>
+
+      <!-- Danh sách Workspaces (Table) -->
+      <div class="flex-1 overflow-hidden flex flex-col min-h-0 border border-slate-800 rounded-xl bg-surface-950/40">
+        <div class="px-4 py-2.5 bg-surface-850/80 border-b border-slate-800 flex items-center justify-between">
+          <span class="text-xs font-semibold text-slate-300 flex items-center gap-2">
+            <i class="fa-solid fa-list-check text-slate-400"></i>
+            Danh sách Workspace
+          </span>
+          <span id="wsTableCount" class="text-[11px] text-slate-500">0 workspace</span>
+        </div>
+        <div class="flex-1 overflow-y-auto custom-scrollbar p-0">
+          <table class="w-full text-left border-collapse text-xs">
+            <thead class="bg-surface-900 sticky top-0 text-[11px] uppercase tracking-wider text-slate-400 border-b border-slate-800">
+              <tr>
+                <th class="p-3 font-semibold">Tên Workspace</th>
+                <th class="p-3 font-semibold">Đường dẫn (Path)</th>
+                <th class="p-3 font-semibold">Thư mục Features</th>
+                <th class="p-3 font-semibold text-center">Mặc định</th>
+                <th class="p-3 font-semibold text-right">Thao tác</th>
+              </tr>
+            </thead>
+            <tbody id="wsManagerTableBody" class="divide-y divide-slate-800/60 text-slate-300">
+              <tr>
+                <td colspan="5" class="p-4 text-center text-slate-500">Đang tải danh sách...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Form Thêm / Sửa Workspace -->
+      <form id="wsManagerForm" class="border border-slate-800 rounded-xl p-4 bg-surface-850/60 space-y-3">
+        <div class="flex items-center justify-between">
+          <span id="wsFormTitle" class="text-xs font-bold text-brand-400 uppercase tracking-wider flex items-center gap-1.5">
+            <i class="fa-solid fa-plus-circle"></i> Thêm Workspace Mới
+          </span>
+          <button type="button" id="btnCancelEditWs" class="hidden text-[11px] text-slate-400 hover:text-rose-400 transition">
+            <i class="fa-solid fa-rotate-left mr-1"></i>Hủy chỉnh sửa
+          </button>
+        </div>
+        <input type="hidden" id="wsEditId" value="">
+
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div class="space-y-1">
+            <label class="block text-[11px] font-semibold text-slate-300">Tên Workspace <span class="text-rose-400">*</span></label>
+            <input type="text" id="wsFormName" required placeholder="Ví dụ: my-project, backend-api..." class="w-full bg-surface-800 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-brand-500 transition">
+          </div>
+          <div class="sm:col-span-2 space-y-1">
+            <label class="block text-[11px] font-semibold text-slate-300">Đường dẫn Workspace <span class="text-rose-400">*</span></label>
+            <div class="flex gap-2">
+              <input type="text" id="wsFormPath" required placeholder="Vui lòng copy paste đường dẫn tuyệt đối hoặc ./folder" class="flex-1 bg-surface-800 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 font-mono placeholder-slate-500 focus:outline-none focus:border-brand-500 transition">
+              <button type="button" id="btnWsBrowseFolder" onclick="window.aiWorker.openFolderBrowser()" class="px-3 py-1.5 rounded-lg bg-surface-700 hover:bg-surface-600 text-slate-200 text-xs font-medium border border-slate-600 transition flex items-center gap-1.5 cursor-pointer">
+                <i class="fa-solid fa-folder-open text-amber-400"></i> Browse
+              </button>
+            </div>
+            <p class="text-[10px] text-slate-500">Hãy copy paste đường dẫn tuyệt đối hoặc ./folder</p>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+          <div class="sm:col-span-2 space-y-1">
+            <label class="block text-[11px] font-semibold text-slate-300">Thư mục chứa Features</label>
+            <input type="text" id="wsFormFeaturesDir" placeholder="docs/features" value="docs/features" class="w-full bg-surface-800 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 font-mono placeholder-slate-500 focus:outline-none focus:border-brand-500 transition">
+            <p class="text-[10px] text-slate-500">Mặc định: docs/features (đường dẫn tương đối từ thư mục gốc của workspace)</p>
+          </div>
+          <div class="flex items-center justify-between pb-2">
+            <label class="inline-flex items-center gap-2 cursor-pointer select-none">
+              <input type="checkbox" id="wsFormIsDefault" class="w-4 h-4 rounded bg-surface-800 border-slate-700 text-brand-500 focus:ring-0 focus:ring-offset-0 cursor-pointer">
+              <span class="text-xs text-slate-300 font-medium">Đặt làm mặc định</span>
+            </label>
+            <div class="flex items-center gap-2">
+              <button type="submit" id="btnSaveWorkspace" class="px-4 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold shadow-md transition flex items-center gap-1.5">
+                <i class="fa-solid fa-floppy-disk"></i> <span id="wsSubmitBtnText">Lưu Workspace</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ==================== MODAL: FOLDER BROWSER ==================== -->
+  <div id="modalFolderBrowser" class="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm hidden">
+    <div class="bg-surface-900 border border-slate-800 rounded-2xl max-w-2xl w-full p-5 shadow-2xl flex flex-col h-[70vh] space-y-4 animate-in fade-in zoom-in-95 duration-150">
+      <!-- Header -->
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <div class="flex items-center gap-2.5">
+          <div class="w-9 h-9 rounded-xl bg-brand-500/20 text-brand-400 flex items-center justify-center border border-brand-500/30">
+            <i class="fa-solid fa-folder-tree text-base"></i>
+          </div>
+          <div>
+            <h3 class="text-sm font-bold text-white">Chọn thư mục Workspace</h3>
+            <p class="text-[11px] text-slate-400">Duyệt qua hệ thống file để chọn thư mục dự án</p>
+          </div>
+        </div>
+        <button type="button" id="btnCloseFolderBrowser" onclick="window.aiWorker.closeFolderBrowser()" class="text-slate-400 hover:text-white p-1.5 rounded-lg hover:bg-surface-800 transition">
+          <i class="fa-solid fa-xmark text-base"></i>
+        </button>
+      </div>
+
+      <!-- Navigation -->
+      <div class="flex items-center gap-2 py-1">
+        <button type="button" id="btnFolderBrowserBack" onclick="window.aiWorker.folderBrowserBack()" class="px-3 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-300 text-xs border border-slate-700 transition" disabled>
+          <i class="fa-solid fa-arrow-left"></i>
+        </button>
+        <div class="flex-1 bg-surface-950 border border-slate-800 rounded-lg px-3 py-2 overflow-x-auto whitespace-nowrap scrollbar-hide text-xs font-mono text-slate-300" id="folderBrowserBreadcrumb">
+          <!-- Path here -->
+        </div>
+      </div>
+
+      <!-- Folder List -->
+      <div class="flex-1 overflow-y-auto border border-slate-800 rounded-xl bg-surface-950/40 p-2 space-y-1" id="folderBrowserList">
+        <!-- Items here -->
+        <div class="flex items-center justify-center h-full text-slate-500 text-sm">
+          <i class="fa-solid fa-circle-notch fa-spin mr-2"></i> Đang tải...
+        </div>
+      </div>
+
+      <!-- Footer -->
+      <div class="flex justify-end gap-3 pt-3 border-t border-slate-800">
+        <button type="button" id="btnCancelFolderBrowser" onclick="window.aiWorker.closeFolderBrowser()" class="px-4 py-2 rounded-lg bg-transparent hover:bg-surface-800 text-slate-300 text-xs font-semibold transition">
+          Hủy
+        </button>
+        <button type="button" id="btnSelectFolderBrowser" onclick="window.aiWorker.selectFolderBrowser()" class="px-4 py-2 rounded-lg bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold shadow-md transition flex items-center gap-1.5">
+          <i class="fa-solid fa-check"></i> Chọn thư mục này
+        </button>
+    </div>
+  </div>
+
+  <!-- Main JavaScript -->
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,723 @@
+/* ==========================================================================
+   AI WORKER DASHBOARD - MODERN DARK THEME & COMPONENT STYLES
+   ========================================================================== */
+
+/* 1. Base & Custom Scrollbar */
+:root {
+  color-scheme: dark;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background-color: #080d1a;
+  color: #e2e8f0;
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.6);
+  border-radius: 4px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 4px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+/* 2. Status Badges */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.15rem 0.55rem;
+  border-radius: 9999px;
+  font-size: 0.6875rem; /* 11px */
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-width: 1px;
+  line-height: 1.2;
+}
+
+.status-todo {
+  background-color: rgba(51, 65, 85, 0.4);
+  color: #94a3b8;
+  border-color: rgba(71, 85, 105, 0.6);
+}
+
+.status-planning {
+  background-color: rgba(99, 102, 241, 0.15);
+  color: #a5b4fc;
+  border-color: rgba(99, 102, 241, 0.4);
+}
+
+.status-implement {
+  background-color: rgba(14, 165, 233, 0.15);
+  color: #38bdf8;
+  border-color: rgba(14, 165, 233, 0.4);
+}
+
+.status-testing {
+  background-color: rgba(168, 85, 247, 0.15);
+  color: #c084fc;
+  border-color: rgba(168, 85, 247, 0.4);
+}
+
+.status-fixing {
+  background-color: rgba(249, 115, 22, 0.15);
+  color: #fb923c;
+  border-color: rgba(249, 115, 22, 0.4);
+}
+
+.status-pending {
+  background-color: rgba(245, 158, 11, 0.2);
+  color: #fde68a;
+  border-color: rgba(245, 158, 11, 0.6);
+  box-shadow: 0 0 10px rgba(245, 158, 11, 0.3);
+  animation: pulse-ring 1.5s cubic-bezier(0.24, 0, 0.38, 1) infinite;
+}
+
+.status-done {
+  background-color: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+  border-color: rgba(16, 185, 129, 0.4);
+}
+
+.status-failed {
+  background-color: rgba(244, 63, 94, 0.15);
+  color: #fb7185;
+  border-color: rgba(244, 63, 94, 0.4);
+}
+
+ .status-cancelled {
+   background-color: rgba(71, 85, 105, 0.3);
+   color: #f87171;
+   border-color: rgba(239, 68, 68, 0.4);
+ }
+ 
+ .status-archived {
+   background-color: rgba(120, 113, 108, 0.25);
+   color: #d6c9a8;
+   border-color: rgba(180, 160, 110, 0.5);
+   border-style: dashed;
+ }
+
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.4);
+  }
+  70% {
+    box-shadow: 0 0 0 6px rgba(245, 158, 11, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(245, 158, 11, 0);
+  }
+}
+
+/* 3. Pipeline Stepper Component */
+.stepper-item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  transition: all 0.25s ease-in-out;
+}
+
+.stepper-circle {
+  width: 34px;
+  height: 34px;
+  border-radius: 9999px;
+  background-color: #0b1120 !important;
+  border: 2px solid #334155;
+  color: #64748b;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.75rem;
+  font-weight: 700;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  margin-bottom: 0.35rem;
+  position: relative;
+  z-index: 10;
+}
+.stepper-line {
+  flex: 1 1 0%;
+  height: 3px;
+  background-color: #1e293b;
+  margin-left: 2px;
+  margin-right: 2px;
+  margin-top: 16px;
+  border-radius: 9999px;
+  transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  z-index: 1;
+}
+
+.stepper-line.active {
+  background: linear-gradient(90deg, #10b981, #059669);
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.6);
+}
+
+.stepper-line.pending {
+  background: linear-gradient(90deg, #f59e0b, #d97706);
+  box-shadow: 0 0 10px rgba(245, 158, 11, 0.6);
+}
+
+.stepper-line.fixing {
+  background: linear-gradient(90deg, #f43f5e, #e11d48);
+  box-shadow: 0 0 10px rgba(244, 63, 94, 0.6);
+}
+
+/* Trạng thái chưa chạm tới (Untouched): vòng tròn mờ tối hoàn toàn, không sáng lên */
+.stepper-item.untouched .stepper-circle {
+  background-color: #0b1120 !important;
+  border-color: #1e293b !important;
+  color: #334155 !important;
+  box-shadow: none !important;
+  animation: none !important;
+}
+.stepper-item.untouched .stepper-label {
+  color: #475569 !important;
+}
+.stepper-item.untouched .stepper-sublabel {
+  color: #1e293b !important;
+}
+
+.stepper-label {
+  font-size: 0.6875rem;
+  font-weight: 700;
+  color: #64748b;
+  letter-spacing: 0.025em;
+  transition: color 0.2s ease;
+}
+
+.stepper-sublabel {
+  font-size: 0.625rem;
+  color: #475569;
+  display: none;
+}
+
+@media (min-width: 640px) {
+  .stepper-sublabel {
+    display: block;
+  }
+}
+
+/* Completed Step */
+.stepper-item.completed .stepper-circle {
+  background-color: rgba(16, 185, 129, 0.2);
+  border-color: #10b981;
+  color: #10b981;
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.25);
+}
+.stepper-item.completed .stepper-label {
+  color: #34d399;
+}
+
+/* Active Step */
+.stepper-item.active .stepper-circle {
+  background-color: rgba(14, 165, 233, 0.2);
+  border-color: #38bdf8;
+  color: #38bdf8;
+  box-shadow: 0 0 14px rgba(56, 189, 248, 0.5);
+  animation: active-step-glow 1.8s infinite alternate;
+}
+.stepper-item.active .stepper-label {
+  color: #38bdf8;
+}
+
+/* Pending Step (Human-in-the-Loop) */
+.stepper-item.pending .stepper-circle {
+  background-color: rgba(245, 158, 11, 0.25);
+  border-color: #fbbf24;
+  color: #fbbf24;
+  box-shadow: 0 0 14px rgba(251, 191, 36, 0.6);
+  animation: pending-step-pulse 1s infinite alternate;
+}
+.stepper-item.pending .stepper-label {
+  color: #fbbf24;
+}
+
+/* Failed Step */
+.stepper-item.failed .stepper-circle {
+  background-color: rgba(244, 63, 94, 0.2);
+  border-color: #f43f5e;
+  color: #f43f5e;
+  box-shadow: 0 0 12px rgba(244, 63, 94, 0.4);
+}
+.stepper-item.failed .stepper-label {
+  color: #fb7185;
+}
+
+@keyframes active-step-glow {
+  from {
+    box-shadow: 0 0 4px rgba(56, 189, 248, 0.4);
+  }
+  to {
+    box-shadow: 0 0 16px rgba(56, 189, 248, 0.85);
+  }
+}
+
+@keyframes pending-step-pulse {
+  from {
+    transform: scale(1);
+    box-shadow: 0 0 6px rgba(251, 191, 36, 0.5);
+  }
+  to {
+    transform: scale(1.08);
+    box-shadow: 0 0 20px rgba(251, 191, 36, 0.9);
+  }
+}
+
+/* 4. Tabs Styling */
+.tab-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.35rem 0.75rem;
+  border-radius: 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: #94a3b8;
+  border: 1px solid transparent;
+  transition: all 0.15s ease-in-out;
+}
+
+.tab-btn:hover {
+  color: #f8fafc;
+  background-color: rgba(30, 41, 59, 0.5);
+}
+
+.tab-btn.active {
+  background-color: #1e293b;
+  color: #38bdf8;
+  border-color: rgba(56, 189, 248, 0.25);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+.evidence-tab-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  padding: 0.4rem 0.25rem;
+  border-radius: 0.375rem;
+  color: #94a3b8;
+  border: 1px solid transparent;
+  transition: all 0.15s ease;
+}
+
+.evidence-tab-btn:hover {
+  color: #f8fafc;
+  background-color: #1e293b;
+}
+
+.evidence-tab-btn.active {
+  background-color: #1e293b;
+  color: #38bdf8;
+  border-color: rgba(56, 189, 248, 0.3);
+  font-weight: 600;
+}
+
+/* 5. Terminal (xterm.js) Custom Styling */
+#xtermContainer {
+  padding: 6px;
+  background-color: #080d1a !important;
+}
+
+.xterm {
+  height: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace !important;
+}
+
+.xterm-viewport {
+  background-color: #080d1a !important;
+}
+
+.xterm-viewport::-webkit-scrollbar {
+  width: 8px;
+}
+
+.xterm-viewport::-webkit-scrollbar-track {
+  background: #080d1a;
+}
+
+.xterm-viewport::-webkit-scrollbar-thumb {
+  background: #1e293b;
+  border-radius: 4px;
+}
+
+.xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: #334155;
+}
+
+/* 6. Sidebar Job Card */
+.job-card {
+  padding: 0.75rem;
+  border-radius: 0.625rem;
+  background-color: #162032;
+  border: 1px solid rgba(51, 65, 85, 0.5);
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.job-card:hover {
+  background-color: #1e293b;
+  border-color: rgba(71, 85, 105, 0.9);
+  transform: translateY(-1px);
+}
+
+.job-card.active {
+  background-color: rgba(14, 165, 233, 0.08);
+  border-color: rgba(56, 189, 248, 0.6);
+  box-shadow: 0 4px 12px rgba(14, 165, 233, 0.12);
+}
+
+/* 7. Evidence Gallery & Cards */
+.evidence-card {
+  position: relative;
+  background-color: #162032;
+  border: 1px solid #334155;
+  border-radius: 0.5rem;
+  overflow: hidden;
+  transition: all 0.2s ease;
+}
+
+.evidence-card:hover {
+  border-color: #38bdf8;
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
+}
+
+.evidence-badge {
+  font-size: 0.625rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 0.1rem 0.4rem;
+  border-radius: 9999px;
+  letter-spacing: 0.05em;
+}
+
+.evidence-pass {
+  background-color: rgba(16, 185, 129, 0.2);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.4);
+}
+
+.evidence-fail {
+  background-color: rgba(244, 63, 94, 0.2);
+  color: #fb7185;
+  border: 1px solid rgba(244, 63, 94, 0.4);
+}
+
+/* 8. Code & Markdown Styling */
+pre code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.code-block {
+  background-color: #080d1a;
+  border: 1px solid #1e293b;
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+  overflow-x: auto;
+  font-size: 0.75rem;
+  color: #e2e8f0;
+}
+
+/* 9. Markdown Body Rendering (Dark Mode Optimized) */
+.markdown-body {
+  font-family: inherit;
+  font-size: 0.75rem;
+  line-height: 1.6;
+  color: #cbd5e1;
+  word-wrap: break-word;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4 {
+  color: #f8fafc;
+  font-weight: 700;
+  margin-top: 1rem;
+  margin-bottom: 0.4rem;
+  line-height: 1.35;
+}
+
+.markdown-body h1:first-child,
+.markdown-body h2:first-child,
+.markdown-body h3:first-child {
+  margin-top: 0;
+}
+
+.markdown-body h1 {
+  font-size: 1.15rem;
+  padding-bottom: 0.3rem;
+  border-bottom: 1px solid #334155;
+}
+
+.markdown-body h2 {
+  font-size: 1rem;
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid #1e293b;
+}
+
+.markdown-body h3 {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #38bdf8;
+}
+
+.markdown-body h4 {
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.markdown-body p {
+  margin-top: 0;
+  margin-bottom: 0.5rem;
+}
+
+.markdown-body strong {
+  color: #f1f5f9;
+  font-weight: 600;
+}
+
+.markdown-body em {
+  color: #94a3b8;
+}
+
+.markdown-body a {
+  color: #38bdf8;
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+
+.markdown-body a:hover {
+  text-decoration: underline;
+  color: #7dd3fc;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  margin-top: 0;
+  margin-bottom: 0.5rem;
+  padding-left: 1.25rem;
+}
+
+.markdown-body ul {
+  list-style-type: disc;
+}
+
+.markdown-body ol {
+  list-style-type: decimal;
+}
+
+.markdown-body li {
+  margin-bottom: 0.2rem;
+}
+
+.markdown-body li > ul,
+.markdown-body li > ol {
+  margin-top: 0.2rem;
+  margin-bottom: 0.2rem;
+}
+
+.markdown-body input[type="checkbox"] {
+  accent-color: #38bdf8;
+  margin-right: 0.4rem;
+  vertical-align: middle;
+  cursor: pointer;
+}
+
+.markdown-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.6rem 0;
+  font-size: 0.75rem;
+  background-color: #0d1527;
+  border-radius: 0.5rem;
+  overflow: hidden;
+  border: 1px solid #1e293b;
+}
+
+.markdown-body th,
+.markdown-body td {
+  padding: 0.4rem 0.65rem;
+  border: 1px solid #1e293b;
+  text-align: left;
+}
+
+.markdown-body th {
+  background-color: #1e293b;
+  color: #f8fafc;
+  font-weight: 600;
+}
+
+.markdown-body tr:nth-child(even) {
+  background-color: rgba(30, 41, 59, 0.35);
+}
+
+.markdown-body tr:hover {
+  background-color: rgba(56, 189, 248, 0.05);
+}
+
+.markdown-body pre {
+  background-color: #080d1a !important;
+  border: 1px solid #1e293b !important;
+  border-radius: 0.5rem;
+  padding: 0.65rem 0.85rem;
+  margin: 0.5rem 0;
+  overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.markdown-body code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.725rem;
+  background-color: rgba(30, 41, 59, 0.85);
+  border: 1px solid rgba(71, 85, 105, 0.5);
+  color: #38bdf8;
+  padding: 0.1rem 0.3rem;
+  border-radius: 0.25rem;
+}
+
+.markdown-body pre code {
+  background-color: transparent !important;
+  border: none !important;
+  color: #e2e8f0 !important;
+  padding: 0;
+  font-size: inherit;
+}
+
+.markdown-body blockquote {
+  border-left: 3px solid #38bdf8;
+  margin: 0.5rem 0;
+  padding: 0.35rem 0.75rem;
+  background-color: rgba(15, 23, 42, 0.65);
+  color: #94a3b8;
+  font-style: italic;
+  border-radius: 0 0.375rem 0.375rem 0;
+}
+
+.markdown-body hr {
+  border: 0;
+  border-top: 1px solid #1e293b;
+  margin: 0.75rem 0;
+}
+
+/* 10. Scrollbar Thin Optimization */
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: #334155 transparent;
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 9999px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+/* 11. Evidence Thumbnail Zoom & Hover */
+.evidence-thumb-container,
+.evidence-thumb {
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.2s ease, border-color 0.2s ease;
+  cursor: pointer;
+}
+
+.evidence-thumb-container:hover,
+.evidence-thumb:hover {
+  transform: scale(1.035);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(56, 189, 248, 0.4);
+  border-color: rgba(56, 189, 248, 0.6);
+}
+
+
+/* SVG Stepper Connecting Canvas & Paths */
+#stepperSvgOverlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: visible;
+  z-index: 1;
+}
+
+.stepper-svg-path {
+  fill: none;
+  stroke: #1e293b; /* màu xám tối khi chưa chạm tới */
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: all 0.4s ease;
+}
+
+.stepper-svg-path.active {
+  stroke: #10b981; /* xanh ngọc emerald */
+  filter: drop-shadow(0 0 6px rgba(16, 185, 129, 0.7));
+}
+
+.stepper-svg-path.pending {
+  stroke: #f59e0b; /* vàng amber */
+  filter: drop-shadow(0 0 6px rgba(245, 158, 11, 0.7));
+}
+
+.stepper-svg-path.fixing {
+  stroke: #f43f5e; /* hồng rose */
+  filter: drop-shadow(0 0 6px rgba(244, 63, 94, 0.7));
+}
+
+/* Vòng cung cầu vượt (Bridge curve) khi bypass */
+.stepper-svg-bridge {
+  fill: none;
+  stroke: #10b981;
+  stroke-width: 3;
+  stroke-dasharray: 4 2;
+  filter: drop-shadow(0 0 8px rgba(16, 185, 129, 0.8));
+  animation: svg-dash-flow 1.5s linear infinite;
+}
+
+@keyframes svg-dash-flow {
+  to {
+    stroke-dashoffset: -12;
+  }
+}
+
+/* Ẩn các stepper-line thẻ div cũ vì đã dùng SVG */
+.stepper-line {
+  display: none !important;
+}
+
+/* Card task quick actions buttons */
+.job-card-actions {
+  opacity: 0.8;
+  transition: opacity 0.2s ease;
+}
+.job-card-item:hover .job-card-actions {
+  opacity: 1;
+}
