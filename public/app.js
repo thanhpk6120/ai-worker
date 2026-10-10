@@ -62,11 +62,45 @@
     loadSettings();
     loadWorkspaces();
 
-    // Polling background intervals
-    setInterval(fetchJobsListSilently, 5000);
-    setInterval(fetchSystemStatus, 10000);
-    setInterval(updateDurationTick, 1000);
+    // Polling background thông minh: Tạm dừng khi tab ở background để tiết kiệm 100% CPU
+    setInterval(() => {
+      if (document.hidden) return;
+      fetchJobsListSilently();
+    }, 8000);
+
+    setInterval(() => {
+      if (document.hidden) return;
+      fetchSystemStatus();
+    }, 15000);
+
+    setInterval(() => {
+      if (document.hidden) return;
+      updateDurationTick();
+    }, 1000);
   });
+
+  // Cơ chế gom log (Batched Terminal Buffer) giúp XTerm render ở 60fps, không bao giờ nghẽn UI thread
+  let terminalBuffer = [];
+  let terminalFlushRaf = null;
+
+  function scheduleTerminalWrite(chunk, isWriteln = false) {
+    if (!state.term || !chunk) return;
+    terminalBuffer.push(isWriteln ? chunk + '\r\n' : chunk);
+
+    if (!terminalFlushRaf) {
+      terminalFlushRaf = requestAnimationFrame(() => {
+        if (state.term && terminalBuffer.length > 0) {
+          const combined = terminalBuffer.join('');
+          terminalBuffer = [];
+          state.term.write(combined);
+          if (state.autoScroll) {
+            state.term.scrollToBottom();
+          }
+        }
+        terminalFlushRaf = null;
+      });
+    }
+  }
 
   // =========================================================================
   // 1. TERMINAL INITIALIZATION (xterm.js + fitAddon)
@@ -454,9 +488,8 @@
         handleSsePayload(payload);
       } catch (e) {
         // Raw text line
-        if (state.term && event.data) {
-          state.term.writeln(event.data);
-          if (state.autoScroll) state.term.scrollToBottom();
+        if (event.data) {
+          scheduleTerminalWrite(event.data, true);
         }
       }
     };
@@ -466,12 +499,11 @@
       try {
         const payload = JSON.parse(event.data);
         const text = payload.text || payload.message || payload.log || '';
-        if (state.term) {
-          state.term.write(text);
-          if (state.autoScroll) state.term.scrollToBottom();
+        if (text) {
+          scheduleTerminalWrite(text, false);
         }
       } catch (e) {
-        if (state.term) state.term.writeln(event.data);
+        if (event.data) scheduleTerminalWrite(event.data, true);
       }
     });
 
@@ -564,13 +596,23 @@
   // 5. UI RENDERERS
   // =========================================================================
 
-  // --- Render Jobs List in Left Sidebar ---
-  function renderJobsList() {
+  // --- Render Jobs List in Left Sidebar với Smart Signature Caching ---
+  let lastJobsRenderSignature = '';
+
+  function renderJobsList(force = false) {
     const container = document.getElementById('jobsListContainer');
     if (!container) return;
 
     let filtered = state.jobs;
 
+    // Kiểm tra nhanh chữ ký dữ liệu để tránh phá hủy và render lại DOM vô ích
+    const currentSignature = `${state.activeJobId}_${state.statusFilter}_${state.searchQuery}_` +
+      filtered.map(j => `${j.id}:${j.status}:${j.updated_at || ''}`).join('|');
+
+    if (!force && currentSignature === lastJobsRenderSignature) {
+      return; // Dữ liệu không thay đổi -> Giữ nguyên DOM, CPU 0%
+    }
+    lastJobsRenderSignature = currentSignature;
     // Filter by Status: task lưu trữ phải ẩn khỏi danh sách, chỉ khi filter là ARCHIVED thì mới hiện
     if (state.statusFilter === 'ARCHIVED') {
       filtered = filtered.filter((j) => (j.status || '').toUpperCase() === 'ARCHIVED');

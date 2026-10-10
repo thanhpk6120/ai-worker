@@ -1,11 +1,23 @@
 {
+  "jobId": "18169e62-7c9b-4fba-ba3f-2d53f39090b0",
+  "taskCode": "TEST-VERIFY-FAST",
   "status": "PASSED",
-  "database": "ai-worker.sqlite",
-  "checkedAt": "2026-10-10T22:28:38.713Z",
-  "tables": [
-    "jobs",
-    "steps",
-    "dual_plans"
-  ],
-  "integrity": "OK"
+  "timestamp": "2026-10-10T22:51:04.454Z",
+  "assertions": [
+    {
+      "table": "jobs",
+      "check": "Status transitioned to TESTING/DONE",
+      "passed": true
+    },
+    {
+      "table": "steps",
+      "check": "Lifecycle steps tracked",
+      "passed": true
+    },
+    {
+      "table": "dual_plans",
+      "check": "Metadata persisted",
+      "passed": true
+    }
+  ]
 }

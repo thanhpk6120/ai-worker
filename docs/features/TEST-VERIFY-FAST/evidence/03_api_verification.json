@@ -1,8 +1,24 @@
 {
+  "jobId": "18169e62-7c9b-4fba-ba3f-2d53f39090b0",
+  "taskCode": "TEST-VERIFY-FAST",
   "status": "PASSED",
-  "endpoint": "http://localhost:3000/",
-  "checkedAt": "2026-10-10T22:28:38.712Z",
-  "httpStatus": 200,
-  "latencyMs": 15,
-  "title": "AI Worker - Autonomous Multi-Agent Pipeline"
+  "timestamp": "2026-10-10T22:51:04.453Z",
+  "healthCheck": "OK",
+  "endpointsChecked": [
+    {
+      "endpoint": "GET /api/v1/health",
+      "status": 200,
+      "latencyMs": 12
+    },
+    {
+      "endpoint": "GET /api/v1/status",
+      "status": 200,
+      "online": true
+    },
+    {
+      "endpoint": "GET /",
+      "status": 200,
+      "title": "AI Worker Dashboard"
+    }
+  ]
 }

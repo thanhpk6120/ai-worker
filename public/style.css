@@ -721,3 +721,26 @@ pre code {
 .job-card-item:hover .job-card-actions {
   opacity: 1;
 }
+
+/* ========================================================================= */
+/* TỐI ƯU HÓA HIỆU NĂNG RENDER (HARDWARE ACCELERATION & LAYOUT CONTAINMENT) */
+/* ========================================================================= */
+#jobsListContainer {
+  contain: content;
+  content-visibility: auto;
+}
+
+.job-card {
+  contain: layout paint;
+  transform: translateZ(0);
+  backface-visibility: hidden;
+}
+
+#xtermContainer {
+  contain: strict;
+  transform: translateZ(0);
+}
+
+.pipeline-stepper-container {
+  contain: layout paint;
+}
