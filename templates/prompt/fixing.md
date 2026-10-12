@@ -33,3 +33,8 @@ Nhiệm vụ của bạn là tiếp nhận toàn bộ ngữ cảnh kiểm thử 
 3. Sửa đổi trực tiếp mã nguồn trong service đó của workspace để khắc phục lỗi.
 4. Bảo đảm không làm gãy các tính năng đã hoạt động trước đó (không gây regression).
 5. Sau khi sửa xong, hoàn tất để hệ thống chuyển tiếp sang bước kiểm thử lại (Re-test).
+
+## 🔌 QUY TẮC ƯU TIÊN MCP TRƯỚC (MCP-FIRST RULE - BẮT BUỘC):
+1. **Khi cần nội dung Jira/Confluence/Atlassian**: ƯU TIÊN TUYỆT ĐỐI dùng MCP Atlassian trước. TUYỆT ĐỐI KHÔNG tự mở trình duyệt hoặc curl/fetch trực tiếp tới URL nội bộ yêu cầu SSO/login.
+2. **Khi cần kiểm thử UI/trình duyệt**: Ưu tiên MCP browser automation (cloakbrowser_*) trước.
+3. Chỉ fallback khi MCP báo lỗi không khả dụng, và phải ghi rõ lý do vào log.

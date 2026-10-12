@@ -1060,6 +1060,7 @@ const executeStep = async (id) => {
     if (job.status === 'PLANNING') {
       const planningAgent = agentMapping.PLANNING || 'claude-code';
       db.updateJob(id, { runner: planningAgent });
+      const answeredQuestions = (db.getQuestionsByJobId(id) || []).filter(q => q.status === 'ANSWERED');
       let clarificationContext = '';
       if (answeredQuestions.length > 0) {
         clarificationContext = '\n## CÁC YÊU CẦU ĐÃ ĐƯỢC NGƯỜI DÙNG GIẢI ĐÁP (CLARIFICATION ANSWERS):\n' +
@@ -1071,8 +1072,10 @@ const executeStep = async (id) => {
         previousContext: fileManager.loadPreviousContext(workspacePath, taskCode)
       });
       jobEventBus.emitJobLog(id, { text: `\n[1/4] >>> 🤖 [PLANNING] Kích hoạt lập kế hoạch song song (Dual Planning) với Agent: ${planningAgent}\n[PLANNING] Nạp template prompt planning.md...\n[PLANNING] Agent đang phân tích mã nguồn và thiết lập Kế hoạch (Vui lòng đợi khoảng 15-30 giây)...\n` });
+      const planStartTime = Date.now();
       const planProgressTimer = setInterval(() => {
-        jobEventBus.emitJobLog(id, { text: `\x1b[90m🤖 [PLANNING] Agent đang tiếp tục xử lý phân tích và tổng hợp Kế hoạch...\x1b[0m\r\n` });
+        const elapsedSec = Math.floor((Date.now() - planStartTime) / 1000);
+        jobEventBus.emitJobLog(id, { text: `\x1b[90m🤖 [PLANNING] ⏱️ ${elapsedSec}s - Agent đang tiếp tục xử lý phân tích và tổng hợp Kế hoạch...\x1b[0m\r\n` });
       }, 12000);
       const runner = runnerRegistry.getAvailableRunner(planningAgent);
       if (runner) {

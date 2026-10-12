@@ -27,3 +27,8 @@ Nhiệm vụ của bạn là kiểm thử toàn diện giải pháp của task *
 2. Thực thi kịch bản kiểm thử giao diện bằng công cụ kiểm thử (hoặc CloakBrowser/Playwright).
 3. Chụp ảnh màn hình bằng chứng tại các checkpoint và lưu trực tiếp vào `{{FEATURE_DIR}}/evidence/`.
 4. Ghi nhận báo cáo kết quả thẩm định vào `{{FEATURE_DIR}}/testcase.md`.
+
+## 🔌 QUY TẮC ƯU TIÊN MCP TRƯỚC (MCP-FIRST RULE - BẮT BUỘC):
+1. **Khi cần nội dung Jira/Confluence/Atlassian**: ƯU TIÊN TUYỆT ĐỐI dùng MCP Atlassian trước. TUYỆT ĐỐI KHÔNG tự mở trình duyệt hoặc curl/fetch trực tiếp tới URL nội bộ yêu cầu SSO/login.
+2. **Khi kiểm thử UI/trình duyệt**: Ưu tiên MCP browser automation (cloakbrowser_*) trước.
+3. Chỉ fallback khi MCP báo lỗi không khả dụng, và phải ghi rõ lý do vào log.

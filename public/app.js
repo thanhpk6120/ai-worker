@@ -62,19 +62,17 @@
     loadSettings();
     loadWorkspaces();
 
-    // Polling background thông minh: Tạm dừng khi tab ở background để tiết kiệm 100% CPU
+    // Polling background: Xoá check document.hidden cho status để trạng thái luôn chạy ngầm
     setInterval(() => {
-      if (document.hidden) return;
       fetchJobsListSilently();
     }, 8000);
 
     setInterval(() => {
-      if (document.hidden) return;
       fetchSystemStatus();
     }, 15000);
 
     setInterval(() => {
-      if (document.hidden) return;
+      if (document.hidden) return; // Chỉ tạm dừng thay đổi UI tick giây
       updateDurationTick();
     }, 1000);
   });
@@ -82,10 +80,33 @@
   // Cơ chế gom log (Batched Terminal Buffer) giúp XTerm render ở 60fps, không bao giờ nghẽn UI thread
   let terminalBuffer = [];
   let terminalFlushRaf = null;
+  let termIsNewLine = true; // Trạng thái con trỏ đang ở đầu dòng mới
 
-  function scheduleTerminalWrite(chunk, isWriteln = false) {
+  function formatLogWithTimestamp(text, timestamp) {
+    if (!text) return '';
+    const d = new Date(timestamp || Date.now());
+    const pad = (n) => String(n).padStart(2, '0');
+    const timeStr = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    const prefix = `\x1b[90m[${timeStr}]\x1b[0m `;
+    let result = '';
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (termIsNewLine && ch !== '\r' && ch !== '\n') {
+        result += prefix;
+        termIsNewLine = false;
+      }
+      result += ch;
+      if (ch === '\n') {
+        termIsNewLine = true;
+      }
+    }
+    return result;
+  }
+
+  function scheduleTerminalWrite(chunk, isWriteln = false, timestamp = null) {
     if (!state.term || !chunk) return;
-    terminalBuffer.push(isWriteln ? chunk + '\r\n' : chunk);
+    const formatted = formatLogWithTimestamp(isWriteln ? chunk + '\r\n' : chunk, timestamp);
+    terminalBuffer.push(formatted);
 
     if (!terminalFlushRaf) {
       terminalFlushRaf = requestAnimationFrame(() => {
@@ -487,7 +508,6 @@
         const payload = JSON.parse(event.data);
         handleSsePayload(payload);
       } catch (e) {
-        // Raw text line
         if (event.data) {
           scheduleTerminalWrite(event.data, true);
         }
@@ -500,7 +520,7 @@
         const payload = JSON.parse(event.data);
         const text = payload.text || payload.message || payload.log || '';
         if (text) {
-          scheduleTerminalWrite(text, false);
+          scheduleTerminalWrite(text, false, payload.timestamp);
         }
       } catch (e) {
         if (event.data) scheduleTerminalWrite(event.data, true);

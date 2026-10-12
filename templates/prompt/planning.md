@@ -30,3 +30,11 @@ Nhiệm vụ của bạn là khảo sát codebase tại workspace và lập kế
    - **Kế hoạch kiểm thử (`test_plan.md`):** Mô tả cụ thể kịch bản kiểm thử giao diện bằng CloakBrowser, các bước tương tác (click, fill), dữ liệu mock/test data, các điểm chụp ảnh màn hình bằng chứng (checkpoints), và kiểm thử API/DB/Logs tương ứng.
 3. Nếu phát hiện yêu cầu mơ hồ, mâu thuẫn hoặc cần quyết định lựa chọn quan trọng, hãy đặt câu hỏi làm rõ. BẠN PHẢI xuất một khối ```json:questions chứa một **mảng** các đối tượng câu hỏi, ví dụ: `[{"id":"q1", "question":"...", "context":"...", "options":["A", "B"]}, {"id":"q2",...}]`.
 4. Lưu trữ toàn bộ các kế hoạch trực tiếp vào các tệp Markdown bên trong thư mục `{{FEATURE_DIR}}`.
+
+## 🔌 QUY TẮC ƯU TIÊN MCP TRƯỚC (MCP-FIRST RULE - BẮT BUỘC):
+1. **Khi prompt chứa link Jira/Confluence/Atlassian** (`jira.*`, `confluence.*`, `/browse/`, `/wiki/`):
+   - ƯU TIÊN TUYỆT ĐỐI dùng MCP Atlassian (company_atlassian: jira_get_issue, confluence_get_page...) để lấy nội dung ticket TRƯỚC TIÊN.
+   - TUYỆT ĐỐI KHÔNG tự mở trình duyệt (browser) hoặc dùng curl/fetch HTTP trực tiếp tới URL Jira/Confluence nội bộ — các trang này yêu cầu SSO/login, bot headless sẽ bị chặn ở trang đăng nhập và treo.
+2. **Khi cần thao tác trình duyệt/kiểm thử UI**: Ưu tiên dùng MCP browser automation (cloakbrowser_*) có sẵn trước khi dùng công cụ browser nội bộ khác.
+3. **Khi cần tra cứu thư viện/framework/SDK/API**: Ưu tiên dùng MCP docs (context7_*) trước khi tìm kiếm web thủ công.
+4. Chỉ khi MCP tương ứng báo lỗi không khả dụng (connection refused, not configured) HOẶC người dùng yêu cầu rõ ràng mới được dùng công cụ thay thế (browser thủ công, curl, grep...). Khi đó phải ghi rõ lý do fallback vào log.

@@ -29,3 +29,9 @@ Nhiệm vụ của bạn là hiện thực hóa toàn bộ mã nguồn của tas
 2. Xác định chính xác service/module trong `{{WORKSPACE_PATH}}` cần thực hiện sửa code.
 3. Chỉnh sửa, tạo mới các tệp mã nguồn theo đúng các bước đã vạch ra trong `dev_plan.md`.
 4. Sau khi viết code xong, xác minh mã nguồn bằng cách kiểm tra cú pháp hoặc chạy thử các lệnh build/test cục bộ.
+
+## 🔌 QUY TẮC ƯU TIÊN MCP TRƯỚC (MCP-FIRST RULE - BẮT BUỘC):
+1. **Khi cần nội dung Jira/Confluence/Atlassian**: ƯU TIÊN TUYỆT ĐỐI dùng MCP Atlassian trước. TUYỆT ĐỐI KHÔNG tự mở trình duyệt hoặc curl/fetch trực tiếp tới URL nội bộ yêu cầu SSO/login.
+2. **Khi cần kiểm thử UI/trình duyệt**: Ưu tiên MCP browser automation (cloakbrowser_*) trước.
+3. **Khi cần tra cứu docs thư viện/SDK**: Ưu tiên MCP docs (context7_*) trước.
+4. Chỉ fallback sang công cụ khác khi MCP báo lỗi không khả dụng, và phải ghi rõ lý do vào log.
