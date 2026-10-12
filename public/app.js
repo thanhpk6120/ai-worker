@@ -775,7 +775,17 @@
       const status = (job.status || 'TO DO').toUpperCase();
       statusBadge.textContent = status === 'PENDING' ? 'Chờ giải đáp' : status;
       statusBadge.className = `status-badge ${STATUS_CLASSES[status] || 'status-todo'}`;
+      const errBox = document.getElementById('activeJobErrorBox');
+      if (status === 'FAILED' && job.error_message) {
+        if (errBox) {
+          errBox.style.display = 'block';
+          errBox.innerHTML = `<i class="fa-solid fa-triangle-exclamation mr-1.5"></i><strong>Lý do thất bại:</strong> ${escapeHtml(job.error_message)}`;
+        }
+      } else if (errBox) {
+        errBox.style.display = 'none';
+      }
     }
+
 
     const runnerBadge = document.getElementById('activeJobRunnerBadge');
     if (runnerBadge) {
