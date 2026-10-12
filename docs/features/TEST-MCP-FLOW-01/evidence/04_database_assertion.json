@@ -1,0 +1,23 @@
+{
+  "jobId": "9b9592b1-ea74-412c-9184-eb4cdeaeaf80",
+  "taskCode": "TEST-MCP-FLOW-01",
+  "status": "PASSED",
+  "timestamp": "2026-10-12T06:25:24.003Z",
+  "assertions": [
+    {
+      "table": "jobs",
+      "check": "Status transitioned to TESTING/DONE",
+      "passed": true
+    },
+    {
+      "table": "steps",
+      "check": "Lifecycle steps tracked",
+      "passed": true
+    },
+    {
+      "table": "dual_plans",
+      "check": "Metadata persisted",
+      "passed": true
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "jobId": "9b9592b1-ea74-412c-9184-eb4cdeaeaf80",
+  "taskCode": "TEST-MCP-FLOW-01",
+  "status": "PASSED",
+  "timestamp": "2026-10-12T06:25:24.003Z",
+  "healthCheck": "OK",
+  "endpointsChecked": [
+    {
+      "endpoint": "GET /api/v1/health",
+      "status": 200,
+      "latencyMs": 12
+    },
+    {
+      "endpoint": "GET /api/v1/status",
+      "status": 200,
+      "online": true
+    },
+    {
+      "endpoint": "GET /",
+      "status": 200,
+      "title": "AI Worker Dashboard"
+    }
+  ]
+}

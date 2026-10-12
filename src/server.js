@@ -1327,7 +1327,7 @@ const executeStep = async (id) => {
         const uiImgFile = path.join(evidenceDir, '01_ui_target_service.png');
         try {
           const { BrowserRunner } = require('./verification/browserRunner');
-          const br = new BrowserRunner({ evidenceBaseDir: path.dirname(evidenceDir) });
+          const br = new BrowserRunner({ evidenceBaseDir: path.dirname(path.dirname(evidenceDir)) });
           const targetUrl = (typeof cmd === 'string' && /https?:\/\/[^\s"']+/i.test(cmd))
             ? cmd.match(/https?:\/\/[^\s"']+/i)[0]
             : null;
