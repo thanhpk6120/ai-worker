@@ -105,6 +105,11 @@ class ProcessManager extends EventEmitter {
 
     const mergedEnv = {
       ...process.env,
+      PYTHONUNBUFFERED: '1',
+      PYTHONIOENCODING: 'utf-8',
+      FORCE_COLOR: '1',
+      CI: '1',
+      TERM: 'xterm-256color',
       ...env
     };
 

@@ -17,7 +17,7 @@ class ClaudeCodeAdapter extends BaseAdapter {
    */
   buildArgs(prompt, options = {}) {
     const extraArgs = Array.isArray(options.extraArgs) ? options.extraArgs : [];
-    return ['-p', prompt, '--dangerously-skip-permissions', '--verbose', ...extraArgs];
+    return ['-p', prompt, '--dangerously-skip-permissions', ...extraArgs];
   }
 }
 

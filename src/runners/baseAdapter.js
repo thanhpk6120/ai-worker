@@ -155,6 +155,37 @@ class BaseAdapter {
    * @param {string} fullOutput
    * @returns {{ success: boolean, totalLines: number, errorCount: number, summary: string }}
    */
+  /**
+   * Xác định thư mục session log trên đĩa cho từng loại runner
+   * @param {string} cwd - Thư mục làm việc hiện tại
+   * @returns {string|null} Đường dẫn thư mục session hoặc null
+   */
+  getSessionDir(cwd = process.cwd()) {
+    const os = require('node:os');
+    const path = require('node:path');
+    // Claude Code và các runner tạo slug bằng cách thay ký tự không phải chữ/số thành dấu gạch đơn,
+    // KHÔNG được gộp dấu gạch liên tiếp (ví dụ D:\... -> D--Thanhpk-...)
+    const projSlug = cwd.replace(/[^a-zA-Z0-9]/g, '-');
+    const cmd = (this.command || '').toLowerCase();
+
+    if (cmd.includes('claude')) {
+      return path.join(os.homedir(), '.claude', 'projects', projSlug);
+    }
+    if (cmd.includes('omp')) {
+      return path.join(os.homedir(), '.omp', 'agent', 'sessions', projSlug);
+    }
+    if (cmd.includes('opencode')) {
+      return path.join(os.homedir(), '.opencode', 'sessions', projSlug);
+    }
+    if (cmd.includes('codex')) {
+      return path.join(os.homedir(), '.codex', 'sessions', projSlug);
+    }
+    if (cmd.includes('antigravity')) {
+      return path.join(os.homedir(), '.antigravity', 'sessions', projSlug);
+    }
+    return null;
+  }
+
   parseSummary(fullOutput) {
     if (typeof fullOutput !== 'string') {
       fullOutput = fullOutput ? String(fullOutput) : '';
@@ -223,7 +254,8 @@ class BaseAdapter {
       jobId,
       onStdout,
       onStderr,
-      shell: process.platform === 'win32',
+      // Đặt shell: false khi chạy trực tiếp binary .exe để tránh cmd.exe bóc tách làm mất dấu nháy và tham số
+      shell: effectiveCommand.endsWith('.cmd') || effectiveCommand.endsWith('.bat'),
       timeoutMs: options.timeoutMs || 900000
     });
 
@@ -233,53 +265,97 @@ class BaseAdapter {
     proc.child.stdout.on('data', () => { lastOutTime = Date.now(); });
     
     const tailTimer = setInterval(() => {
-      if (Date.now() - lastOutTime > 8000) {
-        const fs = require('fs');
-        const os = require('os');
-        const crypto = require('crypto');
-        let sessionDir = '';
-        if (this.command === 'claude' || effectiveCommand.includes('claude')) {
-          const projSlug = cwd.replace(/[^a-zA-Z0-9]/g, '-').replace(/-+/g, '-');
-          sessionDir = path.join(os.homedir(), '.claude', 'projects', projSlug);
-        } else if (this.command === 'omp' || effectiveCommand.includes('omp')) {
-          sessionDir = path.join(os.homedir(), '.omp', 'agent', 'sessions', cwd.replace(/[^a-zA-Z0-9]/g, '-').replace(/-+/g, '-'));
-        }
-        
+      // Nếu stdout im lặng quá 3.5s, tự động kích hoạt Session File Watcher cho runner tương ứng
+      if (Date.now() - lastOutTime > 3500) {
+        const sessionDir = this.getSessionDir(cwd);
+
         if (sessionDir && fs.existsSync(sessionDir)) {
           try {
-            const files = fs.readdirSync(sessionDir).filter(f => f.endsWith('.jsonl'));
+            const files = fs.readdirSync(sessionDir).filter(f => f.endsWith('.jsonl') || f.endsWith('.json') || f.endsWith('.log'));
             if (files.length > 0) {
               files.sort((a, b) => fs.statSync(path.join(sessionDir, b)).mtimeMs - fs.statSync(path.join(sessionDir, a)).mtimeMs);
               const latestFile = path.join(sessionDir, files[0]);
               const stat = fs.statSync(latestFile);
-              if (!this._lastSize) this._lastSize = stat.size - 2000 > 0 ? stat.size - 2000 : 0;
+              if (!this._lastSize) this._lastSize = stat.size - 3000 > 0 ? stat.size - 3000 : 0;
               if (stat.size > this._lastSize) {
                 const fd = fs.openSync(latestFile, 'r');
                 const buffer = Buffer.alloc(stat.size - this._lastSize);
                 fs.readSync(fd, buffer, 0, buffer.length, this._lastSize);
                 fs.closeSync(fd);
                 this._lastSize = stat.size;
-                
+
                 const lines = buffer.toString('utf-8').split('\n');
                 for (const line of lines) {
-                  if (line.trim()) {
-                    try {
-                      const obj = JSON.parse(line);
-                      if (obj.message && obj.message.role === 'assistant' && obj.message.content) {
-                        let text = Array.isArray(obj.message.content) ? obj.message.content.map(c => c.text).join('') : obj.message.content;
-                        if (text && typeof onStdout === 'function') {
-                          onStdout(`\x1b[36m[AGENT THOUGHT]\x1b[0m ${text.split('\\n')[0].substring(0, 100)}...\n`);
-                        }
+                  const trimmed = line.trim();
+                  if (!trimmed) continue;
+
+                  // 1. Phân tích định dạng JSON/JSONL chuẩn
+                  try {
+                    const obj = JSON.parse(trimmed);
+
+                    // A. THOUGHT / REASONING
+                    let thoughtText = '';
+                    if (obj.message && obj.message.role === 'assistant') {
+                      if (Array.isArray(obj.message.content)) {
+                        const thinkingPart = obj.message.content.find(c => c.type === 'thinking' || c.type === 'thought');
+                        if (thinkingPart) thoughtText = thinkingPart.thinking || thinkingPart.text || '';
+                        else thoughtText = obj.message.content.map(c => c.text || '').join('');
+                      } else if (typeof obj.message.content === 'string') {
+                        thoughtText = obj.message.content;
                       }
-                    } catch(e) {}
+                    } else if (obj.type === 'thought' || obj.thought || obj.reasoning) {
+                      thoughtText = obj.thought || obj.reasoning || obj.content || '';
+                    }
+
+                    if (thoughtText && typeof onStdout === 'function') {
+                      const firstLine = thoughtText.split('\n')[0].trim();
+                      if (firstLine) {
+                        onStdout(`\x1b[36m[AGENT THOUGHT]\x1b[0m ${firstLine.substring(0, 140)}...\n`);
+                      }
+                    }
+
+                    // B. ACTION
+                    const actionName = obj.action || obj.title || (obj.message && obj.message.action);
+                    if (actionName && typeof onStdout === 'function') {
+                      onStdout(`\x1b[33m[AGENT ACTION]\x1b[0m ${String(actionName).substring(0, 140)}\n`);
+                    }
+
+                    // C. TOOL CALL
+                    let toolName = '';
+                    let toolInput = '';
+                    if (obj.type === 'tool_use' || obj.tool) {
+                      toolName = obj.name || obj.tool || 'unknown_tool';
+                      toolInput = JSON.stringify(obj.input || obj.args || '').substring(0, 100);
+                    } else if (obj.message && Array.isArray(obj.message.content)) {
+                      const toolUsePart = obj.message.content.find(c => c.type === 'tool_use');
+                      if (toolUsePart) {
+                        toolName = toolUsePart.name;
+                        toolInput = JSON.stringify(toolUsePart.input || '').substring(0, 100);
+                      }
+                    }
+
+                    if (toolName && typeof onStdout === 'function') {
+                      onStdout(`\x1b[35m[TOOL CALL]\x1b[0m ${toolName} (${toolInput})\n`);
+                    }
+                  } catch (e) {
+                    // 2. Phân tích raw text dòng log nếu không phải JSON
+                    if (typeof onStdout === 'function' && trimmed.length > 5) {
+                      if (/thinking|thought|reasoning/i.test(trimmed)) {
+                        onStdout(`\x1b[36m[AGENT THOUGHT]\x1b[0m ${trimmed.substring(0, 140)}\n`);
+                      } else if (/executing|action|running/i.test(trimmed)) {
+                        onStdout(`\x1b[33m[AGENT ACTION]\x1b[0m ${trimmed.substring(0, 140)}\n`);
+                      } else if (/tool|call|function/i.test(trimmed)) {
+                        onStdout(`\x1b[35m[TOOL CALL]\x1b[0m ${trimmed.substring(0, 140)}\n`);
+                      }
+                    }
                   }
                 }
               }
             }
-          } catch(e) {}
+          } catch (e) {}
         }
       }
-    }, 5000);
+    }, 2000);
 
     const result = await proc.wait();
     clearInterval(tailTimer);
