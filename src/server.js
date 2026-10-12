@@ -1213,21 +1213,37 @@ const executeStep = async (id) => {
       }, 6000);
       const runner = runnerRegistry.getAvailableRunner(implementAgent);
       if (runner) {
+        let implementResult = null;
         try {
-          await runner.execute({
+          implementResult = await runner.execute({
             prompt: implementPrompt, cwd: workspacePath, jobId: id,
             onStdout: (text) => jobEventBus.emitJobLog(id, { text }),
             onStderr: (text) => jobEventBus.emitJobLog(id, { text })
           });
         } catch (execErr) {
-          jobEventBus.emitJobLog(id, { text: `[IMPLEMENT] Cảnh báo thực thi: ${execErr.message}\n` });
+          jobEventBus.emitJobLog(id, { text: `[IMPLEMENT] Loi thuc thi: ${execErr.message}\n` });
+          db.updateJob(id, { status: 'FAILED', current_step: 'IMPLEMENT', error_message: `IMPLEMENT that bai: ${execErr.message}` });
+          jobEventBus.emitJobStatus(id, { status: 'FAILED' });
+          jobEventBus.emitJobError(id, { error: `IMPLEMENT that bai: ${execErr.message}` });
+          return;
         } finally {
           clearInterval(impProgressTimer);
         }
-        jobEventBus.emitJobLog(id, { text: `\n[IMPLEMENT] Hoàn tất triển khai mã nguồn.\n` });
+        // IMPLEMENT that bai (timeout hoac exit code != 0) thi DUNG pipeline, khong tu dong sang TESTING
+        if (!implementResult || implementResult.timedOut || implementResult.exitCode !== 0) {
+          const failReason = implementResult && implementResult.timedOut
+            ? `vuot qua gioi han thoi gian (${implementResult.timeoutMs || 900000}ms)`
+            : `exit code ${implementResult ? implementResult.exitCode : 'khong xac dinh'}`;
+          jobEventBus.emitJobLog(id, { text: `\n[IMPLEMENT-FAILED] Trien khai that bai (${failReason}). Pipeline DUNG tai IMPLEMENT, vui long kiem tra log va chay lai.\n` });
+          db.updateJob(id, { status: 'FAILED', current_step: 'IMPLEMENT', error_message: `IMPLEMENT that bai: ${failReason}` });
+          jobEventBus.emitJobStatus(id, { status: 'FAILED' });
+          jobEventBus.emitJobError(id, { error: `IMPLEMENT that bai: ${failReason}` });
+          return;
+        }
+        jobEventBus.emitJobLog(id, { text: `\n[IMPLEMENT] Hoan tat trien khai ma nguon.\n` });
       } else {
         clearInterval(impProgressTimer);
-        jobEventBus.emitJobLog(id, { text: `\n[IMPLEMENT-WARN] Không tìm thấy runner hợp lệ cho ${implementAgent}\n` });
+        jobEventBus.emitJobLog(id, { text: `\n[IMPLEMENT-WARN] Khong tim thay runner hop le cho ${implementAgent}\n` });
       }
       db.updateJob(id, { status: 'TESTING', current_step: 'TESTING' });
       jobEventBus.emitJobStatus(id, { status: 'TESTING' });
@@ -1239,9 +1255,10 @@ const executeStep = async (id) => {
       const testAgent = agentMapping.TESTING || 'test-runner';
       db.updateJob(id, { runner: testAgent });
       jobEventBus.emitJobLog(id, { text: `\n[3/4] >>> 🤖 [TESTING] Bắt đầu kiểm thử thật với Runner/Agent: ${testAgent}...\n` });
+      
+      let cmd = 'git status';
       const promptText = (job.prompt || '') + ' ' + (job.title || '');
       const urlMatch = promptText.match(/https?:\/\/[^\s"',]+/i);
-
       if (urlMatch) {
         const targetUrl = urlMatch[0];
         cmd = `node -e "fetch('${targetUrl}').then(r => { console.log('Xác minh thành công URL ${targetUrl} - HTTP Status:', r.status); process.exit(r.status < 400 ? 0 : 1); }).catch(e => { console.error('Lỗi kết nối tới ${targetUrl}:', e.message); process.exit(1); })"`;
