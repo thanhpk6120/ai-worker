@@ -197,8 +197,10 @@ class BaseAdapter {
       try {
         const promptFile = path.join(cwd, '.task_prompt.txt');
         fs.writeFileSync(promptFile, prompt, 'utf-8');
-        const safePromptFile = process.platform === 'win32' || promptFile.includes(' ') ? `"${promptFile}"` : promptFile;
-        const safePrompt = `Please read and strictly execute all instructions in ${safePromptFile}`;
+        // Không bọc nháy kép trực tiếp vào chuỗi nếu dùng child_process.spawn() vì cmd.exe sẽ bóc tách sai và cắt mất args.
+        // Node.js sẽ tự động escape đối số chứa khoảng trắng.
+        const safePromptFile = promptFile;
+        const safePrompt = `Please read and strictly execute all instructions in "${safePromptFile}"`;
         effectiveArgs = this.buildArgs(safePrompt, options);
       } catch (e) {
         console.warn('Ghi tệp .task_prompt.txt cảnh báo:', e.message);
@@ -225,7 +227,62 @@ class BaseAdapter {
       timeoutMs: options.timeoutMs || 900000
     });
 
+    // Cải tiến: Nếu stdout qua pipe bị chặn (như Claude/OMP headless ẩn stream), 
+    // tự động tìm file log session nội bộ gần nhất của agent để nạp bù hiển thị ra giao diện.
+    let lastOutTime = Date.now();
+    proc.child.stdout.on('data', () => { lastOutTime = Date.now(); });
+    
+    const tailTimer = setInterval(() => {
+      if (Date.now() - lastOutTime > 8000) {
+        const fs = require('fs');
+        const os = require('os');
+        const crypto = require('crypto');
+        let sessionDir = '';
+        if (this.command === 'claude' || effectiveCommand.includes('claude')) {
+          const projSlug = cwd.replace(/[^a-zA-Z0-9]/g, '-').replace(/-+/g, '-');
+          sessionDir = path.join(os.homedir(), '.claude', 'projects', projSlug);
+        } else if (this.command === 'omp' || effectiveCommand.includes('omp')) {
+          sessionDir = path.join(os.homedir(), '.omp', 'agent', 'sessions', cwd.replace(/[^a-zA-Z0-9]/g, '-').replace(/-+/g, '-'));
+        }
+        
+        if (sessionDir && fs.existsSync(sessionDir)) {
+          try {
+            const files = fs.readdirSync(sessionDir).filter(f => f.endsWith('.jsonl'));
+            if (files.length > 0) {
+              files.sort((a, b) => fs.statSync(path.join(sessionDir, b)).mtimeMs - fs.statSync(path.join(sessionDir, a)).mtimeMs);
+              const latestFile = path.join(sessionDir, files[0]);
+              const stat = fs.statSync(latestFile);
+              if (!this._lastSize) this._lastSize = stat.size - 2000 > 0 ? stat.size - 2000 : 0;
+              if (stat.size > this._lastSize) {
+                const fd = fs.openSync(latestFile, 'r');
+                const buffer = Buffer.alloc(stat.size - this._lastSize);
+                fs.readSync(fd, buffer, 0, buffer.length, this._lastSize);
+                fs.closeSync(fd);
+                this._lastSize = stat.size;
+                
+                const lines = buffer.toString('utf-8').split('\n');
+                for (const line of lines) {
+                  if (line.trim()) {
+                    try {
+                      const obj = JSON.parse(line);
+                      if (obj.message && obj.message.role === 'assistant' && obj.message.content) {
+                        let text = Array.isArray(obj.message.content) ? obj.message.content.map(c => c.text).join('') : obj.message.content;
+                        if (text && typeof onStdout === 'function') {
+                          onStdout(`\x1b[36m[AGENT THOUGHT]\x1b[0m ${text.split('\\n')[0].substring(0, 100)}...\n`);
+                        }
+                      }
+                    } catch(e) {}
+                  }
+                }
+              }
+            }
+          } catch(e) {}
+        }
+      }
+    }, 5000);
+
     const result = await proc.wait();
+    clearInterval(tailTimer);
     if (typeof onStdout === 'function') {
       const exitColor = result.exitCode === 0 ? '\x1b[32m' : '\x1b[31m';
       onStdout(`\r\n\x1b[90m────────────────────────────────────────────────────────────────────────────────\x1b[0m\r\n${exitColor}[AI-AGENT-PROCESS-EXIT] Tiến trình CLI kết thúc với mã: ${result.exitCode}\x1b[0m\r\n`);
