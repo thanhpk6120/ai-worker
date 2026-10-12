@@ -163,27 +163,60 @@ class BaseAdapter {
   getSessionDir(cwd = process.cwd()) {
     const os = require('node:os');
     const path = require('node:path');
-    // Claude Code và các runner tạo slug bằng cách thay ký tự không phải chữ/số thành dấu gạch đơn,
-    // KHÔNG được gộp dấu gạch liên tiếp (ví dụ D:\... -> D--Thanhpk-...)
-    const projSlug = cwd.replace(/[^a-zA-Z0-9]/g, '-');
+    const rawSlug = cwd.replace(/[^a-zA-Z0-9]/g, '-');
     const cmd = (this.command || '').toLowerCase();
 
     if (cmd.includes('claude')) {
-      return path.join(os.homedir(), '.claude', 'projects', projSlug);
+      return path.join(os.homedir(), '.claude', 'projects', rawSlug);
     }
     if (cmd.includes('omp')) {
-      return path.join(os.homedir(), '.omp', 'agent', 'sessions', projSlug);
+      // OMP bọc thêm 2 gạch 2 đầu và 1 gạch cuối: D:\... -> --D--Thanhpk-...--
+      return path.join(os.homedir(), '.omp', 'agent', 'sessions', `-${rawSlug}-`);
     }
     if (cmd.includes('opencode')) {
-      return path.join(os.homedir(), '.opencode', 'sessions', projSlug);
+      return path.join(os.homedir(), '.opencode', 'sessions', rawSlug);
     }
     if (cmd.includes('codex')) {
-      return path.join(os.homedir(), '.codex', 'sessions', projSlug);
+      return path.join(os.homedir(), '.codex', 'sessions', rawSlug);
     }
     if (cmd.includes('antigravity')) {
-      return path.join(os.homedir(), '.antigravity', 'sessions', projSlug);
+      return path.join(os.homedir(), '.antigravity', 'sessions', rawSlug);
     }
     return null;
+  }
+
+  /**
+   * Quét file log mới nhất: hỗ trợ cả file trực tiếp và file trong thư mục con 1 cấp (OMP)
+   */
+  findLatestSessionFile(sessionDir) {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const exts = ['.jsonl', '.json', '.log'];
+    const candidates = [];
+
+    for (const entry of fs.readdirSync(sessionDir)) {
+      const fullPath = path.join(sessionDir, entry);
+      try {
+        const stat = fs.statSync(fullPath);
+        if (stat.isFile() && exts.some(e => entry.endsWith(e))) {
+          candidates.push({ path: fullPath, mtime: stat.mtimeMs });
+        } else if (stat.isDirectory()) {
+          // OMP lồng session trong thư mục con cùng tên: quét sâu thêm 1 cấp
+          for (const sub of fs.readdirSync(fullPath)) {
+            const subPath = path.join(fullPath, sub);
+            try {
+              const subStat = fs.statSync(subPath);
+              if (subStat.isFile() && exts.some(e => sub.endsWith(e))) {
+                candidates.push({ path: subPath, mtime: subStat.mtimeMs });
+              }
+            } catch (e) {}
+          }
+        }
+      } catch (e) {}
+    }
+
+    candidates.sort((a, b) => b.mtime - a.mtime);
+    return candidates.length > 0 ? candidates[0].path : null;
   }
 
   parseSummary(fullOutput) {
@@ -265,6 +298,7 @@ class BaseAdapter {
     proc.child.stdout.on('data', () => { lastOutTime = Date.now(); });
 
     // Biến state cục bộ cho mỗi lần execute (tránh lỗi cache kích thước file cũ giữa các lần chạy)
+    const executeStartTime = Date.now();
     const tailState = {
       currentFile: null,
       readOffset: 0,
@@ -278,16 +312,16 @@ class BaseAdapter {
 
         if (sessionDir && fs.existsSync(sessionDir)) {
           try {
-            const files = fs.readdirSync(sessionDir).filter(f => f.endsWith('.jsonl') || f.endsWith('.json') || f.endsWith('.log'));
-            if (files.length > 0) {
-              files.sort((a, b) => fs.statSync(path.join(sessionDir, b)).mtimeMs - fs.statSync(path.join(sessionDir, a)).mtimeMs);
-              const latestFile = path.join(sessionDir, files[0]);
+            const latestFile = this.findLatestSessionFile(sessionDir);
+            if (latestFile) {
               const stat = fs.statSync(latestFile);
 
               // Nếu chuyển sang file session mới hoặc file bị reset: đặt lại offset đọc
               if (tailState.currentFile !== latestFile || stat.size < tailState.readOffset) {
                 tailState.currentFile = latestFile;
-                tailState.readOffset = 0;
+                // Tránh phát lại toàn bộ history của file cũ: Nếu file sửa đổi TRƯỚC khi execute() chạy,
+                // hoặc đây là lần đầu thấy file nhưng file đã có sẵn nội dung từ trước -> bỏ qua phần cũ.
+                tailState.readOffset = (stat.mtimeMs < executeStartTime) ? stat.size : 0;
                 tailState.lineBuffer = '';
               }
 
@@ -311,14 +345,19 @@ class BaseAdapter {
                   // 1. Phân tích định dạng JSON/JSONL chuẩn
                   try {
                     const obj = JSON.parse(trimmed);
-
-                    // A. THOUGHT / REASONING
+                    // A. THOUGHT / REASONING: hỗ trợ định dạng Claude (message.content) và OMP (content.text)
                     let thoughtText = '';
                     if (obj.message && obj.message.role === 'assistant') {
                       if (Array.isArray(obj.message.content)) {
                         const thinkingPart = obj.message.content.find(c => c.type === 'thinking' || c.type === 'thought');
                         if (thinkingPart) thoughtText = thinkingPart.thinking || thinkingPart.text || '';
-                        else thoughtText = obj.message.content.map(c => c.text || '').join('');
+                        else {
+                          // OMP dùng type text/toolCall: chỉ gom phần text thuần
+                          thoughtText = obj.message.content
+                            .filter(c => c.type === 'text' && c.text)
+                            .map(c => c.text)
+                            .join('\n');
+                        }
                       } else if (typeof obj.message.content === 'string') {
                         thoughtText = obj.message.content;
                       }
@@ -330,6 +369,20 @@ class BaseAdapter {
                       const firstLine = thoughtText.split('\n')[0].trim();
                       if (firstLine) {
                         onStdout(`\x1b[36m[AGENT THOUGHT]\x1b[0m ${firstLine.substring(0, 140)}...\n`);
+                      }
+                    }
+
+                    // B2. TOOL CALL của OMP: content[].type === 'toolCall' (camelCase)
+                    if (obj.message && Array.isArray(obj.message.content)) {
+                      for (const part of obj.message.content) {
+                        if ((part.type === 'toolCall' || part.type === 'tool_call' || (part.name && part.arguments)) && typeof onStdout === 'function') {
+                          const toolName = part.name || part.tool || 'tool';
+                          let argsPreview = '';
+                          try {
+                            argsPreview = JSON.stringify(part.arguments || part.input || {}).substring(0, 100);
+                          } catch (e) {}
+                          onStdout(`\x1b[35m[TOOL CALL]\x1b[0m ${toolName} (${argsPreview})\n`);
+                        }
                       }
                     }
 

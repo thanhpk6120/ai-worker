@@ -25,11 +25,11 @@ Nhiệm vụ của bạn là khảo sát codebase tại workspace và lập kế
 
 ## Hướng dẫn thực thi:
 1. Đọc hiểu cấu trúc dự án hiện tại trong thư mục workspace.
-2. Sinh ra đồng thời 2 tài liệu kỹ thuật hoàn chỉnh:
-   - **Kế hoạch triển khai mã nguồn (`dev_plan.md`):** Liệt kê các module/service cần chỉnh sửa, kiến trúc giải pháp, APIs, và các bước code chi tiết.
-   - **Kế hoạch kiểm thử (`test_plan.md`):** Mô tả cụ thể kịch bản kiểm thử giao diện bằng CloakBrowser, các bước tương tác (click, fill), dữ liệu mock/test data, các điểm chụp ảnh màn hình bằng chứng (checkpoints), và kiểm thử API/DB/Logs tương ứng.
+2. BẮT BUỘC BẠN PHẢI TỰ TAY VIẾT TRỰC TIẾP LẦN LƯỢT ĐỦ CẢ 2 TỆP (TUYỆT ĐỐI KHÔNG spawn async background subagent / background task vì tiến trình headless CLI sẽ kết thúc trước khi subagent kịp ghi file):
+   - **Bước 2a. Ghi tệp `{{FEATURE_DIR}}/dev_plan.md`:** Liệt kê các module/service cần chỉnh sửa, kiến trúc giải pháp, APIs, và các bước code chi tiết.
+   - **Bước 2b. Ghi tiếp tệp `{{FEATURE_DIR}}/test_plan.md`:** Mô tả cụ thể kịch bản kiểm thử giao diện bằng CloakBrowser, các bước tương tác (click, fill), dữ liệu mock/test data, các điểm chụp ảnh màn hình bằng chứng (checkpoints), và kiểm thử API/DB/Logs tương ứng (tối thiểu 100 dòng chi tiết, KHÔNG ĐƯỢC để file rỗng hoặc chỉ có 1 dòng tiêu đề).
 3. Nếu phát hiện yêu cầu mơ hồ, mâu thuẫn hoặc cần quyết định lựa chọn quan trọng, hãy đặt câu hỏi làm rõ. BẠN PHẢI xuất một khối ```json:questions chứa một **mảng** các đối tượng câu hỏi, ví dụ: `[{"id":"q1", "question":"...", "context":"...", "options":["A", "B"]}, {"id":"q2",...}]`.
-4. Lưu trữ toàn bộ các kế hoạch trực tiếp vào các tệp Markdown bên trong thư mục `{{FEATURE_DIR}}`.
+4. Xác nhận cả 2 tệp `dev_plan.md` và `test_plan.md` đã có đầy đủ nội dung bên trong thư mục `{{FEATURE_DIR}}` trước khi hoàn tất phản hồi.
 
 ## 🔌 QUY TẮC ƯU TIÊN MCP TRƯỚC (MCP-FIRST RULE - BẮT BUỘC):
 1. **Khi prompt chứa link Jira/Confluence/Atlassian** (`jira.*`, `confluence.*`, `/browse/`, `/wiki/`):

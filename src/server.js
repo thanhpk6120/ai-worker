@@ -1092,15 +1092,43 @@ const executeStep = async (id) => {
         clearInterval(planProgressTimer);
         // Trích xuất dev_plan.md và test_plan.md từ stdout nếu chưa được tạo trên ổ cứng
         let planFiles = fileManager.readPlanFiles(workspacePath, taskCode);
-        if (!planFiles.dev_plan || !planFiles.test_plan) {
+        let effectiveDevPlan = planFiles.devPlan || planFiles.dev_plan || '';
+        let effectiveTestPlan = planFiles.testPlan || planFiles.test_plan || '';
+
+        // Nếu một trong 2 plan bị thiếu hoặc rỗng (chỉ có dòng tiêu đề < 60 ký tự)
+        if (!effectiveDevPlan || effectiveDevPlan.trim().length < 60 || !effectiveTestPlan || effectiveTestPlan.trim().length < 60) {
           const devMatch = outBuffer.match(/# (Dev Plan|Kế hoạch triển khai)[\s\S]*?(?=# (Test Plan|Kế hoạch kiểm thử)|$)/i);
           const testMatch = outBuffer.match(/# (Test Plan|Kế hoạch kiểm thử)[\s\S]*?(?=$)/i);
-          if (devMatch || testMatch) {
-             const DualPlanningGenerator = require('./pipeline/dualPlanning').DualPlanningGenerator;
-             const gen = new DualPlanningGenerator({ baseOutputDir: featureDir });
-             gen.savePlans(devMatch ? devMatch[0] : '', testMatch ? testMatch[0] : '');
-             planFiles = fileManager.readPlanFiles(workspacePath, taskCode);
+
+          const { DualPlanningGenerator } = require('./pipeline/dualPlanning');
+          const gen = new DualPlanningGenerator({ baseOutputDir: featureDir });
+
+          // Nếu chưa có devPlan tử tế, thử lấy từ stdout hoặc sinh mẫu
+          if (!effectiveDevPlan || effectiveDevPlan.trim().length < 60) {
+            if (devMatch) {
+              effectiveDevPlan = devMatch[0];
+            } else {
+              const generatedDev = gen.generateDevPlan({ featureName: taskCode, prompt: job.prompt || taskCode });
+              effectiveDevPlan = generatedDev.content;
+            }
+            fs.writeFileSync(path.join(featureDir, 'dev_plan.md'), effectiveDevPlan, 'utf8');
           }
+
+          // Nếu chưa có testPlan tử tế (như trường hợp agent chỉ ghi 1 dòng tiêu đề), tự động sinh đầy đủ
+          if (!effectiveTestPlan || effectiveTestPlan.trim().length < 60) {
+            if (testMatch && testMatch[0].trim().length >= 60) {
+              effectiveTestPlan = testMatch[0];
+            } else {
+              const generatedTest = gen.generateTestPlan({
+                featureName: taskCode,
+                prompt: job.prompt || taskCode,
+                devPlan: effectiveDevPlan
+              });
+              effectiveTestPlan = generatedTest.content;
+            }
+            fs.writeFileSync(path.join(featureDir, 'test_plan.md'), effectiveTestPlan, 'utf8');
+          }
+          planFiles = fileManager.readPlanFiles(workspacePath, taskCode);
         }
 
         // Trích xuất JSON questions nếu có
@@ -1125,8 +1153,13 @@ const executeStep = async (id) => {
           }
         }
 
-        db.saveDualPlan({ job_id: id, dev_plan: planFiles.dev_plan || '', test_plan: planFiles.test_plan || '', status: 'GENERATED' });
-        jobEventBus.emitJobLog(id, { text: `\n[PLANNING] Đã ghi dev_plan.md và test_plan.md. Lưu metadata Dual Plan vào DB thành công.\n` });
+        db.saveDualPlan({
+          job_id: id,
+          dev_plan: planFiles.devPlan || planFiles.dev_plan || effectiveDevPlan || '',
+          test_plan: planFiles.testPlan || planFiles.test_plan || effectiveTestPlan || '',
+          status: 'GENERATED'
+        });
+        jobEventBus.emitJobLog(id, { text: `\n[PLANNING] Đã ghi dev_plan.md và test_plan.md đầy đủ. Lưu metadata Dual Plan vào DB thành công.\n` });
       } else {
         jobEventBus.emitJobLog(id, { text: `[PLANNING-WARN] Không tìm thấy runner hợp lệ cho ${planningAgent}\n` });
       }
@@ -1617,7 +1650,7 @@ app.patch('/api/v1/jobs/:id/status', (req, res) => {
  * GET /api/v1/jobs/:id/plan-files (và /api/v1/tasks/:id/plan-files)
  * Đọc trực tiếp nội dung các file expect.md, dev_plan.md, test_plan.md từ đĩa
  */
-app.get('/api/v1/jobs/:id/plan-files', (req, res) => {
+app.get(['/api/v1/jobs/:id/plan-files', '/api/v1/tasks/:id/plan-files'], (req, res) => {
   try {
     const { id } = req.params;
     const job = db.getJobById(id);
