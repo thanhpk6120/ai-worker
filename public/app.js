@@ -84,12 +84,33 @@
 
   function formatLogWithTimestamp(text, timestamp) {
     if (!text) return '';
+    // Không chèn thêm thời gian nếu dòng đã có thời gian hoặc là dòng phân cách
+    if (text.match(/^(\x1b\[\d+m)?\[\d{4}-\d{2}-\d{2}/) || text.includes('────────────────────────────────────────────────────────────────────────────────')) {
+      return text;
+    }
     const d = new Date(timestamp || Date.now());
     const pad = (n) => String(n).padStart(2, '0');
     const timeStr = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
     const prefix = `\x1b[90m[${timeStr}]\x1b[0m `;
+
     let result = '';
-    for (let i = 0; i < text.length; i++) {
+    let i = 0;
+    while (i < text.length) {
+      // Bỏ qua mã màu ANSI khi xét đầu dòng
+      if (text[i] === '\x1b' && text[i+1] === '[') {
+        let ansi = '';
+        while (i < text.length && text[i] !== 'm') {
+          ansi += text[i];
+          i++;
+        }
+        if (i < text.length) {
+          ansi += text[i];
+          i++;
+        }
+        result += ansi;
+        continue;
+      }
+
       const ch = text[i];
       if (termIsNewLine && ch !== '\r' && ch !== '\n') {
         result += prefix;
@@ -99,6 +120,7 @@
       if (ch === '\n') {
         termIsNewLine = true;
       }
+      i++;
     }
     return result;
   }

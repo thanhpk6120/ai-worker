@@ -259,14 +259,21 @@ class BaseAdapter {
       timeoutMs: options.timeoutMs || 900000
     });
 
-    // Cải tiến: Nếu stdout qua pipe bị chặn (như Claude/OMP headless ẩn stream), 
+    // Cải tiến: Nếu stdout qua pipe bị chặn (như Claude/OMP headless ẩn stream),
     // tự động tìm file log session nội bộ gần nhất của agent để nạp bù hiển thị ra giao diện.
     let lastOutTime = Date.now();
     proc.child.stdout.on('data', () => { lastOutTime = Date.now(); });
-    
+
+    // Biến state cục bộ cho mỗi lần execute (tránh lỗi cache kích thước file cũ giữa các lần chạy)
+    const tailState = {
+      currentFile: null,
+      readOffset: 0,
+      lineBuffer: ''
+    };
+
     const tailTimer = setInterval(() => {
-      // Nếu stdout im lặng quá 3.5s, tự động kích hoạt Session File Watcher cho runner tương ứng
-      if (Date.now() - lastOutTime > 3500) {
+      // Nếu stdout im lặng quá 2s, tự động kích hoạt Session File Watcher cho runner tương ứng
+      if (Date.now() - lastOutTime > 2000) {
         const sessionDir = this.getSessionDir(cwd);
 
         if (sessionDir && fs.existsSync(sessionDir)) {
@@ -276,15 +283,27 @@ class BaseAdapter {
               files.sort((a, b) => fs.statSync(path.join(sessionDir, b)).mtimeMs - fs.statSync(path.join(sessionDir, a)).mtimeMs);
               const latestFile = path.join(sessionDir, files[0]);
               const stat = fs.statSync(latestFile);
-              if (!this._lastSize) this._lastSize = stat.size - 3000 > 0 ? stat.size - 3000 : 0;
-              if (stat.size > this._lastSize) {
-                const fd = fs.openSync(latestFile, 'r');
-                const buffer = Buffer.alloc(stat.size - this._lastSize);
-                fs.readSync(fd, buffer, 0, buffer.length, this._lastSize);
-                fs.closeSync(fd);
-                this._lastSize = stat.size;
 
-                const lines = buffer.toString('utf-8').split('\n');
+              // Nếu chuyển sang file session mới hoặc file bị reset: đặt lại offset đọc
+              if (tailState.currentFile !== latestFile || stat.size < tailState.readOffset) {
+                tailState.currentFile = latestFile;
+                tailState.readOffset = 0;
+                tailState.lineBuffer = '';
+              }
+
+              if (stat.size > tailState.readOffset) {
+                const readLength = stat.size - tailState.readOffset;
+                const fd = fs.openSync(latestFile, 'r');
+                const buffer = Buffer.alloc(readLength);
+                fs.readSync(fd, buffer, 0, readLength, tailState.readOffset);
+                fs.closeSync(fd);
+                tailState.readOffset = stat.size;
+
+                const chunkText = tailState.lineBuffer + buffer.toString('utf-8');
+                const lines = chunkText.split(/\r?\n/);
+                // Giữ lại phần dư chưa hoàn thành dòng cuối cùng vào lineBuffer
+                tailState.lineBuffer = lines.pop() || '';
+
                 for (const line of lines) {
                   const trimmed = line.trim();
                   if (!trimmed) continue;
