@@ -1289,7 +1289,7 @@ const executeStep = async (id) => {
         // TUYỆT ĐỐI KHÔNG chụp dashboard của chính worker (localhost:3000)
         const uiImgFile = path.join(evidenceDir, '01_ui_target_service.png');
         try {
-          const BrowserRunner = require('./verification/browserRunner');
+          const { BrowserRunner } = require('./verification/browserRunner');
           const br = new BrowserRunner({ evidenceBaseDir: path.dirname(evidenceDir) });
           const targetUrl = (typeof cmd === 'string' && /https?:\/\/[^\s"']+/i.test(cmd))
             ? cmd.match(/https?:\/\/[^\s"']+/i)[0]
@@ -1307,7 +1307,7 @@ const executeStep = async (id) => {
             fs.copyFileSync(record.filePath, uiImgFile);
           }
           if (!fs.existsSync(uiImgFile)) {
-            const BrowserRunnerCls = require('./verification/browserRunner');
+            const { BrowserRunner: BrowserRunnerCls } = require('./verification/browserRunner');
             fs.writeFileSync(uiImgFile, BrowserRunnerCls.createPngBuffer(1280, 720, 15, 23, 42));
           }
         } catch (shotErr) {
