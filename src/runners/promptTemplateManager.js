@@ -62,18 +62,84 @@ Thư mục Feature bắt buộc: {{FEATURE_DIR}}
   }
 
   /**
-   * Lưu nội dung prompt ra tệp UTF-8 (.task_prompt.txt mặc định)
-   * @param {string} prompt
-   * @param {string} [targetDirOrPath='./']
-   * @returns {string} Đường dẫn tệp đã lưu
+   * Lưu prompt vào file BÊN TRONG feature dir của task.
+   * targetDirOrPath BẮT BUỘC là file/thư mục nằm trong feature dir, từ chối workspace root.
    */
-  savePromptFile(prompt, targetDirOrPath = './') {
+  savePromptFile(prompt, targetDirOrPath, featureDir) {
+    if (!targetDirOrPath || !featureDir) {
+      throw new Error('Từ chối ghi prompt: cần targetDirOrPath và featureDir, không ghi ra workspace root.');
+    }
     const filePath = targetDirOrPath.endsWith('.txt')
       ? targetDirOrPath
-      : path.join(targetDirOrPath, '.task_prompt.txt');
+      : path.join(targetDirOrPath, 'prompt.md');
+    const resolvedOut = path.resolve(filePath);
+    const resolvedFeature = path.resolve(featureDir);
+    if (!(resolvedOut === resolvedFeature || resolvedOut.startsWith(resolvedFeature + path.sep))) {
+      throw new Error(`Từ chối ghi prompt ra ngoài feature dir: ${filePath}`);
+    }
+    fs.mkdirSync(path.dirname(resolvedOut), { recursive: true });
     fs.writeFileSync(filePath, prompt, 'utf8');
     return filePath;
   }
+  /**
+   * Lấy danh sách các MCP Server đang được cấu hình trên máy (Claude Code & OMP)
+   * @returns {string} Khối Markdown mô tả danh sách MCP
+   */
+  getActiveMcpServersSection() {
+    const os = require('node:os');
+    const home = os.homedir();
+    const mcpServers = {};
+
+    // 1. Đọc ~/.claude.json
+    const claudePath = path.join(home, '.claude.json');
+    if (fs.existsSync(claudePath)) {
+      try {
+        const cfg = JSON.parse(fs.readFileSync(claudePath, 'utf8'));
+        if (cfg.mcpServers && typeof cfg.mcpServers === 'object') {
+          Object.assign(mcpServers, cfg.mcpServers);
+        }
+      } catch (e) {}
+    }
+
+    // 2. Đọc ~/.omp/agent/mcp.json
+    const ompMcpPath = path.join(home, '.omp', 'agent', 'mcp.json');
+    if (fs.existsSync(ompMcpPath)) {
+      try {
+        const cfg = JSON.parse(fs.readFileSync(ompMcpPath, 'utf8'));
+        if (cfg.mcpServers && typeof cfg.mcpServers === 'object') {
+          Object.assign(mcpServers, cfg.mcpServers);
+        }
+      } catch (e) {}
+    }
+
+    const serverNames = Object.keys(mcpServers);
+    if (serverNames.length === 0) {
+      return '';
+    }
+
+    const descriptions = {
+      'company-atlassian': 'Đọc/ghi/tìm kiếm Jira issues, Confluence pages (cần dùng khi gặp mã ticket hoặc link Jira/Confluence)',
+      'atlassian': 'Đọc/ghi/tìm kiếm Jira issues, Confluence pages',
+      'cloakbrowser': 'Tự động hóa trình duyệt web: mở URL, click, fill, scroll, screenshot, cào dữ liệu DOM',
+      'context7': 'Tra cứu tài liệu mới nhất về thư viện, framework, SDK, APIs',
+      'gitnexus': 'Phân tích code graph, symbol, cấu trúc mã nguồn dự án',
+      'glab': 'Tương tác với GitLab repository, Merge Requests, issues',
+      'memorix': 'Quản lý ngữ cảnh, bộ nhớ dự án và bài học kỹ thuật'
+    };
+
+    const lines = [
+      '## 🔌 DANH SÁCH MCP SERVERS ĐANG ĐƯỢC CẤU HÌNH VÀ KHẢ DỤNG TRONG PHIÊN LÀM VIỆC:',
+      'Hệ thống phát hiện các MCP Server sau đã được kết nối sẵn:'
+    ];
+
+    for (const name of serverNames) {
+      const desc = descriptions[name] || descriptions[name.toLowerCase()] || 'Công cụ chuyên dụng theo domain';
+      lines.push(`- **\`${name}\`**: ${desc}`);
+    }
+
+    return lines.join('\n') + '\n';
+  }
+
   /**
    * Sinh prompt hoàn chỉnh sau khi thay thế các placeholders
    */
@@ -102,17 +168,32 @@ Thư mục Feature bắt buộc: {{FEATURE_DIR}}
       errorSection = `## Chi tiết Lỗi kiểm thử (Error Logs):\n\`\`\`\n${errorLogs}\n\`\`\`\n`;
     }
 
+    const mcpSection = (typeof this.getActiveMcpServersSection === 'function')
+      ? this.getActiveMcpServersSection()
+      : '';
+
     const filledPrompt = template
       .replace(/\{\{TASK_CODE\}\}/g, taskCode || 'TASK-UNSPECIFIED')
       .replace(/\{\{PROMPT\}\}/g, userPrompt || '')
       .replace(/\{\{WORKSPACE_PATH\}\}/g, workspacePath || './')
       .replace(/\{\{FEATURE_DIR\}\}/g, featureDir || '')
       .replace(/\{\{PREVIOUS_CONTEXT\}\}/g, contextSection)
-      .replace(/\{\{ERROR_LOGS\}\}/g, errorSection);
+      .replace(/\{\{ERROR_LOGS\}\}/g, errorSection)
+      .replace(/\{\{MCP_SERVERS\}\}/g, mcpSection);
 
+    // KHÔNG ghi prompt ra workspace root. Nếu caller yêu cầu lưu file, chỉ cho phép
+    // ghi vào thư mục feature của task (outputFile phải nằm trong featureDir).
     if (saveToFile || savePromptFile || outputFile) {
-      const targetPath = outputFile || path.join(workspacePath || './', '.task_prompt.txt');
-      fs.writeFileSync(targetPath, filledPrompt, 'utf8');
+      if (!outputFile) {
+        throw new Error('Từ chối ghi prompt: outputFile bắt buộc phải nằm trong feature dir, không ghi ra workspace root.');
+      }
+      const resolvedOut = path.resolve(outputFile);
+      const resolvedFeature = featureDir ? path.resolve(featureDir) : null;
+      if (!resolvedFeature || !(resolvedOut === resolvedFeature || resolvedOut.startsWith(resolvedFeature + path.sep))) {
+        throw new Error(`Từ chối ghi prompt ra ngoài feature dir: ${outputFile}`);
+      }
+      fs.mkdirSync(path.dirname(resolvedOut), { recursive: true });
+      fs.writeFileSync(resolvedOut, filledPrompt, 'utf8');
     }
 
     return filledPrompt;

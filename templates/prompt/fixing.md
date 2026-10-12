@@ -10,7 +10,10 @@ Nhiệm vụ của bạn là tiếp nhận toàn bộ ngữ cảnh kiểm thử 
 {{PROMPT}}
 
 - **Đường dẫn Workspace:** {{WORKSPACE_PATH}}
-- **Thư mục Feature bắt buộc:** {{FEATURE_DIR}}
+- **Thư mục Feature của task này (mọi tài liệu của task nằm tại đây):** {{FEATURE_DIR}}
+- **Các file ngữ cảnh của task:** `{{FEATURE_DIR}}/expect.md`, `{{FEATURE_DIR}}/plan.md`, `{{FEATURE_DIR}}/tasks.md`, `{{FEATURE_DIR}}/memory.md`, `{{FEATURE_DIR}}/context.md` (file nào tồn tại thì đọc, không có thì bỏ qua)
+
+{{MCP_SERVERS}}
 
 ## Ngữ cảnh lỗi cần khắc phục (Error Context):
 {{ERROR_LOGS}}
@@ -28,12 +31,12 @@ Nhiệm vụ của bạn là tiếp nhận toàn bộ ngữ cảnh kiểm thử 
    - Tuyệt đối không xóa vĩnh viễn tệp tin của người dùng (nếu dọn dẹp, chuyển vào Recycle Bin / Trash).
 
 ## Hướng dẫn thực thi:
+0. **BƯỚC 0 BẮT BUỘC — LOAD DANH SÁCH MCP VÀ CHỌN TOOL (áp dụng cho MỌI prompt, không riêng Jira):** Đọc mục `🔌 DANH SÁCH MCP SERVERS` ở trên, đối chiếu yêu cầu với khả năng tool MCP. Có MCP làm được → DÙNG MCP TRƯỚC; không có hoặc MCP lỗi → dùng cách khác và ghi lý do fallback vào log.
 1. Đọc và phân tích ảnh bằng chứng lỗi (evidence screenshots) và error trace được cung cấp trong `{{FEATURE_DIR}}`.
 2. Xác định nguyên nhân gốc rễ (Root Cause) và định vị service/module bị lỗi trong workspace.
 3. Sửa đổi trực tiếp mã nguồn trong service đó của workspace để khắc phục lỗi.
 4. Bảo đảm không làm gãy các tính năng đã hoạt động trước đó (không gây regression).
 5. Sau khi sửa xong, hoàn tất để hệ thống chuyển tiếp sang bước kiểm thử lại (Re-test).
-
 ## 🔌 QUY TẮC DÙNG TOOL (MCP-FIRST, KHÔNG CẤM BROWSER):
 1. **Nguyên tắc chung:** Trước khi làm việc gì, LUÔN kiểm tra tool MCP đang có; nếu có MCP làm được thì DÙNG MCP TRƯỚC. Trình duyệt và các công cụ khác vẫn được dùng bình thường cho các tác vụ mà MCP không cover được.
 2. **Jira/Confluence nội bộ:** ưu tiên MCP Atlassian; trình duyệt chỉ dùng cho trang public hoặc kiểm thử UI.

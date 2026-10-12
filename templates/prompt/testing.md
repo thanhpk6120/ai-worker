@@ -10,7 +10,10 @@ Nhiệm vụ của bạn là kiểm thử toàn diện giải pháp của task *
 {{PROMPT}}
 
 - **Đường dẫn Workspace:** {{WORKSPACE_PATH}}
-- **Thư mục Feature bắt buộc:** {{FEATURE_DIR}}
+- **Thư mục Feature của task này (mọi tài liệu của task nằm tại đây):** {{FEATURE_DIR}}
+- **Các file ngữ cảnh của task:** `{{FEATURE_DIR}}/expect.md`, `{{FEATURE_DIR}}/plan.md`, `{{FEATURE_DIR}}/tasks.md`, `{{FEATURE_DIR}}/memory.md`, `{{FEATURE_DIR}}/context.md`, `{{FEATURE_DIR}}/test_plan.md` (file nào tồn tại thì đọc, không có thì bỏ qua)
+
+{{MCP_SERVERS}}
 
 {{PREVIOUS_CONTEXT}}
 
@@ -23,6 +26,7 @@ Nhiệm vụ của bạn là kiểm thử toàn diện giải pháp của task *
    - Trong giai đoạn TESTING, không sửa đổi mã nguồn chức năng của workspace. Chỉ kiểm thử và thu thập bằng chứng.
 
 ## Hướng dẫn thực thi:
+0. **BƯỚC 0 BẮT BUỘC — LOAD DANH SÁCH MCP VÀ CHỌN TOOL (áp dụng cho MỌI prompt, không riêng Jira):** Đọc mục `🔌 DANH SÁCH MCP SERVERS` ở trên, đối chiếu yêu cầu với khả năng tool MCP. Có MCP làm được → DÙNG MCP TRƯỚC; không có hoặc MCP lỗi → dùng cách khác và ghi lý do fallback vào log.
 1. Đọc kỹ `test_plan.md` trong thư mục `{{FEATURE_DIR}}`.
 2. Thực thi kịch bản kiểm thử giao diện bằng công cụ kiểm thử (hoặc CloakBrowser/Playwright).
 3. Chụp ảnh màn hình bằng chứng tại các checkpoint và lưu trực tiếp vào `{{FEATURE_DIR}}/evidence/`.

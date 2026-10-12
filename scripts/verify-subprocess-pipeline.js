@@ -193,22 +193,21 @@ async function runPipelineVerification() {
     summaryReport.push({ step: '2. Tạo Job trong SQLite với prompt dài', passed: true });
 
     // ------------------------------------------------------------------------
-    // GIAI ĐOẠN 3: Kiểm tra việc tạo tệp .task_prompt.txt trong workspace
+    // GIAI ĐOẠN 3: Kiểm tra prompt dài được spill vào thư mục TẠM hệ thống,
+    // KHÔNG ghi bất kỳ file prompt nào vào workspace/repo root.
     // ------------------------------------------------------------------------
-    logStep(3, 'Kiểm tra cơ chế chống tràn bộ đệm Windows: Tạo tệp .task_prompt.txt');
+    logStep(3, 'Kiểm tra cơ chế chống tràn bộ đệm Windows: prompt spill vào os.tmpdir, không ghi vào workspace root');
 
-    const expectedPromptFile = path.join(tempWorkspaceDir, '.task_prompt.txt');
-    logInfo(`Đường dẫn tệp mong đợi: ${expectedPromptFile}`);
+    const forbiddenPromptFile = path.join(tempWorkspaceDir, '.task_prompt.txt');
+
+    let capturedStdout = '';
+    let capturedStderr = '';
 
     // Khởi tạo adapter kế thừa BaseAdapter với token bí mật
     const mockAdapter = new VerifyMockCliAdapter({
       secretToken: FAKE_SECRET_TOKEN
     });
 
-    let capturedStdout = '';
-    let capturedStderr = '';
-
-    // Thực thi adapter để kích hoạt cơ chế ghi .task_prompt.txt và spawn process
     logInfo('Kích hoạt mockAdapter.execute() với prompt dài...');
     const execResult = await mockAdapter.execute({
       prompt: LONG_SECRET_PROMPT,
@@ -222,19 +221,25 @@ async function runPipelineVerification() {
       }
     });
 
-    // Kiểm tra sự tồn tại của tệp .task_prompt.txt
-    if (!fs.existsSync(expectedPromptFile)) {
-      throw new Error(`Tệp .task_prompt.txt KHÔNG được tạo tại ${expectedPromptFile}!`);
+    // 3.1 TUYỆT ĐỐI không được tạo file .task_prompt.txt trong workspace root
+    if (fs.existsSync(forbiddenPromptFile)) {
+      throw new Error(`VI PHẠM: Tệp .task_prompt.txt bị ghi vào workspace root (${forbiddenPromptFile})! Prompt phải spill vào os.tmpdir.`);
     }
+    logSuccess('Xác nhận: KHÔNG có tệp .task_prompt.txt nào được tạo trong workspace root.');
 
-    const savedPromptContent = fs.readFileSync(expectedPromptFile, 'utf-8');
-    if (savedPromptContent !== LONG_SECRET_PROMPT) {
-      throw new Error('Nội dung tệp .task_prompt.txt không khớp hoàn toàn với prompt gốc!');
+    // 3.2 Prompt được spill vào thư mục tạm hệ thống dưới dạng prompt.md
+    const promptFileMatch = capturedStdout.match(/ai-worker-[^\s"']*[\\/]prompt\.md/i)
+      || capturedStdout.match(/[^\s"']*prompt\.md/i);
+    if (!promptFileMatch) {
+      throw new Error('Không tìm thấy đường dẫn prompt.md trong stdout của mock CLI!');
     }
-
-    logSuccess('Tệp .task_prompt.txt đã được tạo tự động và lưu đúng nội dung prompt.');
-    logSuccess(`Dung lượng tệp .task_prompt.txt: ${Buffer.byteLength(savedPromptContent, 'utf-8')} bytes.`);
-    summaryReport.push({ step: '3. Tạo tệp an toàn .task_prompt.txt', passed: true });
+    const spilledPromptPath = promptFileMatch[0];
+    const tmpRoot = path.resolve(os.tmpdir()).toLowerCase();
+    if (!path.resolve(spilledPromptPath).toLowerCase().startsWith(tmpRoot)) {
+      throw new Error(`VI PHẠM: prompt.md không nằm trong os.tmpdir (${spilledPromptPath})!`);
+    }
+    logSuccess(`Xác nhận: prompt.md được spill vào thư mục tạm hệ thống: ${spilledPromptPath}`);
+    summaryReport.push({ step: '3. Spill prompt vào os.tmpdir, không ghi workspace root', passed: true });
 
     // ------------------------------------------------------------------------
     // GIAI ĐOẠN 4: Thẩm định SecretScrubber trên luồng stdout/stderr của Subprocess

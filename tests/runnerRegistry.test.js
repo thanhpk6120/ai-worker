@@ -172,15 +172,16 @@ describe('RunnerRegistry & PromptTemplateManager Test Suite', () => {
       assert.strictEqual(rendered, 'Task: TASK-1234 | User: Nguyễn Văn A | Step: IMPLEMENT');
     });
 
-    it('buildPrompt() render đầy đủ và lưu tệp .task_prompt.txt hợp lệ UTF-8', () => {
+    it('buildPrompt() render đầy đủ và lưu tệp prompt.md trong feature dir (UTF-8)', () => {
       const manager = new PromptTemplateManager();
-      const promptFilePath = path.join(testTempDir, '.task_prompt.txt');
+      const featureDir = path.join(testTempDir, 'docs/features/TASK-E2E-TEST');
+      const promptFilePath = path.join(featureDir, 'prompt.md');
       const builtPrompt = manager.buildPrompt({
         step: 'fixing',
         taskCode: 'TASK-E2E-TEST',
         userPrompt: 'Triển khai kiểm thử tự động với tiếng Việt: Xin chào Thế Giới 🚀',
         workspacePath: testTempDir,
-        featureDir: path.join(testTempDir, 'docs/features/TASK-E2E-TEST'),
+        featureDir,
         previousContext: 'Tài liệu kiến trúc hệ thống phiên bản 1.0',
         errorLogs: 'Chi tiết lỗi kiểm thử: Không thể kết nối DB',
         saveToFile: true,
@@ -193,8 +194,8 @@ describe('RunnerRegistry & PromptTemplateManager Test Suite', () => {
       assert.ok(builtPrompt.includes('Tài liệu kiến trúc hệ thống phiên bản 1.0'));
       assert.ok(builtPrompt.includes('Chi tiết lỗi kiểm thử: Không thể kết nối DB'));
 
-      // Thẩm định tệp .task_prompt.txt đã được tạo
-      assert.ok(fs.existsSync(promptFilePath), 'Tệp .task_prompt.txt phải được lưu vào đĩa');
+      // Thẩm định tệp prompt.md đã được tạo trong feature dir
+      assert.ok(fs.existsSync(promptFilePath), 'Tệp prompt.md phải được lưu vào feature dir');
 
       // Đọc lại nội dung tệp bằng UTF-8 và so sánh
       const savedContent = fs.readFileSync(promptFilePath, 'utf8');
@@ -202,19 +203,37 @@ describe('RunnerRegistry & PromptTemplateManager Test Suite', () => {
       assert.ok(savedContent.includes('Xin chào Thế Giới 🚀'), 'Ký tự tiếng Việt và emoji phải được bảo toàn nguyên vẹn UTF-8');
     });
 
-    it('savePromptFile() lưu tệp tại thư mục chỉ định và bảo toàn UTF-8', () => {
+    it('buildPrompt() từ chối ghi prompt ra ngoài feature dir', () => {
       const manager = new PromptTemplateManager();
-      const customSubDir = path.join(testTempDir, 'sub-workspace');
-      fs.mkdirSync(customSubDir, { recursive: true });
+      assert.throws(() => manager.buildPrompt({
+        step: 'fixing',
+        taskCode: 'TASK-X',
+        userPrompt: 'x',
+        workspacePath: testTempDir,
+        featureDir: path.join(testTempDir, 'docs/features/TASK-X'),
+        saveToFile: true,
+        outputFile: path.join(testTempDir, '.task_prompt.txt')
+      }), /ngoài feature dir/);
+    });
+
+    it('savePromptFile() lưu tệp prompt.md trong feature dir và bảo toàn UTF-8', () => {
+      const manager = new PromptTemplateManager();
+      const featureDir = path.join(testTempDir, 'docs/features/TASK-X');
+      fs.mkdirSync(featureDir, { recursive: true });
 
       const content = '# Tiêu đề prompt UTF-8\nNội dung chi tiết kiểm thử tiến trình con';
-      const targetPath = manager.savePromptFile(content, customSubDir);
+      const targetPath = manager.savePromptFile(content, featureDir, featureDir);
 
       assert.ok(fs.existsSync(targetPath));
-      assert.ok(targetPath.endsWith('.task_prompt.txt'));
+      assert.ok(targetPath.endsWith('prompt.md'));
 
       const readBack = fs.readFileSync(targetPath, 'utf8');
       assert.strictEqual(readBack, content);
+    });
+
+    it('savePromptFile() từ chối ghi ra ngoài feature dir', () => {
+      const manager = new PromptTemplateManager();
+      assert.throws(() => manager.savePromptFile('x', testTempDir, path.join(testTempDir, 'docs/features/TASK-X')), /ngoài feature dir/);
     });
   });
 });

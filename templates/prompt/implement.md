@@ -10,7 +10,10 @@ Nhiệm vụ của bạn là hiện thực hóa toàn bộ mã nguồn của tas
 {{PROMPT}}
 
 - **Đường dẫn Workspace:** {{WORKSPACE_PATH}}
-- **Thư mục Feature bắt buộc:** {{FEATURE_DIR}}
+- **Thư mục Feature của task này (mọi tài liệu của task nằm tại đây):** {{FEATURE_DIR}}
+- **Các file ngữ cảnh của task:** `{{FEATURE_DIR}}/expect.md`, `{{FEATURE_DIR}}/plan.md`, `{{FEATURE_DIR}}/tasks.md`, `{{FEATURE_DIR}}/memory.md`, `{{FEATURE_DIR}}/context.md`, `{{FEATURE_DIR}}/dev_plan.md` (file nào tồn tại thì đọc, không có thì bỏ qua)
+
+{{MCP_SERVERS}}
 
 {{PREVIOUS_CONTEXT}}
 
@@ -25,11 +28,11 @@ Nhiệm vụ của bạn là hiện thực hóa toàn bộ mã nguồn của tas
    - Tuyệt đối không xóa vĩnh viễn tệp tin của người dùng (nếu cần dọn dẹp, chuyển vào Recycle Bin / Trash).
 
 ## Hướng dẫn thực thi:
+0. **BƯỚC 0 BẮT BUỘC — LOAD DANH SÁCH MCP VÀ CHỌN TOOL (áp dụng cho MỌI prompt, không riêng Jira):** Đọc mục `🔌 DANH SÁCH MCP SERVERS` ở trên, đối chiếu yêu cầu với khả năng tool MCP. Có MCP làm được → DÙNG MCP TRƯỚC; không có hoặc MCP lỗi → dùng cách khác (browser, curl, CLI...) và ghi lý do fallback vào log. Trình duyệt vẫn dùng bình thường cho tác vụ MCP không cover được.
 1. Đọc kỹ tài liệu `dev_plan.md` trong thư mục `{{FEATURE_DIR}}`.
 2. Xác định chính xác service/module trong `{{WORKSPACE_PATH}}` cần thực hiện sửa code.
 3. Chỉnh sửa, tạo mới các tệp mã nguồn theo đúng các bước đã vạch ra trong `dev_plan.md`.
 4. Sau khi viết code xong, xác minh mã nguồn bằng cách kiểm tra cú pháp hoặc chạy thử các lệnh build/test cục bộ.
-
 ## 🔌 QUY TẮC DÙNG TOOL (MCP-FIRST, KHÔNG CẤM BROWSER):
 1. **Nguyên tắc chung:** Trước khi làm việc gì, LUÔN kiểm tra tool MCP đang có; nếu có MCP làm được thì DÙNG MCP TRƯỚC. Trình duyệt và các công cụ khác vẫn được dùng bình thường cho các tác vụ mà MCP không cover được.
 2. **Jira/Confluence nội bộ:** ưu tiên MCP Atlassian (`mcp__company-atlassian__jira_get_issue` trên Claude / `jira_get_issue` trên OMP); trình duyệt chỉ dùng cho trang public hoặc kiểm thử UI, tránh fetch trực tiếp URL nội bộ yêu cầu SSO/login.

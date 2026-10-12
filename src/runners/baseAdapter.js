@@ -77,23 +77,11 @@ class BaseAdapter {
    * @returns {{ command: string, args: string[] }}
    */
   buildCommand(prompt, options = {}) {
-    let effectivePrompt = prompt;
-    const cwd = options.cwd || process.cwd();
-    if (prompt && (prompt.length > 150 || prompt.includes('\n'))) {
-      const fs = require('node:fs');
-      const path = require('node:path');
-      try {
-        const promptFile = path.join(cwd, '.task_prompt.txt');
-        fs.writeFileSync(promptFile, prompt, 'utf-8');
-        const safePromptFile = process.platform === 'win32' || promptFile.includes(' ') ? `"${promptFile}"` : promptFile;
-        effectivePrompt = `Đọc kỹ và thực thi toàn bộ yêu cầu trong tệp ${safePromptFile}`;
-      } catch (e) {
-        console.warn('Ghi tệp .task_prompt.txt cảnh báo:', e.message);
-      }
-    }
+    // KHÔNG ghi file prompt ra cwd/workspace root. Prompt đã được build sẵn
+    // từ templates/prompt/*.md và file ngữ cảnh trong feature dir, truyền trực tiếp qua args.
     return {
       command: this.command,
-      args: this.buildArgs(effectivePrompt, options)
+      args: this.buildArgs(prompt, options)
     };
   }
 
@@ -261,23 +249,25 @@ class BaseAdapter {
   async execute(options = {}) {
     const { prompt = '', cwd = process.cwd(), onStdout = null, onStderr = null, jobId = null, extraArgs = [] } = options;
     const fs = require('node:fs');
+    const os = require('node:os');
     const path = require('node:path');
     const { defaultProcessManager } = require('../execution/processManager');
 
     let effectiveArgs = this.buildArgs(prompt, options);
 
-    // An toàn tuyệt đối trên Windows: Ghi prompt ra tệp .task_prompt.txt nếu prompt dài hoặc có nhiều dòng
+    // Prompt dài: spill sang file TẠM HỆ THỐNG (os.tmpdir). TUYỆT ĐỐI KHÔNG ghi vào cwd/workspace root.
+    // Ngữ cảnh task (expect.md, plan.md, tasks.md, memory.md, context.md) nằm trong feature dir
+    // và đã được build sẵn vào prompt qua templates/prompt/*.md + fileManager.loadPreviousContext.
     if (prompt && (prompt.length > 150 || prompt.includes('\n'))) {
       try {
-        const promptFile = path.join(cwd, '.task_prompt.txt');
+        const safeJob = String(jobId || 'job').replace(/[^a-zA-Z0-9_-]/g, '-');
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `ai-worker-${safeJob}-`));
+        const promptFile = path.join(tmpDir, 'prompt.md');
         fs.writeFileSync(promptFile, prompt, 'utf-8');
-        // Không bọc nháy kép trực tiếp vào chuỗi nếu dùng child_process.spawn() vì cmd.exe sẽ bóc tách sai và cắt mất args.
-        // Node.js sẽ tự động escape đối số chứa khoảng trắng.
-        const safePromptFile = promptFile;
-        const safePrompt = `Please read and strictly execute all instructions in "${safePromptFile}"`;
+        const safePrompt = `Please read and strictly execute all instructions in "${promptFile}"`;
         effectiveArgs = this.buildArgs(safePrompt, options);
       } catch (e) {
-        console.warn('Ghi tệp .task_prompt.txt cảnh báo:', e.message);
+        console.warn('Ghi tệp prompt tạm cảnh báo:', e.message);
       }
     }
     const detection = this.detect();
