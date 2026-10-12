@@ -170,8 +170,18 @@ class BaseAdapter {
       return path.join(os.homedir(), '.claude', 'projects', rawSlug);
     }
     if (cmd.includes('omp')) {
-      // OMP bọc thêm 2 gạch 2 đầu và 1 gạch cuối: D:\... -> --D--Thanhpk-...--
-      return path.join(os.homedir(), '.omp', 'agent', 'sessions', `-${rawSlug}-`);
+      // OMP bọc 2 gạch 2 đầu và 2 gạch cuối: D:\... -> --D--Thanhpk-...-services--
+      const fs = require('node:fs');
+      const ompBase = path.join(os.homedir(), '.omp', 'agent', 'sessions');
+      const exact = path.join(ompBase, `--${rawSlug}--`);
+      try {
+        if (fs.existsSync(exact)) return exact;
+        if (fs.existsSync(ompBase)) {
+          const hit = fs.readdirSync(ompBase).find((f) => f.includes(rawSlug));
+          if (hit) return path.join(ompBase, hit);
+        }
+      } catch (e) {}
+      return exact;
     }
     if (cmd.includes('opencode')) {
       return path.join(os.homedir(), '.opencode', 'sessions', rawSlug);

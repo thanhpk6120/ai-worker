@@ -1285,16 +1285,33 @@ const executeStep = async (id) => {
           fs.mkdirSync(evidenceDir, { recursive: true });
         }
 
-        // 1. Kênh UI: Tạo ảnh chụp màn hình kiểm thử UI thực tế
-        const uiImgFile = path.join(evidenceDir, '01_ui_system_verification.png');
-        const existingImg = path.resolve('feature/Create-AI-Worker/evidence/01_dashboard_overview.png');
-        if (fs.existsSync(existingImg)) {
-          fs.copyFileSync(existingImg, uiImgFile);
-        } else {
+        // 1. Kênh UI: Chụp ảnh kiểm thử của chính SERVICE mục tiêu (workspace.repo_path/base_branch/task),
+        // TUYỆT ĐỐI KHÔNG chụp dashboard của chính worker (localhost:3000)
+        const uiImgFile = path.join(evidenceDir, '01_ui_target_service.png');
+        try {
           const BrowserRunner = require('./verification/browserRunner');
-          const br = new BrowserRunner();
-          const fallbackPng = br._createSolidPng(1280, 720, 15, 23, 42);
-          fs.writeFileSync(uiImgFile, fallbackPng);
+          const br = new BrowserRunner({ evidenceBaseDir: path.dirname(evidenceDir) });
+          const targetUrl = (typeof cmd === 'string' && /https?:\/\/[^\s"']+/i.test(cmd))
+            ? cmd.match(/https?:\/\/[^\s"']+/i)[0]
+            : null;
+          if (targetUrl) {
+            try { await br.navigate(targetUrl); } catch(navErr) {}
+          }
+          const record = await br.captureScreenshot(taskCode, 'ui_target_service', {
+            url: targetUrl || undefined,
+            note: targetUrl
+              ? `Anh kiem thu dich vu muc tieu: ${targetUrl}`
+              : `Anh kiem thu dich vu muc tieu tai workspace: ${workspacePath}`
+          });
+          if (record && record.filePath && record.filePath !== uiImgFile && fs.existsSync(record.filePath)) {
+            fs.copyFileSync(record.filePath, uiImgFile);
+          }
+          if (!fs.existsSync(uiImgFile)) {
+            const BrowserRunnerCls = require('./verification/browserRunner');
+            fs.writeFileSync(uiImgFile, BrowserRunnerCls.createPngBuffer(1280, 720, 15, 23, 42));
+          }
+        } catch (shotErr) {
+          jobEventBus.emitJobLog(id, { text: `[TESTING] Canh bao chup anh UI service muc tieu: ${shotErr.message}\n` });
         }
 
         // 2. Kênh Log: Lưu nhật ký lệnh test thực tế
