@@ -599,7 +599,8 @@
     // Custom Named Event: evidence
     state.eventSource.addEventListener('evidence', (event) => {
       try {
-        const evidenceData = JSON.parse(event.data);
+        const raw = JSON.parse(event.data);
+        const evidenceData = (raw && raw.evidence) ? raw.evidence : raw;
         state.evidences.push(evidenceData);
         renderEvidenceHub();
       } catch (e) {
@@ -1182,8 +1183,10 @@
             const isPass = item.status === 'PASSED' || item.status === 'PASS' || item.verdict === 'PASS' || !item.verdict;
             const caption = escapeHtml(item.description || item.title || `Bằng chứng UI #${idx + 1}`);
             return `
-              <div class="evidence-card cursor-pointer group" onclick="window.aiWorker.openLightbox('${escapeHtml(imgSrc)}', '${caption}')">
-                <div class="aspect-video bg-surface-950 overflow-hidden relative rounded-t-lg border-b border-slate-800 flex items-center justify-center">
+              <div class="evidence-card cursor-pointer group"
+                   onclick="window.aiWorker.openLightbox(this.dataset.src, this.dataset.caption)"
+                   data-src="${escapeHtml(imgSrc)}"
+                   data-caption="${caption}">
                   <img src="${escapeHtml(imgSrc)}" alt="${caption}" class="w-full h-full object-cover group-hover:scale-105 transition duration-300" loading="lazy" onerror="this.classList.add('hidden'); this.nextElementSibling.classList.remove('hidden');" />
                   <div class="hidden p-4 text-center text-slate-500 text-[11px] flex flex-col items-center justify-center">
                     <i class="fa-regular fa-image text-slate-600 text-xl mb-1"></i>
