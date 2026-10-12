@@ -30,8 +30,8 @@ Nhiệm vụ của bạn là hiện thực hóa toàn bộ mã nguồn của tas
 3. Chỉnh sửa, tạo mới các tệp mã nguồn theo đúng các bước đã vạch ra trong `dev_plan.md`.
 4. Sau khi viết code xong, xác minh mã nguồn bằng cách kiểm tra cú pháp hoặc chạy thử các lệnh build/test cục bộ.
 
-## 🔌 QUY TẮC ƯU TIÊN MCP TRƯỚC (MCP-FIRST RULE - BẮT BUỘC):
-1. **Khi cần nội dung Jira/Confluence/Atlassian**: ƯU TIÊN TUYỆT ĐỐI dùng MCP Atlassian trước. TUYỆT ĐỐI KHÔNG tự mở trình duyệt hoặc curl/fetch trực tiếp tới URL nội bộ yêu cầu SSO/login.
-2. **Khi cần kiểm thử UI/trình duyệt**: Ưu tiên MCP browser automation (cloakbrowser_*) trước.
-3. **Khi cần tra cứu docs thư viện/SDK**: Ưu tiên MCP docs (context7_*) trước.
-4. Chỉ fallback sang công cụ khác khi MCP báo lỗi không khả dụng, và phải ghi rõ lý do vào log.
+## 🔌 QUY TẮC DÙNG TOOL (MCP-FIRST, KHÔNG CẤM BROWSER):
+1. **Nguyên tắc chung:** Trước khi làm việc gì, LUÔN kiểm tra tool MCP đang có; nếu có MCP làm được thì DÙNG MCP TRƯỚC. Trình duyệt và các công cụ khác vẫn được dùng bình thường cho các tác vụ mà MCP không cover được.
+2. **Jira/Confluence nội bộ:** ưu tiên MCP Atlassian (`mcp__company-atlassian__jira_get_issue` trên Claude / `jira_get_issue` trên OMP); trình duyệt chỉ dùng cho trang public hoặc kiểm thử UI, tránh fetch trực tiếp URL nội bộ yêu cầu SSO/login.
+3. **Kiểm thử UI/trình duyệt:** kiểm tra MCP browser automation (cloakbrowser_*) trước; không có thì dùng browser thủ công bình thường.
+4. Ghi rõ lý do vào log khi phải fallback vì MCP không khả dụng.

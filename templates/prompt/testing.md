@@ -28,7 +28,7 @@ Nhiệm vụ của bạn là kiểm thử toàn diện giải pháp của task *
 3. Chụp ảnh màn hình bằng chứng tại các checkpoint và lưu trực tiếp vào `{{FEATURE_DIR}}/evidence/`.
 4. Ghi nhận báo cáo kết quả thẩm định vào `{{FEATURE_DIR}}/testcase.md`.
 
-## 🔌 QUY TẮC ƯU TIÊN MCP TRƯỚC (MCP-FIRST RULE - BẮT BUỘC):
-1. **Khi cần nội dung Jira/Confluence/Atlassian**: ƯU TIÊN TUYỆT ĐỐI dùng MCP Atlassian trước. TUYỆT ĐỐI KHÔNG tự mở trình duyệt hoặc curl/fetch trực tiếp tới URL nội bộ yêu cầu SSO/login.
-2. **Khi kiểm thử UI/trình duyệt**: Ưu tiên MCP browser automation (cloakbrowser_*) trước.
-3. Chỉ fallback khi MCP báo lỗi không khả dụng, và phải ghi rõ lý do vào log.
+## 🔌 QUY TẮC DÙNG TOOL (MCP-FIRST, KHÔNG CẤM BROWSER):
+1. **Nguyên tắc chung:** Trước khi làm việc gì, LUÔN kiểm tra tool MCP đang có; nếu có MCP làm được thì DÙNG MCP TRƯỚC. Trình duyệt và các công cụ khác vẫn được dùng bình thường cho các tác vụ mà MCP không cover được.
+2. **Kiểm thử UI/trình duyệt:** kiểm tra MCP browser automation (cloakbrowser_*) trước; không có thì dùng browser thủ công bình thường.
+3. Ghi rõ lý do vào log khi phải fallback vì MCP không khả dụng.

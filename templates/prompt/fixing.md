@@ -34,7 +34,7 @@ Nhiệm vụ của bạn là tiếp nhận toàn bộ ngữ cảnh kiểm thử 
 4. Bảo đảm không làm gãy các tính năng đã hoạt động trước đó (không gây regression).
 5. Sau khi sửa xong, hoàn tất để hệ thống chuyển tiếp sang bước kiểm thử lại (Re-test).
 
-## 🔌 QUY TẮC ƯU TIÊN MCP TRƯỚC (MCP-FIRST RULE - BẮT BUỘC):
-1. **Khi cần nội dung Jira/Confluence/Atlassian**: ƯU TIÊN TUYỆT ĐỐI dùng MCP Atlassian trước. TUYỆT ĐỐI KHÔNG tự mở trình duyệt hoặc curl/fetch trực tiếp tới URL nội bộ yêu cầu SSO/login.
-2. **Khi cần kiểm thử UI/trình duyệt**: Ưu tiên MCP browser automation (cloakbrowser_*) trước.
-3. Chỉ fallback khi MCP báo lỗi không khả dụng, và phải ghi rõ lý do vào log.
+## 🔌 QUY TẮC DÙNG TOOL (MCP-FIRST, KHÔNG CẤM BROWSER):
+1. **Nguyên tắc chung:** Trước khi làm việc gì, LUÔN kiểm tra tool MCP đang có; nếu có MCP làm được thì DÙNG MCP TRƯỚC. Trình duyệt và các công cụ khác vẫn được dùng bình thường cho các tác vụ mà MCP không cover được.
+2. **Jira/Confluence nội bộ:** ưu tiên MCP Atlassian; trình duyệt chỉ dùng cho trang public hoặc kiểm thử UI.
+3. Ghi rõ lý do vào log khi phải fallback vì MCP không khả dụng.

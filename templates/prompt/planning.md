@@ -31,13 +31,13 @@ Nhiệm vụ của bạn là khảo sát codebase tại workspace và lập kế
 3. Nếu phát hiện yêu cầu mơ hồ, mâu thuẫn hoặc cần quyết định lựa chọn quan trọng, hãy đặt câu hỏi làm rõ. BẠN PHẢI xuất một khối ```json:questions chứa một **mảng** các đối tượng câu hỏi, ví dụ: `[{"id":"q1", "question":"...", "context":"...", "options":["A", "B"]}, {"id":"q2",...}]`.
 4. Xác nhận cả 2 tệp `dev_plan.md` và `test_plan.md` đã có đầy đủ nội dung bên trong thư mục `{{FEATURE_DIR}}` trước khi hoàn tất phản hồi.
 
-## 🔌 QUY TẮC ƯU TIÊN MCP TRƯỚC (MCP-FIRST RULE - BẮT BUỘC):
-1. **Khi prompt chứa link Jira/Confluence/Atlassian** (`jira.*`, `confluence.*`, `/browse/`, `/wiki/`):
-   - Server đã tự động bóc tách nội dung ticket vào mục `📋 NỘI DUNG TICKET JIRA ĐÃ ĐƯỢC GIẢI MÃ TỰ ĐỘNG` trong prompt — hãy ưu tiên dùng trực tiếp, KHÔNG mở trình duyệt lại.
+## 🔌 QUY TẮC DÙNG TOOL (MCP-FIRST, KHÔNG CẤM BROWSER):
+1. **Nguyên tắc chung cho MỌI tác vụ:** Trước khi làm việc gì, LUÔN liệt kê tool MCP đang có trong phiên; nếu có MCP làm được thì DÙNG MCP TRƯỚC. Chỉ khi không có MCP phù hợp hoặc MCP báo lỗi mới dùng công cụ khác (browser thủ công, curl, CLI...), và ghi rõ lý do fallback vào log.
+2. **Khi prompt chứa link Jira/Confluence/Atlassian:**
+   - Server đã tự động bóc tách nội dung ticket vào mục `📋 NỘI DUNG TICKET JIRA ĐÃ ĐƯỢC GIẢI MÃ TỰ ĐỘNG` trong prompt — hãy dùng trực tiếp.
    - Nếu cần thao tác sâu hơn (comment, chuyển trạng thái, tìm kiếm):
-     - **Trên Claude Code:** dùng các tool có tên đầy đủ `mcp__company-atlassian__jira_get_issue`, `mcp__company-atlassian__jira_search` (prefix `mcp__company-atlassian__`).
-     - **Trên OMP:** dùng các tool `jira_get_issue`, `jira_search` như trong danh sách tool (không có prefix).
-   - TUYỆT ĐỐI KHÔNG tự mở trình duyệt (browser) hoặc dùng curl/fetch HTTP trực tiếp tới URL Jira/Confluence nội bộ — các trang này yêu cầu SSO/login, bot headless sẽ bị chặn ở trang đăng nhập và treo.
-2. **Khi cần thao tác trình duyệt/kiểm thử UI**: Ưu tiên dùng MCP browser automation (cloakbrowser_*) có sẵn trước khi dùng công cụ browser nội bộ khác.
-3. **Khi cần tra cứu thư viện/framework/SDK/API**: Ưu tiên dùng MCP docs (context7_*) trước khi tìm kiếm web thủ công.
-4. Chỉ khi MCP tương ứng báo lỗi không khả dụng (connection refused, not configured) HOẶC người dùng yêu cầu rõ ràng mới được dùng công cụ thay thế (browser thủ công, curl, grep...). Khi đó phải ghi rõ lý do fallback vào log.
+     - **Trên Claude Code:** các tool `mcp__company-atlassian__jira_get_issue`, `mcp__company-atlassian__jira_search`.
+     - **Trên OMP:** các tool `jira_get_issue`, `jira_search`.
+   - Trình duyệt vẫn được dùng cho các tác vụ khác (kiểm thử UI service, mở trang public...), nhưng với URL Jira/Confluence nội bộ yêu cầu SSO/login thì ưu tiên MCP Atlassian để tránh bị chặn ở trang đăng nhập.
+3. **Khi cần thao tác trình duyệt/kiểm thử UI:** kiểm tra MCP browser automation (cloakbrowser_*) trước; nếu có thì dùng, nếu không thì dùng browser thủ công bình thường.
+4. **Khi cần tra cứu thư viện/framework/SDK/API:** kiểm tra MCP docs (context7_*) trước; nếu có thì dùng, nếu không thì tìm web thủ công bình thường.
