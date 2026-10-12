@@ -1067,8 +1067,28 @@ const executeStep = async (id) => {
           answeredQuestions.map((q, idx) => `Câu hỏi ${idx+1}: ${q.question}\nCâu trả lời của người dùng: ${q.answer}\n`).join('\n');
       }
 
+      // Tự động giải mã nội dung Jira phía server trước khi gửi prompt cho Agent,
+      // để Agent không phải tự mở trình duyệt hay tự đoán tên tool MCP
+      let jiraContext = '';
+      try {
+        const jiraFetcher = require('./utils/jiraFetcher');
+        const issueKey = jiraFetcher.extractIssueKey(job.prompt || '');
+        if (issueKey) {
+          jobEventBus.emitJobLog(id, { text: `[JIRA] Phát hiện link Jira ${issueKey} trong prompt. Đang tự động bóc tách nội dung ticket...\n` });
+          const issue = await jiraFetcher.fetchJiraIssue(issueKey);
+          if (issue && issue.summary) {
+            jiraContext = jiraFetcher.formatIssueAsMarkdown(issue);
+            jobEventBus.emitJobLog(id, { text: `[JIRA] Đã tải thành công nội dung ticket ${issueKey}: "${issue.summary}".\n` });
+          } else {
+            jobEventBus.emitJobLog(id, { text: `[JIRA] Không thể bóc tách ticket ${issueKey} bằng REST API. Agent sẽ dùng MCP Atlassian theo chỉ thị.\n` });
+          }
+        }
+      } catch (jiraErr) {
+        console.warn('[JIRA] Lỗi bóc tách ticket:', jiraErr.message);
+      }
+
       const planningPrompt = promptTemplateManager.buildPrompt({
-        step: 'planning', taskCode, userPrompt: (job.prompt || '') + clarificationContext, workspacePath, featureDir,
+        step: 'planning', taskCode, userPrompt: (job.prompt || '') + jiraContext + clarificationContext, workspacePath, featureDir,
         previousContext: fileManager.loadPreviousContext(workspacePath, taskCode)
       });
       jobEventBus.emitJobLog(id, { text: `\n[1/4] >>> 🤖 [PLANNING] Kích hoạt lập kế hoạch song song (Dual Planning) với Agent: ${planningAgent}\n[PLANNING] Nạp template prompt planning.md...\n[PLANNING] Agent đang phân tích mã nguồn và thiết lập Kế hoạch (Vui lòng đợi khoảng 15-30 giây)...\n` });

@@ -33,7 +33,10 @@ Nhiệm vụ của bạn là khảo sát codebase tại workspace và lập kế
 
 ## 🔌 QUY TẮC ƯU TIÊN MCP TRƯỚC (MCP-FIRST RULE - BẮT BUỘC):
 1. **Khi prompt chứa link Jira/Confluence/Atlassian** (`jira.*`, `confluence.*`, `/browse/`, `/wiki/`):
-   - ƯU TIÊN TUYỆT ĐỐI dùng MCP Atlassian (company_atlassian: jira_get_issue, confluence_get_page...) để lấy nội dung ticket TRƯỚC TIÊN.
+   - Server đã tự động bóc tách nội dung ticket vào mục `📋 NỘI DUNG TICKET JIRA ĐÃ ĐƯỢC GIẢI MÃ TỰ ĐỘNG` trong prompt — hãy ưu tiên dùng trực tiếp, KHÔNG mở trình duyệt lại.
+   - Nếu cần thao tác sâu hơn (comment, chuyển trạng thái, tìm kiếm):
+     - **Trên Claude Code:** dùng các tool có tên đầy đủ `mcp__company-atlassian__jira_get_issue`, `mcp__company-atlassian__jira_search` (prefix `mcp__company-atlassian__`).
+     - **Trên OMP:** dùng các tool `jira_get_issue`, `jira_search` như trong danh sách tool (không có prefix).
    - TUYỆT ĐỐI KHÔNG tự mở trình duyệt (browser) hoặc dùng curl/fetch HTTP trực tiếp tới URL Jira/Confluence nội bộ — các trang này yêu cầu SSO/login, bot headless sẽ bị chặn ở trang đăng nhập và treo.
 2. **Khi cần thao tác trình duyệt/kiểm thử UI**: Ưu tiên dùng MCP browser automation (cloakbrowser_*) có sẵn trước khi dùng công cụ browser nội bộ khác.
 3. **Khi cần tra cứu thư viện/framework/SDK/API**: Ưu tiên dùng MCP docs (context7_*) trước khi tìm kiếm web thủ công.
