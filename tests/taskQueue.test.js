@@ -238,6 +238,191 @@ describe('TaskQueue Test Suite', () => {
       assert.strictEqual(stats.concurrency, 3);
       assert.strictEqual(stats.runningCount, 2);
       assert.strictEqual(stats.queuedCount, 0);
+      assert.strictEqual(stats.queuedCount, 0);
+    });
+  });
+
+  describe('Workspace Queue Lock (Khóa hàng đợi theo Workspace)', () => {
+    it('chỉ cho phép 1 job chạy tại 1 thời điểm trên cùng 1 workspace (chạy nối tiếp FIFO dù concurrency = 3)', async () => {
+      const queue = new TaskQueue(3);
+      const wsPath = process.platform === 'win32' ? 'C:\\Workspaces\\ProjectAlpha' : '/workspaces/ProjectAlpha';
+
+      const runningHistory = [];
+      let activeCountInWs = 0;
+      let maxActiveInWs = 0;
+
+      const resolvers = [];
+      const createJob = (id, priority = 0) => {
+        let res;
+        const p = new Promise((r) => { res = r; });
+        resolvers.push(res);
+        return {
+          job: { id: `ws-job-${id}`, repo_path: wsPath, priority },
+          runFn: async () => {
+            activeCountInWs++;
+            if (activeCountInWs > maxActiveInWs) maxActiveInWs = activeCountInWs;
+            runningHistory.push(`start-${id}`);
+            await p;
+            activeCountInWs--;
+            runningHistory.push(`end-${id}`);
+            return `done-${id}`;
+          }
+        };
+      };
+
+      const j1 = createJob(1, 0);
+      const j2 = createJob(2, 0);
+      const j3 = createJob(3, 0);
+
+      // Đưa cả 3 job cùng workspace vào queue có concurrency = 3
+      queue.enqueue(j1.job, j1.runFn, 0);
+      queue.enqueue(j2.job, j2.runFn, 0);
+      queue.enqueue(j3.job, j3.runFn, 0);
+
+      await delay(15);
+
+      // Dù concurrency = 3, chỉ 1 job được chạy vì cả 3 cùng workspace!
+      assert.strictEqual(queue.getRunningJobs().length, 1);
+      assert.strictEqual(queue.getQueuedJobs().length, 2);
+      assert.strictEqual(maxActiveInWs, 1);
+      assert.strictEqual(queue.isWorkspaceLocked(wsPath), true);
+      assert.strictEqual(queue.getActiveJobForWorkspace(wsPath).id, 'ws-job-1');
+
+      // Cho job 1 hoàn thành
+      resolvers[0]();
+      await delay(15);
+
+      // Job 2 phải được tự động lấy ra chạy tiếp, job 3 vẫn đợi trong queue
+      assert.strictEqual(queue.getRunningJobs().length, 1);
+      assert.strictEqual(queue.getQueuedJobs().length, 1);
+      assert.strictEqual(maxActiveInWs, 1);
+      assert.strictEqual(queue.getActiveJobForWorkspace(wsPath).id, 'ws-job-2');
+
+      // Cho job 2 hoàn thành
+      resolvers[1]();
+      await delay(15);
+
+      // Job 3 được tự động lấy ra chạy tiếp
+      assert.strictEqual(queue.getRunningJobs().length, 1);
+      assert.strictEqual(queue.getQueuedJobs().length, 0);
+      assert.strictEqual(queue.getActiveJobForWorkspace(wsPath).id, 'ws-job-3');
+
+      // Cho job 3 hoàn thành
+      resolvers[2]();
+      await delay(15);
+
+      // Toàn bộ hoàn tất, workspace được mở khóa
+      assert.strictEqual(queue.getRunningJobs().length, 0);
+      assert.strictEqual(queue.getQueuedJobs().length, 0);
+      assert.strictEqual(queue.isWorkspaceLocked(wsPath), false);
+      assert.deepStrictEqual(runningHistory, [
+        'start-1', 'end-1',
+        'start-2', 'end-2',
+        'start-3', 'end-3'
+      ]);
+    });
+
+    it('cho phép các job thuộc các workspace khác nhau chạy song song độc lập lên tới concurrency', async () => {
+      const queue = new TaskQueue(3);
+      const ws1 = process.platform === 'win32' ? 'C:\\Workspaces\\RepoA' : '/workspaces/RepoA';
+      const ws2 = process.platform === 'win32' ? 'C:\\Workspaces\\RepoB' : '/workspaces/RepoB';
+      const ws3 = process.platform === 'win32' ? 'C:\\Workspaces\\RepoC' : '/workspaces/RepoC';
+
+      let maxConcurrent = 0;
+      let active = 0;
+      const resolvers = [];
+      const createJob = (id, ws) => {
+        let r;
+        const p = new Promise((resolve) => { r = resolve; });
+        resolvers.push(r);
+        return {
+          job: { id: `parallel-${id}`, repo_path: ws },
+          runFn: async () => {
+            active++;
+            if (active > maxConcurrent) maxConcurrent = active;
+            await p;
+            active--;
+          }
+        };
+      };
+
+      const j1 = createJob(1, ws1);
+      const j2 = createJob(2, ws2);
+      const j3 = createJob(3, ws3);
+
+      queue.enqueue(j1.job, j1.runFn);
+      queue.enqueue(j2.job, j2.runFn);
+      queue.enqueue(j3.job, j3.runFn);
+
+      await delay(15);
+
+      // 3 workspace khác nhau -> chạy song song cả 3 cùng lúc!
+      assert.strictEqual(queue.getRunningJobs().length, 3);
+      assert.strictEqual(queue.getQueuedJobs().length, 0);
+      assert.strictEqual(maxConcurrent, 3);
+      assert.strictEqual(queue.isWorkspaceLocked(ws1), true);
+      assert.strictEqual(queue.isWorkspaceLocked(ws2), true);
+      assert.strictEqual(queue.isWorkspaceLocked(ws3), true);
+
+      // Giải phóng cả 3
+      resolvers.forEach((r) => r());
+      await delay(15);
+
+      assert.strictEqual(queue.getRunningJobs().length, 0);
+      assert.strictEqual(queue.isWorkspaceLocked(ws1), false);
+      assert.strictEqual(queue.isWorkspaceLocked(ws2), false);
+      assert.strictEqual(queue.isWorkspaceLocked(ws3), false);
+    });
+
+    it('nhận diện đồng nhất đường dẫn dù định dạng gạch chéo khác nhau (path normalization)', async () => {
+      const queue = new TaskQueue(3);
+      // 2 đường dẫn cùng trỏ tới 1 thư mục nhưng khác slash format
+      const pathA = process.platform === 'win32' ? 'C:/TestWorkspace/MyRepo' : '/test/myrepo';
+      const pathB = process.platform === 'win32' ? 'C:\\TestWorkspace\\MyRepo\\' : '/test/myrepo/';
+
+      let resolve1;
+      const p1 = new Promise((r) => { resolve1 = r; });
+
+      queue.enqueue({ id: 'norm-1', repo_path: pathA }, async () => {
+        await p1;
+      });
+      queue.enqueue({ id: 'norm-2', repo_path: pathB }, async () => {});
+
+      await delay(15);
+
+      // norm-2 phải bị khóa và nằm trong queue vì cùng workspace với norm-1
+      assert.strictEqual(queue.getRunningJobs().length, 1);
+      assert.strictEqual(queue.getQueuedJobs().length, 1);
+      assert.strictEqual(queue.getRunningJobs()[0].id, 'norm-1');
+      assert.strictEqual(queue.getQueuedJobs()[0].id, 'norm-2');
+
+      resolve1();
+      await delay(15);
+
+      assert.strictEqual(queue.getRunningJobs().length, 0);
+      assert.strictEqual(queue.getQueuedJobs().length, 0);
+    });
+
+    it('tự động mở khóa workspace khi job chạy bị lỗi (failed)', async () => {
+      const queue = new TaskQueue(2);
+      const ws = process.platform === 'win32' ? 'C:\\Test\\FailTest' : '/test/fail';
+
+      let ranSecond = false;
+      queue.enqueue({ id: 'fail-1', repo_path: ws }, async () => {
+        await delay(10);
+        throw new Error('Lỗi cố ý');
+      });
+
+      queue.enqueue({ id: 'success-2', repo_path: ws }, async () => {
+        ranSecond = true;
+      });
+
+      await delay(35);
+
+      // Job 2 phải chạy thành công sau khi job 1 thất bại
+      assert.strictEqual(ranSecond, true);
+      assert.strictEqual(queue.isWorkspaceLocked(ws), false);
+      assert.strictEqual(queue.getRunningJobs().length, 0);
     });
   });
 });

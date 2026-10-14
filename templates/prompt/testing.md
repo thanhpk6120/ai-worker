@@ -47,6 +47,22 @@ Nhiệm vụ của bạn là kiểm thử toàn diện giải pháp của task *
    - **TUYỆT ĐỐI KHÔNG TẠO DỮ LIỆU RỖNG:** Các tệp rỗng, log không có nội dung, hoặc json rỗng (`{}` / `[]` / `null`) KHÔNG ĐƯỢC COI LÀ EVIDENCE và sẽ bị loại bỏ hoặc đánh FAIL!
 5. **TUYỆT ĐỐI KHÔNG BYPASS:** KHÔNG ĐƯỢC sử dụng các lệnh curl, ping HTTP URL giả lập hay mock server để giả mạo trạng thái PASS. Mọi kết quả kiểm thử phải xuất phát từ việc chạy test nội tại của ứng dụng.
 6. Ghi nhận báo cáo kết quả thẩm định thực tế vào `{{FEATURE_DIR}}/test_report.md` (hoặc `testcase.md` theo plan).
+7. **TỰ VERIFY EVIDENCE TRƯỚC KHI KẾT THÚC (BẮT BUỘC CHUNG CHO MỌI LOẠI EVIDENCE):**
+   - Với MỖI file trong `evidence/`, tự đối chiếu với `test_plan.md`: file này chứng minh test case nào, kết quả kỳ vọng là gì, nội dung thực tế có khớp không. Ảnh trắng trang, body trống, modal sai loại (Tạo mới thay vì Sửa), log chỉ có tên lệnh mà `stdout=(empty)`, JSON rỗng đều KHÔNG phải bằng chứng đạt.
+   - Ảnh UI: mở lại file PNG vừa chụp, xác nhận thấy đúng màn hình/kịch bản trong plan (đúng URL, đúng modal, có dữ liệu thật từ API, không phải trang trắng hoặc layout trống). Ghi rõ trong `metadata.json` mỗi ảnh chứng minh cho case nào.
+   - Log test: nội dung phải có lệnh chạy thật, output thật và exit code thật. Log dưới 1KB mà chứa `(empty)` hoặc không có keyword của công cụ test (`browser/capture/screenshot/playwright/puppeteer/navigate/GET /api/POST /api/tsc/pytest/npm test/mvn test/go test`) là log rỗng, phải chạy lại.
+   - API JSON (`02_api_verification.json` nếu plan yêu cầu API): phải có HTTP method, URL thật, status 2xx thật và body thật. Không dùng curl ping giả lập hay mock server để giả mạo PASS.
+   - DB assertion (nếu plan yêu cầu): phải có query thật, kết quả thật, khớp giá trị kỳ vọng.
+8. **QUY TẮC MÔI TRƯỜNG FULL-STACK (E2E):**
+   - Task E2E full-stack (ví dụ frontend port 4200 + backend port 6012): PHẢI khởi chạy ĐỦ cả backend lẫn frontend, hoặc mock API hợp lệ được `test_plan.md` cho phép. Thiếu backend khiến trang trắng, login `Unknown Error`, phải bypass guard thì đó là MÔI TRƯỜNG CHƯA ĐỦ, không được kết luận PASS.
+   - Khi thiếu môi trường và không thể bổ sung: thoát với exit code khác 0, ghi `status: \"FAILED\"` vào `metadata.json`, ghi rõ trong `test_report.md` là CHƯA ĐẠT và cần gì để chạy lại. TUYỆT ĐỐI KHÔNG chụp trang trắng/modal sai rồi thoát exit 0.
+9. **metadata.json BẮT BUỘC (SCHEMA CHUNG CHO MỌI TASK):**
+   - Mọi bước TESTING phải tạo `{{FEATURE_DIR}}/evidence/metadata.json` là JSON hợp lệ, không rỗng, liệt kê từng test case trong `test_plan.md` kèm verdict trung thực. Worker server BẮT BUỘC file này; thiếu file hoặc JSON rỗng là FAIL.
+   - Schema tối thiểu: `{\"taskCode\": \"...\", \"verdict\": \"PASS|FAILED\", \"tests\": [{\"id\": \"TC-UI-01\", \"name\": \"...\", \"status\": \"PASSED|FAILED\", \"evidence\": [\"01_ui_list.png\"], \"note\": \"thấy list + modal edit, lưu tự refresh qua GET /api/users\"}]}`. Mỗi file ảnh/log/json trong `evidence/` phải được nhắc tên trong `metadata.json`.
+   - Cấm các trạng thái lấp lửng để qua mặt gate: `PARTIAL`, `CONDITIONAL PASS`, `NOT VERIFIED`, `SKIPPED`, `BYPASS`, `Unknown Error` mà vẫn verdict PASS. Có từ nào trong các giá trị `status/verdict/note` là worker đánh FAIL.
+10. **EXIT CODE VÀ BÁO CÁO TRUNG THỰC:**
+   - Chỉ thoát exit 0 khi 100% case trong `test_plan.md` đã chạy thật và đạt thật. Còn case `PARTIAL/CONDITIONAL/CHƯA CHẠY ĐƯỢC` thì exit khác 0 để worker chuyển FIXING.
+   - `test_report.md` phải khớp `metadata.json` và khớp nội dung file evidence thật. Ghi `PARTIAL` trong report mà verdict PASS là FAIL.
 ## 🔌 QUY TẮC DÙNG TOOL (MCP-FIRST, KHÔNG CẤM BROWSER):
 1. **Nguyên tắc chung:** Trước khi làm việc gì, LUÔN kiểm tra tool MCP đang có; nếu có MCP làm được thì DÙNG MCP TRƯỚC. Trình duyệt và các công cụ khác vẫn được dùng bình thường cho các tác vụ mà MCP không cover được.
 2. **Kiểm thử UI/trình duyệt:** kiểm tra MCP browser automation (cloakbrowser_*) trước; không có thì dùng browser thủ công bình thường.

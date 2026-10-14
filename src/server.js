@@ -1988,24 +1988,194 @@ const executeStep = async (id) => {
           });
         }
 
-        // 2. Thẩm định metadata: Nếu bất kỳ bằng chứng nào bị đánh dấu FAIL hoặc ERROR -> Chặn không cho DONE
-        if (Array.isArray(metadataObj)) {
-          const hasFailedItem = metadataObj.some(item => item && (item.status === 'FAILED' || item.verdict === 'FAIL'));
-          if (hasFailedItem) {
+        // 2. Thẩm định metadata BẮT BUỘC CHUNG CHO MỌI TASK: thiếu file, JSON hỏng/rỗng, PARTIAL lấp lửng đều FAIL
+        const metaExists = fs.existsSync(metaPath);
+        let metaRaw = '';
+        let metaParseError = false;
+        if (!metaExists) {
+          agentFailed = true;
+          jobEventBus.emitJobLog(id, {
+            text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: Thiếu file evidence/metadata.json bắt buộc. Agent phải tự verify từng evidence khớp test_plan.md và ghi metadata.json trung thực rồi mới được kết thúc TESTING.\n`
+          });
+        } else {
+          try { metaRaw = fs.readFileSync(metaPath, 'utf8').trim(); } catch (e) { metaRaw = ''; }
+          if (!metaRaw || metaRaw === '{}' || metaRaw === '[]' || metaRaw === 'null') {
             agentFailed = true;
             jobEventBus.emitJobLog(id, {
-              text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: Phát hiện bằng chứng kiểm thử bị đánh dấu FAILED trong metadata.json. Chuyển sang FIXING để sửa lỗi!\n`
+              text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: metadata.json rỗng, không chứng minh được test case nào. Chuyển sang FIXING để chạy lại kiểm thử thật!\n`
             });
-          }
-        } else if (metadataObj && typeof metadataObj === 'object') {
-          const hasFailedItem = Object.values(metadataObj).some(item => item && (item.status === 'FAILED' || item.verdict === 'FAIL'));
-          if (hasFailedItem) {
-            agentFailed = true;
-            jobEventBus.emitJobLog(id, {
-              text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: Phát hiện bằng chứng kiểm thử bị đánh dấu FAILED trong metadata.json. Chuyển sang FIXING để sửa lỗi!\n`
-            });
+          } else {
+            try {
+              metadataObj = JSON.parse(metaRaw);
+            } catch (parseErr) {
+              metaParseError = true;
+              agentFailed = true;
+              jobEventBus.emitJobLog(id, {
+                text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: metadata.json không phải JSON hợp lệ (${String(parseErr.message || parseErr).substring(0, 120)}). Agent phải ghi lại file JSON đúng schema rồi chạy verify lại!\n`
+              });
+            }
           }
         }
+        // Chỉ quét weasel words trong TRƯỜNG TRẠNG THÁI (status/verdict/result/conclusion),
+        // KHÔNG quét toàn văn báo cáo để tránh false positive khi văn mô tả nhắc từ như
+        // "trước đây lỗi Unknown Error / partial update / không dùng bypass".
+        const STATUS_WEASEL_RE = /partial|conditional|not\s*verified|skipped|bypass|unknown\s*error|chưa\s*chạy|chua\s*chay/i;
+        const STATUS_KEY_RE = /^(status|verdict|result|conclusion|trang\s*thai|ket\s*luan)$/i;
+        const collectStatusValues = (node, out) => {
+          const acc = out || [];
+          if (!node || typeof node !== 'object') return acc;
+          for (const [k, v] of Object.entries(node)) {
+            if (STATUS_KEY_RE.test(String(k).trim()) && typeof v === 'string') acc.push(v);
+            else if (v && typeof v === 'object') collectStatusValues(v, acc);
+          }
+          return acc;
+        };
+        const scanStatusWeasel = (node) => collectStatusValues(node).some(v => STATUS_WEASEL_RE.test(v));
+        if (!metaParseError && metaRaw) {
+          if (Array.isArray(metadataObj)) {
+            if (metadataObj.length === 0) {
+              agentFailed = true;
+              jobEventBus.emitJobLog(id, {
+                text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: metadata.json là mảng rỗng, không chứng minh được test case nào!\n`
+              });
+            } else {
+              const hasFailedItem = metadataObj.some(item => item && (item.status === 'FAILED' || item.verdict === 'FAIL' || item.status === 'FAIL' || item.verdict === 'FAILED'));
+              if (hasFailedItem) {
+                agentFailed = true;
+                jobEventBus.emitJobLog(id, {
+                  text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: Phát hiện bằng chứng kiểm thử bị đánh dấu FAILED trong metadata.json. Chuyển sang FIXING để sửa lỗi!\n`
+                });
+              }
+              if (scanStatusWeasel(metadataObj)) {
+                agentFailed = true;
+                jobEventBus.emitJobLog(id, {
+                  text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: metadata.json có trường status/verdict lấp lửng (PARTIAL/CONDITIONAL/NOT VERIFIED/SKIPPED/BYPASS/Unknown Error). Chỉ exit 0 khi 100% case đạt thật!\n`
+                });
+              }
+            }
+          } else if (metadataObj && typeof metadataObj === 'object') {
+            const vals = Object.values(metadataObj);
+            const hasFailedItem = vals.some(item => item && (item.status === 'FAILED' || item.verdict === 'FAIL' || item.status === 'FAIL' || item.verdict === 'FAILED')) || metadataObj.status === 'FAILED' || metadataObj.verdict === 'FAIL' || metadataObj.verdict === 'FAILED';
+            if (hasFailedItem) {
+              agentFailed = true;
+              jobEventBus.emitJobLog(id, {
+                text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: Phát hiện bằng chứng kiểm thử bị đánh dấu FAILED trong metadata.json. Chuyển sang FIXING để sửa lỗi!\n`
+              });
+            }
+            const testsArr = Array.isArray(metadataObj.tests) ? metadataObj.tests : [];
+            if (testsArr.length > 0) {
+              const badTest = testsArr.some(t => !t || !/^(PASSED|PASS)$/i.test(String((t.status || t.verdict || '')).trim()) || scanStatusWeasel(t));
+              if (badTest) {
+                agentFailed = true;
+                jobEventBus.emitJobLog(id, {
+                  text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: metadata.json có test case chưa PASSED thật (FAILED/PARTIAL/SKIPPED). Chỉ DONE khi 100% case PASSED!\n`
+                });
+              }
+              // Mọi file evidence phải được khai báo trong metadata.json để chứng minh mapping với test case
+              const declared = new Set();
+              testsArr.forEach(t => { (t.evidence || t.evidences || t.files || []).forEach(f => declared.add(String(f))); });
+              const undeclared = validFiles.filter(f => f !== 'metadata.json' && ![...declared].some(d => d.includes(f) || f.includes(d)));
+              if (undeclared.length > 0) {
+                agentFailed = true;
+                jobEventBus.emitJobLog(id, {
+                  text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: File evidence chưa được khai trong metadata.json nên không chứng minh cho test case nào: ${undeclared.join(', ')}. Agent phải mapping mỗi file với đúng test case trong plan!\n`
+                });
+              }
+            } else {
+              // Bắt buộc schema tests[] non-empty: metadata parse được nhưng không liệt kê case nào là FAIL
+              agentFailed = true;
+              jobEventBus.emitJobLog(id, {
+                text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: metadata.json thiếu mảng tests[] non-empty theo schema bắt buộc (mỗi test case trong test_plan.md phải có 1 entry PASSED/FAILED với evidence mapping). Chuyển sang FIXING để bổ sung!\n`
+              });
+            }
+          }
+        }
+        // 2b. Chặn báo cáo lấp lửng: chỉ xét DÒNG TRẠNG THÁI và Ô BẢNG TRẠNG THÁI trong
+        // test_report.md/testcase.md/report.md, không quét toàn văn để tránh oan khi phần
+        // diễn giải nguyên nhân nhắc từ như "Unknown Error / partial update / bypass".
+        try {
+          const reportFiles = ['test_report.md', 'testcase.md', 'report.md'].map(f => path.join(featureDir, f)).filter(p => fs.existsSync(p));
+          const STATUS_LINE_RE = /^\s*(?:[-*]\s*)?(trạng thái|trang thai|status|verdict|result|kết luận|ket luan)\s*[:|：]/i;
+          const STATUS_CELL_RE = /^(PASSED|PASS|FAILED|FAIL|PARTIAL|CONDITIONAL(\s*PASS)?|NOT\s*VERIFIED|SKIPPED|BYPASS|UNKNOWN\s*ERROR)$/i;
+          for (const rp of reportFiles) {
+            const txt = fs.readFileSync(rp, 'utf8');
+            let hit = '';
+            for (const line of txt.split(/\r?\n/)) {
+              if (STATUS_LINE_RE.test(line) && STATUS_WEASEL_RE.test(line)) { hit = line.trim().substring(0, 160); break; }
+              if (line.includes('|')) {
+                const cells = line.split('|').map(c => c.trim()).filter(c => c && !/^-+$/.test(c));
+                if (cells.some(c => STATUS_CELL_RE.test(c) && STATUS_WEASEL_RE.test(c))) { hit = line.trim().substring(0, 160); break; }
+              }
+            }
+            if (hit) {
+              agentFailed = true;
+              jobEventBus.emitJobLog(id, {
+                text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: ${path.basename(rp)} có trạng thái lấp lửng (PARTIAL/CONDITIONAL/NOT VERIFIED/SKIPPED): "${hit}". Bổ sung môi trường full-stack rồi chạy lại!\n`
+              });
+              break;
+            }
+          }
+        } catch (e) {}
+        // 2c. Chặn log rỗng giả: log chỉ có tên lệnh, stdout=(empty), không keyword test thật
+        try {
+          const logFiles = validFiles.filter(f => ['.log', '.txt'].includes(path.extname(f).toLowerCase()));
+          const LOG_KEY_RE = /browser|capture|screenshot|playwright|puppeteer|navigate|GET\s+\/api|POST\s+\/api|tsc|pytest|npm\s+test|mvn\s+test|go\s+test|passed|failed|assert|✓|✔|PASS/i;
+          for (const lf of logFiles) {
+            const raw = fs.readFileSync(path.join(evidenceDir, lf), 'utf8');
+            const trimmed = (raw || '').trim();
+            if (/stdout\s*=\s*\(empty\)/i.test(trimmed) || /\(empty\)/i.test(trimmed) && trimmed.length < 1024 || (trimmed.length < 200 && !LOG_KEY_RE.test(trimmed))) {
+              agentFailed = true;
+              jobEventBus.emitJobLog(id, {
+                text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: ${lf} rỗng giả (stdout empty, thiếu output/keyword test thật). Agent phải chạy lại lệnh test thật và lưu log đầy đủ!\n`
+              });
+              break;
+            }
+          }
+        } catch (e) {}
+        // 2d. Ảnh UI bắt buộc có kích thước tối thiểu để loại ảnh trắng/placeholder 1x1
+        try {
+          for (const img of uiImageFiles) {
+            const st = fs.statSync(path.join(evidenceDir, img));
+            if (st.size < 5120) {
+              agentFailed = true;
+              jobEventBus.emitJobLog(id, {
+                text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: ${img} quá nhỏ (${st.size} bytes), nghi là ảnh trắng/placeholder. Agent phải chụp lại giao diện thật có dữ liệu!\n`
+              });
+              break;
+            }
+          }
+        } catch (e) {}
+        // 2e. Chặn ảnh UI trùng lặp nội dung (cùng MD5): 2 PNG giống hệt nhau không chứng minh được 2 case khác nhau
+        try {
+          const seen = new Map();
+          for (const img of uiImageFiles) {
+            const buf = fs.readFileSync(path.join(evidenceDir, img));
+            const md5 = crypto.createHash('md5').update(buf).digest('hex');
+            if (seen.has(md5)) {
+              agentFailed = true;
+              jobEventBus.emitJobLog(id, {
+                text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: ${img} trùng nội dung (MD5 ${md5}) với ${seen.get(md5)} — không chứng minh được test case riêng biệt. Agent phải chụp lại từng kịch bản thật!\n`
+              });
+              break;
+            }
+            seen.set(md5, img);
+          }
+        } catch (e) {}
+        // 2f. Đối chiếu số lượng test case trong test_plan.md với metadata.json tests[]
+        try {
+          const expectedIds = new Set((testPlanText.match(/TC-[A-ZÀ-Ỹ]+-\d+/gi) || []).map(s => s.toUpperCase()));
+          const testsArr2 = (!metaParseError && metadataObj && !Array.isArray(metadataObj) && Array.isArray(metadataObj.tests)) ? metadataObj.tests : [];
+          if (expectedIds.size > 0 && testsArr2.length > 0) {
+            const declaredIds = new Set(testsArr2.map(t => String(t.id || t.test_id || t.case_id || t.caseId || '')).map(s => s.toUpperCase()).filter(Boolean));
+            const missing = [...expectedIds].filter(x => !declaredIds.has(x));
+            if (missing.length > 0) {
+              agentFailed = true;
+              jobEventBus.emitJobLog(id, {
+                text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: metadata.json thiếu ${missing.length} test case trong test_plan.md: ${missing.slice(0, 10).join(', ')}${missing.length > 10 ? ', ...' : ''}. Agent phải chạy và khai đủ mọi case!\n`
+              });
+            }
+          }
+        } catch (e) {}
 
         // 3. Nếu không có bất kỳ bằng chứng hợp lệ nào:
         if (validFiles.length === 0) {
@@ -2094,6 +2264,72 @@ const executeStep = async (id) => {
   }
 };
 
+/**
+ * Chạy toàn bộ vòng đời pipeline của một Task qua TaskQueue
+ * Trả về Promise hoàn thành khi Task đạt trạng thái kết thúc (DONE, FAILED, CANCELLED, TIMED_OUT)
+ */
+const TERMINAL_JOB_STATUSES = new Set(['DONE', 'TIMED_OUT', 'ARCHIVED', 'DELETED']);
+const RESTARTABLE_JOB_STATUSES = new Set(['TO DO', 'TO_DO', 'FAILED', 'CANCELLED']);
+const runJobPipeline = (jobId) => {
+  return new Promise((resolve) => {
+    const jobToStart = db.getJobById(jobId);
+    const tCode = (jobToStart && (jobToStart.task_code || jobToStart.id)) || jobId;
+    const currentStatus = ((jobToStart && jobToStart.status) || '').toString().trim().toUpperCase();
+    // Job đã ở trạng thái kết thúc (DONE/TIMED_OUT/ARCHIVED/DELETED): không có nhánh
+    // executeStep nào xử lý nên resolve ngay, tránh treo Promise và khóa chết workspace.
+    if (TERMINAL_JOB_STATUSES.has(currentStatus)) {
+      console.log(`[PIPELINE-SKIP] Task ${tCode} (${jobId}) đã ở trạng thái kết thúc ${currentStatus}, không chạy lại pipeline.`);
+      resolve({ status: jobToStart.status, skipped: true });
+      return;
+    }
+    console.log(`[PIPELINE-START] Bắt đầu thực thi pipeline cho Task ${tCode} (${jobId})...`);
+
+    // Nếu đang TO DO, FAILED, CANCELLED hoặc rỗng thì bắt đầu chuyển PLANNING
+    if (!jobToStart.status || RESTARTABLE_JOB_STATUSES.has(currentStatus)) {
+      db.updateJob(jobId, { status: 'PLANNING', current_step: 'PLANNING', error_message: null });
+      jobEventBus.emitJobStatus(jobId, { status: 'PLANNING' });
+    }
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(result);
+    };
+
+    const onStatus = ({ status }) => {
+      if (['DONE', 'FAILED', 'CANCELLED', 'TIMED_OUT'].includes(status)) {
+        finish({ status });
+      }
+    };
+    const onDone = () => finish({ status: 'DONE' });
+    const onError = (err) => finish({ status: 'FAILED', error: err });
+    const onCancel = ({ jobId: cId }) => {
+      if (cId === jobId) finish({ status: 'CANCELLED' });
+    };
+
+    const cleanup = () => {
+      jobEventBus.off(`job:${jobId}:status`, onStatus);
+      jobEventBus.off(`job:${jobId}:done`, onDone);
+      jobEventBus.off(`job:${jobId}:error`, onError);
+      taskQueue.off('job:cancel', onCancel);
+    };
+
+    jobEventBus.on(`job:${jobId}:status`, onStatus);
+    jobEventBus.on(`job:${jobId}:done`, onDone);
+    jobEventBus.on(`job:${jobId}:error`, onError);
+    taskQueue.on('job:cancel', onCancel);
+
+    executeStep(jobId).catch((err) => {
+      console.error(`[EXECUTE-STEP-ERR] Lỗi khi thực thi pipeline cho Job ${jobId}:`, err);
+      db.updateJob(jobId, { status: 'FAILED', error_message: err.message });
+      jobEventBus.emitJobStatus(jobId, { status: 'FAILED' });
+      jobEventBus.emitJobError(jobId, { error: err.message });
+      finish({ status: 'FAILED', error: err });
+    });
+  });
+};
+
 const handleJobStart = async (req, res) => {
   try {
     const { id } = req.params;
@@ -2101,21 +2337,60 @@ const handleJobStart = async (req, res) => {
     if (!job) return res.status(404).json({ success: false, error: `Task with ID '${id}' not found` });
 
     const taskCode = job.task_code || job.id;
-    console.log(`[TASK-START] Kích hoạt Task ${taskCode} (Job ID: ${id})...`);
+    console.log(`[TASK-START] Yêu cầu kích hoạt Task ${taskCode} (Job ID: ${id})...`);
 
-    // Nếu đang TO DO, FAILED, CANCELLED hoặc rỗng thì bắt đầu quy trình bằng PLANNING
-    if (!job.status || ['TO DO', 'TO_DO', 'FAILED', 'CANCELLED'].includes(job.status)) {
-      db.updateJob(id, { status: 'PLANNING', current_step: 'PLANNING', error_message: null });
-      jobEventBus.emitJobStatus(id, { status: 'PLANNING' });
+    // 1. Kiểm tra xem job đã nằm trong hàng đợi hoặc đang chạy chưa
+    if (taskQueue.isJobEnqueuedOrRunning(id)) {
+      return res.json({
+        success: true,
+        message: `Task '${taskCode}' đang nằm trong hàng đợi hoặc đang thực thi!`,
+        jobId: id,
+        taskCode,
+        status: job.status,
+        queued: true
+      });
     }
-    setTimeout(() => { executeStep(id).catch(console.error); }, 100);
+
+    // 1b. Từ chối Start trên task đang chờ phản hồi (PENDING) hoặc đã kết thúc (DONE/TIMED_OUT/ARCHIVED/DELETED):
+    // runJobPipeline sẽ resolve-skipped ngay (không có nhánh executeStep cho terminal),
+    // enqueue lúc này chỉ chiếm slot queue và giữ lock vô ích.
+    const startStatusNorm = ((job && job.status) || '').toString().trim().toUpperCase();
+    if (startStatusNorm === 'PENDING') {
+      return res.status(400).json({
+        success: false,
+        error: `Task '${taskCode}' đang chờ phản hồi (PENDING). Hãy trả lời câu hỏi hoặc duyệt kế hoạch thay vì Start lại!`
+      });
+    }
+    if (TERMINAL_JOB_STATUSES.has(startStatusNorm)) {
+      return res.status(400).json({
+        success: false,
+        error: `Task '${taskCode}' đã ở trạng thái kết thúc ${job.status}, không thể Start lại. Hãy Clone sang mã mới để chạy lại!`
+      });
+    }
+
+     // 2. Kiểm tra xem workspace có đang bị khóa bởi task khác không (Workspace Queue Lock)
+    const isLocked = taskQueue.isWorkspaceLocked(job);
+    if (isLocked) {
+      const activeJob = taskQueue.getActiveJobForWorkspace(job);
+      const activeCode = (activeJob && (activeJob.task_code || activeJob.id)) || 'khác';
+      jobEventBus.emitJobLog(id, {
+        text: `\n[WORKSPACE-LOCK] ⏳ Workspace đang được thực thi bởi Task '${activeCode}'. Task '${taskCode}' đã được xếp vào hàng đợi chờ tới lượt (Workspace Lock)...\n`,
+        level: 'info'
+      });
+    }
+
+    // 3. Đưa job vào TaskQueue để quản lý Concurrency & Workspace Queue Lock
+    taskQueue.enqueue(job, () => runJobPipeline(id), job.priority || 0);
 
     return res.json({
       success: true,
-      message: `Task '${taskCode}' đã được kích hoạt thành công!`,
+      message: isLocked
+        ? `Task '${taskCode}' đã được xếp vào hàng đợi do Workspace đang bận!`
+        : `Task '${taskCode}' đã được kích hoạt thành công!`,
       jobId: id,
       taskCode,
-      status: job.status === 'TO DO' ? 'PLANNING' : job.status
+      status: isLocked ? (job.status || 'TO DO') : 'PLANNING',
+      queued: isLocked
     });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
@@ -2350,11 +2625,17 @@ app.post('/api/v1/jobs/:id/answer', (req, res) => {
     db.updateJob(id, { status: 'PLANNING', current_step: 'PLANNING', had_pending: 1 });
     jobEventBus.emitJobStatus(id, { status: 'PLANNING' });
 
-    // Kích hoạt tiếp tục chạy PLANNING trong background để hoàn tất kế hoạch và tự động chuyển IMPLEMENT
+    // Tiếp tục PLANNING: nếu pipeline còn giữ lock (job đang running) thì chạy tiếp trực tiếp;
+    // nếu server vừa restart làm mất queue thì đi qua TaskQueue để tôn trọng Workspace Lock.
     setImmediate(() => {
-      executeStep(id).catch(err => {
-        console.error(`[EXECUTE-STEP-ERR] Lỗi khi tiếp tục PLANNING cho Job ${id}:`, err);
-      });
+      if (taskQueue.isJobEnqueuedOrRunning(id)) {
+        executeStep(id).catch(err => {
+          console.error(`[EXECUTE-STEP-ERR] Lỗi khi tiếp tục PLANNING cho Job ${id}:`, err);
+        });
+      } else {
+        const freshJob = db.getJobById(id);
+        taskQueue.enqueue(freshJob || { id }, () => runJobPipeline(id), (freshJob && freshJob.priority) || 0);
+      }
     });
     const updatedJob = db.getJobById(id);
     return res.json({
@@ -2384,11 +2665,16 @@ app.post(['/api/v1/jobs/:id/approve', '/api/v1/tasks/:id/approve'], (req, res) =
     jobEventBus.emitJobStatus(id, { status: 'IMPLEMENT' });
     jobEventBus.emitJobLog(id, { text: `\n[PLANNING-GATE] Người dùng đã DUYỆT kế hoạch (Dual Plan Approved). Chuyển sang bước IMPLEMENT...\n` });
 
-    // Kích hoạt bước IMPLEMENT trong background
+    // Kích hoạt bước IMPLEMENT qua TaskQueue để tôn trọng Workspace Lock
     setImmediate(() => {
-      executeStep(id).catch(err => {
-        console.error(`[EXECUTE-STEP-ERR] Lỗi khi chạy IMPLEMENT cho Job ${id}:`, err);
-      });
+      if (!taskQueue.isJobEnqueuedOrRunning(id)) {
+        const freshJob = db.getJobById(id) || job;
+        taskQueue.enqueue(freshJob || job, () => runJobPipeline(id), (freshJob && freshJob.priority) || (job && job.priority) || 0);
+      } else {
+        executeStep(id).catch(err => {
+          console.error(`[EXECUTE-STEP-ERR] Lỗi khi chạy IMPLEMENT cho Job ${id}:`, err);
+        });
+      }
     });
 
     return res.json({ success: true, message: 'Đã duyệt kế hoạch, bắt đầu triển khai mã nguồn', status: 'IMPLEMENT' });
@@ -2476,9 +2762,22 @@ function handleJobStatus(req, res) {
       return res.json({ success: true, job: updatedJob, gate_result: gate.gateResult, note: gate.reason });
     }
     
-    // Nếu status là trạng thái cần chạy thì kích hoạt pipeline logic
+    // Nếu status là trạng thái cần chạy thì đi qua TaskQueue để tôn trọng Workspace Lock.
+    // Không gọi executeStep trực tiếp để tránh 2 job cùng workspace chạy đè nhau.
     if (['PLANNING', 'IMPLEMENT', 'TESTING', 'FIXING'].includes((gate.finalStatus || '').toUpperCase())) {
-      setTimeout(() => executeStep(targetId).catch(console.error), 100);
+      if (!taskQueue.isJobEnqueuedOrRunning(targetId)) {
+        const freshJob = db.getJobById(targetId) || updatedJob || job;
+        const probeJob = freshJob || job;
+        if (taskQueue.isWorkspaceLocked(probeJob)) {
+          const activeJob = taskQueue.getActiveJobForWorkspace(probeJob);
+          const activeCode = (activeJob && (activeJob.task_code || activeJob.id)) || 'khác';
+          jobEventBus.emitJobLog(targetId, {
+            text: `\n[WORKSPACE-LOCK] ⏳ Workspace đang được thực thi bởi Task '${activeCode}'. Task đổi status '${gate.finalStatus}' đã được xếp vào hàng đợi chờ tới lượt...\n`,
+            level: 'info'
+          });
+        }
+        taskQueue.enqueue(probeJob, () => runJobPipeline(targetId), (probeJob && probeJob.priority) || (job && job.priority) || 0);
+      }
     }
 
     return res.json({ success: true, job: updatedJob, gate_result: gate.gateResult });
