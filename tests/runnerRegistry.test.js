@@ -216,6 +216,23 @@ describe('RunnerRegistry & PromptTemplateManager Test Suite', () => {
       }), /ngoài feature dir/);
     });
 
+    it('buildPrompt() step testing yêu cầu đọc test_plan.md, chạy test thật và không chứa lệnh fetch giả / bypass URL', () => {
+      const manager = new PromptTemplateManager();
+      const builtPrompt = manager.buildPrompt({
+        step: 'testing',
+        taskCode: 'TASK-TEST-123',
+        userPrompt: 'Hãy test cái này.',
+        workspacePath: testTempDir,
+        featureDir: path.join(testTempDir, 'docs/features/TASK-TEST-123')
+      });
+
+      assert.ok(builtPrompt.includes('TASK-TEST-123'), 'Phải chứa TASK_CODE');
+      assert.ok(builtPrompt.includes('test_plan.md'), 'Phải yêu cầu đọc test_plan.md');
+      assert.ok(builtPrompt.includes('TUYỆT ĐỐI KHÔNG BYPASS'), 'Phải cấm bypass mock server');
+      assert.ok(builtPrompt.includes('CHẠY KIỂM THỬ THẬT'), 'Phải yêu cầu chạy lệnh test chuẩn của repository');
+      assert.ok(!/curl\s+-.*http/i.test(builtPrompt), 'Không chứa lệnh curl fetch bypass URL');
+    });
+
     it('savePromptFile() lưu tệp prompt.md trong feature dir và bảo toàn UTF-8', () => {
       const manager = new PromptTemplateManager();
       const featureDir = path.join(testTempDir, 'docs/features/TASK-X');

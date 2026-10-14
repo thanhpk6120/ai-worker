@@ -159,15 +159,24 @@ Thư mục Feature bắt buộc: {{FEATURE_DIR}}
     const template = this.getTemplate(step);
 
     let contextSection = '';
-    if (previousContext && previousContext.trim()) {
-      contextSection = `## Tài liệu & Ngữ cảnh hiện có (Previous Context):\n${previousContext}\n`;
+    if (previousContext && typeof previousContext === 'string' && previousContext.trim()) {
+      let trimmedContext = previousContext.trim();
+      const MAX_CONTEXT_LENGTH = 12000;
+      if (trimmedContext.length > MAX_CONTEXT_LENGTH) {
+        trimmedContext = trimmedContext.substring(0, MAX_CONTEXT_LENGTH) + '\n\n... [Ngữ cảnh đã bị cắt bớt do quá dài để đảm bảo an toàn bộ đệm]';
+      }
+      contextSection = `## Tài liệu & Ngữ cảnh hiện có (Previous Context):\n${trimmedContext}\n`;
     }
 
     let errorSection = '';
-    if (errorLogs && errorLogs.trim()) {
-      errorSection = `## Chi tiết Lỗi kiểm thử (Error Logs):\n\`\`\`\n${errorLogs}\n\`\`\`\n`;
+    if (errorLogs && typeof errorLogs === 'string' && errorLogs.trim()) {
+      let trimmedError = errorLogs.trim();
+      const MAX_ERROR_LENGTH = 8000;
+      if (trimmedError.length > MAX_ERROR_LENGTH) {
+        trimmedError = trimmedError.substring(0, MAX_ERROR_LENGTH) + '\n... [Logs đã bị cắt bớt do quá dài]';
+      }
+      errorSection = `## Chi tiết Lỗi kiểm thử (Error Logs):\n\`\`\`\n${trimmedError}\n\`\`\`\n`;
     }
-
     const mcpSection = (typeof this.getActiveMcpServersSection === 'function')
       ? this.getActiveMcpServersSection()
       : '';

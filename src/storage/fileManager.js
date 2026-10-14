@@ -3,20 +3,37 @@ const path = require('node:path');
 
 class FileManager {
   /**
+   * Chuẩn hóa đường dẫn workspace tuyệt đối, xử lý đúng trên cả Windows và Linux
+   * Tránh lỗi ghép nhầm cwd vào đường dẫn tuyệt đối (join vs resolve)
+   */
+  resolveWorkspacePath(workspacePath = './') {
+    let ws = String(workspacePath || './').trim();
+    // Xử lý leading slash trước drive letter kiểu unix trên Windows (/D:/... -> D:/...)
+    if (/^\/[a-zA-Z]:[/\\]/.test(ws)) {
+      ws = ws.slice(1);
+    }
+    // Nếu đã là đường dẫn tuyệt đối (ví dụ D:\... hoặc /var/...) thì normalize trực tiếp
+    if (path.isAbsolute(ws)) {
+      return path.normalize(ws);
+    }
+    return path.resolve(process.cwd(), ws);
+  }
+
+  /**
    * Xác định đường dẫn thư mục feature cho task
    * Chuẩn bắt buộc: <workspacePath>/docs/features/<taskCode>/
    * Hỗ trợ tương thích ngược với docs/features/ hoặc feature/ nếu thư mục đó đã tồn tại trước
    */
   getFeatureDirectory(workspacePath = './', taskCode = 'DEFAULT-TASK', featuresDir = 'docs/features') {
     const cleanTaskCode = String(taskCode || '').trim().replace(/[/\\?%*:|"<>]/g, '-');
-    const resolvedWorkspace = path.resolve(workspacePath);
+    const resolvedWorkspace = this.resolveWorkspacePath(workspacePath);
 
     // Chuẩn chính thức: <workspace>/<featuresDir>/<taskCode>
     const primaryPath = path.resolve(resolvedWorkspace, featuresDir, cleanTaskCode);
 
     // Tương thích ngược nếu đã tồn tại trước đó:
-    const legacyFeaturesPath = path.join(resolvedWorkspace, 'docs', 'features', cleanTaskCode);
-    const legacyFeaturePath = path.join(resolvedWorkspace, 'feature', cleanTaskCode);
+    const legacyFeaturesPath = path.resolve(resolvedWorkspace, 'docs', 'features', cleanTaskCode);
+    const legacyFeaturePath = path.resolve(resolvedWorkspace, 'feature', cleanTaskCode);
 
     if (fs.existsSync(primaryPath)) {
       return primaryPath;
@@ -38,12 +55,12 @@ class FileManager {
     const rawTaskCode = String(taskCode || '').trim();
     if (!rawTaskCode) return false;
 
-    const resolvedWorkspace = path.resolve(workspacePath || './');
+    const resolvedWorkspace = this.resolveWorkspacePath(workspacePath || './');
     const cleanTaskCode = rawTaskCode.replace(/[/\\?%*:|"<>]/g, '-');
 
     const primaryPath = path.resolve(resolvedWorkspace, featuresDir, cleanTaskCode);
-    const legacyFeaturesPath = path.join(resolvedWorkspace, 'docs', 'features', cleanTaskCode);
-    const legacyFeaturePath = path.join(resolvedWorkspace, 'feature', cleanTaskCode);
+    const legacyFeaturesPath = path.resolve(resolvedWorkspace, 'docs', 'features', cleanTaskCode);
+    const legacyFeaturePath = path.resolve(resolvedWorkspace, 'feature', cleanTaskCode);
 
     return fs.existsSync(primaryPath) || fs.existsSync(legacyFeaturesPath) || fs.existsSync(legacyFeaturePath);
   }
@@ -95,7 +112,7 @@ class FileManager {
       throw new Error('Mã task không được để trống.');
     }
 
-    const resolvedWorkspace = path.resolve(workspacePath || './');
+    const resolvedWorkspace = this.resolveWorkspacePath(workspacePath || './');
     if (!fs.existsSync(resolvedWorkspace)) {
       throw new Error(`Đường dẫn workspace '${workspacePath}' không tồn tại trên hệ thống.`);
     }
@@ -225,18 +242,50 @@ ${prompt || 'Không có mô tả chi tiết.'}
   /**
    * Nạp toàn bộ các file .md trong thư mục feature để làm ngữ cảnh truyền cho AI
    */
-  loadPreviousContext(workspacePath, taskCode, featuresDir = 'docs/features') {
+  loadPreviousContext(workspacePath, taskCode, step = null, featuresDir = 'docs/features') {
+    if (typeof step === 'string' && (step.includes('/') || step.includes('\\'))) {
+      featuresDir = step;
+      step = null;
+    }
     const dir = this.getFeatureDirectory(workspacePath, taskCode, featuresDir);
     if (!fs.existsSync(dir)) return '';
 
     let context = '';
-    const files = fs.readdirSync(dir).filter(f => f.endsWith('.md'));
+    let filesToLoad = [];
+    
+    const stepLower = step ? String(step).toLowerCase() : null;
+    
+    if (stepLower === 'planning') {
+      filesToLoad = ['expect.md', 'context.md'];
+    } else if (stepLower === 'implement') {
+      filesToLoad = ['dev_plan.md', 'test_plan.md'];
+      if (!fs.existsSync(path.join(dir, 'dev_plan.md')) && fs.existsSync(path.join(dir, 'plan.md'))) {
+        filesToLoad.push('plan.md');
+      }
+    } else if (stepLower === 'testing') {
+      filesToLoad = ['test_plan.md', 'report.md'];
+    } else if (stepLower === 'fixing') {
+      filesToLoad = ['dev_plan.md', 'test_plan.md'];
+      if (!fs.existsSync(path.join(dir, 'dev_plan.md')) && fs.existsSync(path.join(dir, 'plan.md'))) {
+        filesToLoad.push('plan.md');
+      }
+    } else {
+      filesToLoad = fs.readdirSync(dir).filter(f => f.endsWith('.md'));
+    }
 
-    for (const file of files) {
+    filesToLoad = [...new Set(filesToLoad)];
+    const MAX_SECTION_LENGTH = 8000;
+
+    for (const file of filesToLoad) {
       try {
         const fullPath = path.join(dir, file);
-        const fileContent = fs.readFileSync(fullPath, 'utf-8');
-        context += `### Tệp \`${file}\`:\n\`\`\`markdown\n${fileContent}\n\`\`\`\n\n`;
+        if (fs.existsSync(fullPath)) {
+          let fileContent = fs.readFileSync(fullPath, 'utf-8');
+          if (fileContent.length > MAX_SECTION_LENGTH) {
+            fileContent = fileContent.substring(0, MAX_SECTION_LENGTH) + '\n... [Nội dung đã bị cắt bớt do vượt quá giới hạn 8,000 ký tự để tránh tràn bộ đệm CLI]';
+          }
+          context += `### Tệp \`${file}\`:\n\`\`\`markdown\n${fileContent}\n\`\`\`\n\n`;
+        }
       } catch (e) {
         // bỏ qua nếu lỗi đọc
       }

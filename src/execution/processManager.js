@@ -110,6 +110,8 @@ class ProcessManager extends EventEmitter {
       FORCE_COLOR: '1',
       CI: '1',
       TERM: 'xterm-256color',
+      COLUMNS: '250',
+      LINES: '50',
       ...env
     };
 

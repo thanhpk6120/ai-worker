@@ -7,6 +7,7 @@ const express = require('express');
 const cors = require('cors');
 const path = require('node:path');
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const { EventEmitter } = require('node:events');
 
 const config = require('./config');
@@ -108,6 +109,19 @@ class JobEventBus extends EventEmitter {
     };
     this.emit(`job:${jobId}:error`, normalized);
     this.emit('error', normalized);
+  }
+
+  emitJobCreated(jobData) {
+    const jobId = jobData && jobData.id ? jobData.id : undefined;
+    const normalized = {
+      type: 'created',
+      jobId,
+      timestamp: new Date().toISOString(),
+      job: jobData
+    };
+    if (jobId) this.emit(`job:${jobId}:created`, normalized);
+    this.emit('job:created', normalized);
+    this.emit('created', normalized);
   }
 }
 
@@ -215,8 +229,97 @@ app.use((req, res, next) => {
 const publicPath = path.join(__dirname, '../public');
 app.use(express.static(publicPath));
 
+// Hàm hỗ trợ chuyển file vào thùng rác đa nền tảng (an toàn, không xóa vĩnh viễn)
+function safeMoveToTrash(filePath) {
+  if (!fs.existsSync(filePath)) return false;
+  const fullPath = path.resolve(filePath);
+  if (process.platform === 'win32') {
+    try {
+      const psCommand = `Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile('${fullPath.replace(/'/g, "''")}', 'OnlyErrorDialogs', 'SendToRecycleBin')`;
+      require('node:child_process').execSync(`powershell.exe -NoProfile -NonInteractive -Command "${psCommand}"`, { stdio: 'ignore' });
+      return true;
+    } catch (e) {}
+  } else if (process.platform === 'darwin') {
+    try {
+      require('node:child_process').execSync(`osascript -e 'tell application "Finder" to delete POSIX file "${fullPath}"'`, { stdio: 'ignore' });
+      return true;
+    } catch (e) {}
+  }
+  // Fallback: move to .trash folder
+  try {
+    const trashDir = path.join(path.dirname(filePath), '.trash');
+    if (!fs.existsSync(trashDir)) {
+      fs.mkdirSync(trashDir, { recursive: true });
+    }
+    const dest = path.join(trashDir, `${Date.now()}_${path.basename(filePath)}`);
+    fs.renameSync(filePath, dest);
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+
+// Helper kiểm tra xem file evidence có bị đánh dấu deleted trong metadata.json hay không
+function isEvidenceFileDeleted(metadata, filename) {
+  if (!metadata || !filename) return false;
+  if (Array.isArray(metadata)) {
+    const item = metadata.find(m => m && (m.fileName === filename || m.name === filename || m.file === filename || (m.file_path && m.file_path.includes(filename))));
+    return !!(item && item.deleted === true);
+  }
+  if (typeof metadata === 'object') {
+    const item = metadata[filename];
+    return !!(item && item.deleted === true);
+  }
+  return false;
+}
+
+// Helper lấy metadata của 1 file evidence
+function getEvidenceFileMeta(metadata, filename) {
+  if (!metadata || !filename) return {};
+  if (Array.isArray(metadata)) {
+    return metadata.find(m => m && (m.fileName === filename || m.name === filename || m.file === filename || (m.file_path && m.file_path.includes(filename)))) || {};
+  }
+  if (typeof metadata === 'object') {
+    return metadata[filename] || {};
+  }
+  return {};
+}
+
+function hashEvidenceBuffer(buf) {
+  try { return crypto.createHash('md5').update(buf).digest('hex'); } catch (e) { return null; }
+}
+// ponytail: đọc sync toàn file, đủ cho evidence nhỏ; chuyển stream khi file >50MB.
+function buildEvidenceHashes(fullFilePath, stat) {
+  let buf = null;
+  try { buf = fs.readFileSync(fullFilePath); } catch (e) {
+    const fallback = stat ? stat.size : 0;
+    return { size: fallback, sizeBytes: fallback, md5: null, contentHash: null };
+  }
+  const size = buf.length || (stat ? stat.size : 0);
+  const md5 = hashEvidenceBuffer(buf);
+  return { size, sizeBytes: size, md5, contentHash: md5 };
+}
+// Chuẩn hoá gate DONE/FAILED: DONE chỉ khi passed=true và không error/timeout.
+function resolveJobGate(requestedStatus, body, job) {
+  const raw = (requestedStatus || '').toString().trim().toUpperCase();
+  const normalized = raw === 'TODO' ? 'TO DO' : raw;
+  const gate = (body && body.gate_result) || {};
+  const passed = body.passed !== undefined ? body.passed : (gate.passed !== undefined ? gate.passed : body.gate_passed);
+  const passedTrue = passed === true || passed === 'true' || passed === 1;
+  const errField = body.error !== undefined ? body.error : (body.error_message !== undefined ? body.error_message : gate.error);
+  const hasError = errField !== undefined && errField !== null && errField !== '' && errField !== false && errField !== 0;
+  const combined = [typeof errField === 'string' ? errField : '', body.timeout ? String(body.timeout) : '', gate.timeout ? String(gate.timeout) : ''].join(' ');
+  const hasTimeout = /timeout|timed\s*out|etimedout/i.test(combined);
+  const gateResult = { passed: passedTrue, error: typeof errField === 'string' ? errField : (hasError ? String(errField) : null), timeout: hasTimeout, decided_at: new Date().toISOString(), mapped_from: normalized };
+  if (normalized === 'DONE') {
+    if (hasError || hasTimeout) return { finalStatus: 'FAILED', gateResult, rejected: true, reason: 'Cấm DONE khi kèm error/timeout' };
+    if (!passedTrue) return { finalStatus: 'FAILED', gateResult, rejected: false, reason: 'DONE yêu cầu passed=true' };
+    return { finalStatus: 'DONE', gateResult, rejected: false, reason: null };
+  }
+  return { finalStatus: requestedStatus, gateResult, rejected: false, reason: null };
+}
+
 // Phục vụ thư mục ảnh bằng chứng static tại /evidence và /evidences
-// Removed mock evidence dir
 function serveEvidenceFile(req, res) {
   const filename = req.params.filename;
   if (!filename) return res.status(400).send('Filename required');
@@ -245,12 +348,45 @@ function serveEvidenceFile(req, res) {
 
       const taskCode = job.task_code || job.id;
       const featureDir = fileManager.getFeatureDirectory(wsPath, taskCode, wsFeaturesDir);
-      const targetFile = path.join(featureDir, 'evidence', safeFilename);
+      const taskEvidenceDir = path.join(featureDir, 'evidence');
+      const targetFile = path.join(taskEvidenceDir, safeFilename);
+      const metaPath = path.join(taskEvidenceDir, 'metadata.json');
+      let metaObj = null;
+      if (fs.existsSync(metaPath)) {
+        try { metaObj = JSON.parse(fs.readFileSync(metaPath, 'utf8')); } catch (e) {}
+      }
+      if (isEvidenceFileDeleted(metaObj, safeFilename)) {
+        return res.status(404).send('Evidence file has been marked as deleted');
+      }
       if (fs.existsSync(targetFile)) {
         return res.sendFile(targetFile);
       }
     }
   }
+  // Fallback nếu không truyền job id: quét qua các workspace và feature gần nhất
+  try {
+    const workspaces = db.listWorkspaces ? db.listWorkspaces() : [];
+    for (const ws of workspaces) {
+      const featuresRoot = path.join(ws.path, ws.features_dir || 'docs/features');
+      if (fs.existsSync(featuresRoot)) {
+        const subdirs = fs.readdirSync(featuresRoot);
+        for (const sub of subdirs) {
+          const candidateMeta = path.join(featuresRoot, sub, 'evidence', 'metadata.json');
+          let subMeta = null;
+          if (fs.existsSync(candidateMeta)) {
+            try { subMeta = JSON.parse(fs.readFileSync(candidateMeta, 'utf8')); } catch (e) {}
+          }
+          if (isEvidenceFileDeleted(subMeta, safeFilename)) {
+            continue;
+          }
+          const candidate = path.join(featuresRoot, sub, 'evidence', safeFilename);
+          if (fs.existsSync(candidate)) {
+            return res.sendFile(candidate);
+          }
+        }
+      }
+    }
+  } catch (e) {}
 
   return res.status(404).send('Evidence file not found');
 }
@@ -570,9 +706,15 @@ app.post('/api/v1/jobs', (req, res) => {
     if (timeout) mergedPipelineConfig.timeout = timeout;
     if (model) mergedPipelineConfig.model = model;
     if (runners) mergedPipelineConfig.runners = runners;
+    const bodyMaxRetries = req.body.max_retries ?? req.body.maxRetries ?? req.body.maxretries;
+    if (bodyMaxRetries !== undefined && bodyMaxRetries !== null) {
+      mergedPipelineConfig.max_retries = bodyMaxRetries;
+      mergedPipelineConfig.maxRetries = bodyMaxRetries;
+    }
 
     // Đảm bảo tạo thư mục docs/features/<task_code> và ghi file expect.md trước
     // Nếu thư mục đã tồn tại trên workspace: Báo lỗi FOLDER_ALREADY_EXISTS kèm mã gợi ý
+    let resolvedWorkspaceId = finalWorkspaceId || null;
     try {
       let finalFeaturesDir = 'docs/features';
       let selectedWs = null;
@@ -592,6 +734,9 @@ app.post('/api/v1/jobs', (req, res) => {
       }
       if (selectedWs && selectedWs.features_dir) {
         finalFeaturesDir = selectedWs.features_dir;
+      }
+      if (selectedWs && selectedWs.id) {
+        resolvedWorkspaceId = selectedWs.id;
       }
       const allowExisting = req.body.allow_existing === true || req.body.allowExisting === true || req.body.force === true;
       fileManager.ensureFeatureDirectory(finalRepoPath, finalTaskCode, { allowExisting, featuresDir: finalFeaturesDir });
@@ -625,6 +770,7 @@ app.post('/api/v1/jobs', (req, res) => {
       title: finalTitle,
       prompt: finalPrompt,
       repo_path: finalRepoPath,
+      workspace_id: resolvedWorkspaceId,
       base_branch: finalBranch,
       runner: finalRunner,
       pipeline_config: mergedPipelineConfig,
@@ -763,44 +909,135 @@ app.get('/api/v1/jobs', (req, res) => {
 });
 function getTaskEvidences(job) {
   if (!job) return [];
-  const workspacePath = job.repo_path || job.worktree_path || './';
+  let workspacePath = job.repo_path || job.worktree_path || './';
   let wsFeaturesDir = 'docs/features';
   try {
-    const ws = job.workspace_id ? db.getWorkspaceById(job.workspace_id) : (db.listWorkspaces ? db.listWorkspaces().find(w => path.resolve(w.path) === path.resolve(workspacePath)) : null);
-    if (ws && ws.features_dir) wsFeaturesDir = ws.features_dir;
+    let ws = null;
+    if (job.workspace_id) ws = db.getWorkspaceById(job.workspace_id);
+    if (!ws && workspacePath && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(workspacePath)) {
+      ws = db.getWorkspaceById(workspacePath);
+    }
+    if (!ws && typeof db.listWorkspaces === 'function') {
+      const allWs = db.listWorkspaces();
+      ws = allWs.find(w => path.resolve(w.path) === path.resolve(workspacePath));
+    }
+    if (ws) {
+      if (ws.path) workspacePath = ws.path;
+      if (ws.features_dir) wsFeaturesDir = ws.features_dir;
+    }
   } catch (e) {}
-
   const taskCode = job.task_code || job.id;
   const featureDir = fileManager.getFeatureDirectory(workspacePath, taskCode, wsFeaturesDir);
   const taskEvidenceDir = path.join(featureDir, 'evidence');
+  let metadata = {};
+  const metadataPath = path.join(taskEvidenceDir, 'metadata.json');
+  if (fs.existsSync(metadataPath)) {
+    try { metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8')); } catch(e){}
+  }
+
 
   const list = [];
   if (fs.existsSync(taskEvidenceDir)) {
     const files = fs.readdirSync(taskEvidenceDir);
     files.forEach((file, idx) => {
+      if (file === 'metadata.json' || file.startsWith('.')) return;
+      if (isEvidenceFileDeleted(metadata, file)) return;
+
+      const fullFilePath = path.join(taskEvidenceDir, file);
+      let stat;
+      try { stat = fs.statSync(fullFilePath); } catch (e) { return; }
+      if (stat.size <= 10) return; // File rỗng không coi là evidence
+
       const ext = path.extname(file).toLowerCase();
-      let type = 'LOG_TRACE';
-      if (['.png', '.jpg', '.jpeg', '.webp', '.gif'].includes(ext)) {
-        type = 'UI_SCREENSHOT';
-      } else if (['.json'].includes(ext)) {
-        type = 'API_TEST';
-      } else if (['.sql'].includes(ext)) {
-        type = 'DB_QUERY';
+      if (ext === '.json') {
+        try {
+          const raw = fs.readFileSync(fullFilePath, 'utf8').trim();
+          if (!raw || raw === '{}' || raw === '[]' || raw === 'null') return;
+        } catch (e) { return; }
+      } else if (ext === '.log' || ext === '.txt') {
+        try {
+          const raw = fs.readFileSync(fullFilePath, 'utf8').trim();
+          if (!raw) return;
+        } catch (e) { return; }
       }
-      list.push({
+
+      const meta = getEvidenceFileMeta(metadata, file);
+      const evidenceHashes = buildEvidenceHashes(fullFilePath, stat);
+      let type = 'LOG_TRACE';
+      let fileContent = '';
+      let parsedData = null;
+
+      if (['.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg'].includes(ext)) {
+        type = 'UI_SCREENSHOT';
+      } else if (file.toLowerCase().includes('db') || file.toLowerCase().includes('assert') || ext === '.sql') {
+        type = 'DB_QUERY';
+        try {
+          fileContent = fs.readFileSync(fullFilePath, 'utf8');
+          if (ext === '.json') parsedData = JSON.parse(fileContent);
+        } catch (e) {}
+      } else if (ext === '.json' || file.toLowerCase().includes('api')) {
+        type = 'API_TEST';
+        try {
+          fileContent = fs.readFileSync(fullFilePath, 'utf8');
+          parsedData = JSON.parse(fileContent);
+          if (!parsedData || (typeof parsedData === 'object' && !parsedData.endpoint && !parsedData.request && !parsedData.url && !parsedData.method && !parsedData.status)) {
+            return;
+          }
+        } catch (e) { return; }
+      } else if (ext === '.log' || ext === '.txt') {
+        type = 'LOG_TRACE';
+        try { fileContent = fs.readFileSync(fullFilePath, 'utf8'); } catch (e) {}
+      }
+
+      const taskCode = job.task_code || job.id;
+      const itemObj = {
         id: `${job.id}-ev-${idx}`,
         job_id: job.id,
         type,
-        verdict: 'PASS',
+        verdict: meta.verdict || (meta.status === 'FAILED' ? 'FAIL' : 'PASS'),
         file_path: `/api/v1/jobs/${job.id}/evidence/files/${encodeURIComponent(file)}`,
         url: `/api/v1/jobs/${job.id}/evidence/files/${encodeURIComponent(file)}`,
-        status: 'PASSED',
-        title: file.replace(ext, '').replace(/^[0-9]+_/, '').replace(/[-_]/g, ' '),
-        filename: file
-      });
+        status: meta.status || (meta.verdict === 'FAIL' ? 'FAILED' : 'PASSED'),
+        title: meta.title || file.replace(ext, '').replace(/^[0-9]+_/, '').replace(/[-_]/g, ' '),
+        filename: file,
+        service_name: taskCode || 'Target Service',
+        service: taskCode || 'Target Service',
+        content: fileContent,
+        rawLogs: fileContent,
+        logs: fileContent,
+        log_excerpt: fileContent ? fileContent.slice(0, 300) : '',
+        size: (typeof evidenceHashes !== 'undefined' && evidenceHashes.size != null ? evidenceHashes.size : stat.size),
+        sizeBytes: (typeof evidenceHashes !== 'undefined' && evidenceHashes.sizeBytes != null ? evidenceHashes.sizeBytes : stat.size),
+        md5: (typeof evidenceHashes !== 'undefined' && evidenceHashes.md5) || null,
+        contentHash: (typeof evidenceHashes !== 'undefined' && evidenceHashes.contentHash) || null
+      };
+
+      if (type === 'API_TEST' && parsedData) {
+        itemObj.method = (parsedData.method || (parsedData.request && parsedData.request.method) || 'GET').toUpperCase();
+        itemObj.endpoint = parsedData.endpoint || parsedData.url || (parsedData.request && (parsedData.request.url || parsedData.request.endpoint || parsedData.request.path)) || '/api';
+        itemObj.statusCode = parsedData.statusCode || parsedData.status_code || parsedData.status || (parsedData.response && parsedData.response.status) || 200;
+        itemObj.durationMs = parsedData.durationMs || parsedData.duration_ms || parsedData.latency_ms || parsedData.latency || 0;
+        itemObj.request = parsedData.request || { method: itemObj.method, endpoint: itemObj.endpoint, headers: parsedData.headers, body: parsedData.body || parsedData.payload };
+        itemObj.response = parsedData.response || { status: itemObj.statusCode, headers: parsedData.responseHeaders, body: parsedData.responseBody || parsedData.data };
+      }
+
+      if (type === 'DB_QUERY' && parsedData) {
+        itemObj.table = parsedData.table || parsedData.tableName || parsedData.target || 'Database Table';
+        itemObj.query = parsedData.query || parsedData.sql || fileContent;
+        itemObj.expected = parsedData.expected || parsedData.expectedValues;
+        itemObj.actual = parsedData.actual || parsedData.actualRows || parsedData.rows;
+        itemObj.matched = parsedData.matched !== undefined ? parsedData.matched : (parsedData.passed !== undefined ? parsedData.passed : (itemObj.verdict === 'PASS'));
+      }
+
+      list.push(itemObj);
     });
   }
-  return list;
+
+  // Giới hạn tối đa 2 loại evidence thực tế
+  const priorityOrder = ['UI_SCREENSHOT', 'LOG_TRACE', 'API_TEST', 'DB_QUERY'];
+  const presentTypes = priorityOrder.filter(t => list.some(e => e.type === t));
+  const allowedTypes = new Set(presentTypes.slice(0, 2));
+  return list.filter(e => allowedTypes.has(e.type));
 }
 
 /**
@@ -863,57 +1100,159 @@ app.put(['/api/v1/jobs/:id', '/api/v1/tasks/:id'], (req, res) => {
       });
     }
 
-    const { task_code, prompt, title } = req.body;
+    const { task_code, prompt, title, repo_path, repoPath, base_branch, branch, timeout, max_retries, maxRetries, pipeline_config, pipelineConfig, model } = req.body;
+    const workspaceIdRaw = req.body.workspace_id || req.body.workspaceId;
     const updates = {};
 
-    const finalWorkspace = job.repo_path || job.workspace_path || './';
-    const finalCode = (task_code && task_code.trim()) ? task_code.trim() : (job.task_code || id);
+    // Resolve workspace như POST: workspace_id -> repo_path, UUID -> repo_path
+    let finalRepoPath = repoPath || repo_path || null;
+    let resolvedWs = null;
+    if (workspaceIdRaw) {
+      resolvedWs = db.getWorkspaceById(workspaceIdRaw);
+      if (!resolvedWs) {
+        return res.status(400).json({ success: false, error: `Workspace với ID '${workspaceIdRaw}' không tồn tại` });
+      }
+      if (resolvedWs.path) finalRepoPath = resolvedWs.path;
+    }
+    if (finalRepoPath && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(finalRepoPath).trim())) {
+      const wsByUuid = db.getWorkspaceById(String(finalRepoPath).trim());
+      if (wsByUuid && wsByUuid.path) {
+        if (!resolvedWs) resolvedWs = wsByUuid;
+        finalRepoPath = wsByUuid.path;
+      }
+    }
+    const oldWorkspace = job.repo_path || job.workspace_path || './';
+    const finalWorkspace = finalRepoPath || oldWorkspace;
+    const isChangingWorkspace = path.resolve(String(finalWorkspace)) !== path.resolve(String(oldWorkspace));
+    const finalCode = (task_code && String(task_code).trim()) ? String(task_code).trim() : (job.task_code || id);
+    const oldCode = job.task_code || id;
+    const isChangingCode = Boolean(task_code && String(task_code).trim() && String(task_code).trim() !== job.task_code);
 
     // Đảm bảo tạo hoặc kiểm tra thư mục docs/features/<task_code> trước khi cập nhật
     // Nếu đổi sang mã task mới mà thư mục đã tồn tại: Báo lỗi và gợi ý hậu tố
-    const isChangingCode = (task_code && task_code.trim() && task_code.trim() !== job.task_code);
+    // Nếu đổi workspace: kiểm tra/dời thư mục features tương ứng
+    let finalFeaturesDir = 'docs/features';
+    let oldFeaturesDir = 'docs/features';
     try {
-      let finalFeaturesDir = 'docs/features';
-    let selectedWs = null;
-    if (job.workspace_id) {
-      selectedWs = db.getWorkspaceById(job.workspace_id);
-    }
-    if (!selectedWs && finalWorkspace && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(finalWorkspace)) {
-      selectedWs = db.getWorkspaceById(finalWorkspace);
-    }
-    if (!selectedWs && finalWorkspace) {
-      const allWs = db.listWorkspaces();
-      selectedWs = allWs.find(w => path.resolve(w.path) === path.resolve(finalWorkspace));
-    }
-    if (selectedWs && selectedWs.features_dir) {
-      finalFeaturesDir = selectedWs.features_dir;
-    }
-    defaultFileManager.ensureFeatureDirectory(finalWorkspace, finalCode, { allowExisting: !isChangingCode, featuresDir: finalFeaturesDir });
+      if (!resolvedWs) {
+        if (job.workspace_id) resolvedWs = db.getWorkspaceById(job.workspace_id);
+      }
+      if (!resolvedWs && finalWorkspace && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(finalWorkspace))) {
+        resolvedWs = db.getWorkspaceById(String(finalWorkspace));
+      }
+      if (!resolvedWs && finalWorkspace) {
+        const allWs = db.listWorkspaces();
+        resolvedWs = allWs.find(w => { try { return path.resolve(w.path) === path.resolve(String(finalWorkspace)); } catch (e) { return false; } });
+      }
+      if (resolvedWs && resolvedWs.features_dir) finalFeaturesDir = resolvedWs.features_dir;
+      // features_dir của workspace cũ (phục vụ dời thư mục khi đổi workspace)
+      try {
+        let oldWs = null;
+        if (job.workspace_id) oldWs = db.getWorkspaceById(job.workspace_id);
+        if (!oldWs && oldWorkspace) {
+          const allWs = db.listWorkspaces();
+          oldWs = allWs.find(w => { try { return path.resolve(w.path) === path.resolve(String(oldWorkspace)); } catch (e) { return false; } });
+        }
+        if (oldWs && oldWs.features_dir) oldFeaturesDir = oldWs.features_dir;
+        else if (resolvedWs && !isChangingWorkspace && resolvedWs.features_dir) oldFeaturesDir = resolvedWs.features_dir;
+      } catch (e) {}
+      const allowExisting = !(isChangingCode || isChangingWorkspace);
+      if (isChangingCode || isChangingWorkspace) {
+        let oldDir = null;
+        let newDir = null;
+        try { oldDir = fileManager.getFeatureDirectory(oldWorkspace, oldCode, oldFeaturesDir); } catch (e) { oldDir = null; }
+        try { newDir = path.resolve(fileManager.resolveWorkspacePath(finalWorkspace), finalFeaturesDir, String(finalCode).replace(/[/\\?%*:|"<>]/g, '-')); } catch (e) { newDir = null; }
+        const oldExists = oldDir && fs.existsSync(oldDir);
+        const newExists = newDir && fs.existsSync(newDir);
+        const sameDir = oldDir && newDir && path.resolve(oldDir) === path.resolve(newDir);
+        if (oldExists && !sameDir) {
+          if (newExists) {
+            let suggested = null;
+            try { suggested = fileManager.suggestNextTaskCode(finalWorkspace, finalCode, finalFeaturesDir); } catch (e) {}
+            return res.status(409).json({
+              success: false,
+              conflict: true,
+              reason: 'FOLDER_ALREADY_EXISTS',
+              error: `Thư mục '${finalFeaturesDir}/${finalCode}' đã tồn tại trên workspace. Vui lòng chọn mã task khác hoặc sử dụng mã gợi ý.`,
+              suggested_task_code: suggested
+            });
+          }
+          try {
+            fs.mkdirSync(path.dirname(newDir), { recursive: true });
+            try {
+              fs.renameSync(oldDir, newDir);
+            } catch (moveErr) {
+              if (moveErr && (moveErr.code === 'EXDEV' || moveErr.code === 'EPERM')) {
+                fs.cpSync(oldDir, newDir, { recursive: true });
+                fs.rmSync(oldDir, { recursive: true, force: true });
+              } else {
+                throw moveErr;
+              }
+            }
+            const evidenceDir = path.join(newDir, 'evidence');
+            if (!fs.existsSync(evidenceDir)) fs.mkdirSync(evidenceDir, { recursive: true });
+          } catch (moveErr) {
+            fileManager.ensureFeatureDirectory(finalWorkspace, finalCode, { allowExisting: false, featuresDir: finalFeaturesDir });
+          }
+        } else {
+          fileManager.ensureFeatureDirectory(finalWorkspace, finalCode, { allowExisting: false, featuresDir: finalFeaturesDir });
+        }
+      } else {
+        fileManager.ensureFeatureDirectory(finalWorkspace, finalCode, { allowExisting, featuresDir: finalFeaturesDir });
+      }
     } catch (folderErr) {
       if (folderErr.code === 'FOLDER_ALREADY_EXISTS') {
         return res.status(409).json({
           success: false,
           conflict: true,
           reason: 'FOLDER_ALREADY_EXISTS',
-          error: `Thư mục 'docs/features/${finalCode}' đã tồn tại trên workspace. Vui lòng chọn mã task khác hoặc sử dụng mã gợi ý.`,
+          error: `Thư mục '${finalFeaturesDir}/${finalCode}' đã tồn tại trên workspace. Vui lòng chọn mã task khác hoặc sử dụng mã gợi ý.`,
           suggested_task_code: folderErr.suggestedTaskCode
         });
       }
       return res.status(400).json({
         success: false,
-        error: `Không thể tạo hoặc truy cập thư mục 'docs/features/${finalCode}': ${folderErr.message}. Vui lòng kiểm tra lại mã task hoặc đường dẫn workspace.`,
+        error: `Không thể tạo hoặc truy cập thư mục '${finalFeaturesDir}/${finalCode}': ${folderErr.message}. Vui lòng kiểm tra lại mã task hoặc đường dẫn workspace.`,
         reason: 'FOLDER_CREATION_FAILED'
       });
     }
-    if (task_code && task_code.trim()) updates.task_code = task_code.trim();
-    if (prompt && prompt.trim()) updates.prompt = prompt.trim();
-    if (title && title.trim()) updates.title = title.trim();
+    if (task_code && String(task_code).trim()) updates.task_code = String(task_code).trim();
+    if (prompt && String(prompt).trim()) updates.prompt = String(prompt).trim();
+    if (title && String(title).trim()) updates.title = String(title).trim();
+    const branchRaw = branch || base_branch;
+    if (branchRaw && String(branchRaw).trim()) updates.base_branch = String(branchRaw).trim();
+    if (finalRepoPath) updates.repo_path = finalRepoPath;
+    else if (isChangingWorkspace) updates.repo_path = finalWorkspace;
+    if (resolvedWs && resolvedWs.id) updates.workspace_id = resolvedWs.id;
+    const incomingPipeRaw = pipeline_config || pipelineConfig;
+    const hasIncomingPipe = incomingPipeRaw && typeof incomingPipeRaw === 'object' && Object.keys(incomingPipeRaw).length > 0;
+    if (hasIncomingPipe || timeout !== undefined || max_retries !== undefined || maxRetries !== undefined || model !== undefined) {
+      let mergedPipe = {};
+      if (job.pipeline_config) {
+        try {
+          mergedPipe = typeof job.pipeline_config === 'string' ? JSON.parse(job.pipeline_config) : { ...job.pipeline_config };
+        } catch (e) { mergedPipe = {}; }
+      }
+      if (hasIncomingPipe) mergedPipe = { ...mergedPipe, ...incomingPipeRaw };
+      if (timeout !== undefined && timeout !== null && String(timeout).trim() !== '') {
+        const n = Number(timeout);
+        mergedPipe.timeout = Number.isFinite(n) ? n : timeout;
+      }
+      const retryVal = max_retries !== undefined ? max_retries : maxRetries;
+      if (retryVal !== undefined && retryVal !== null && String(retryVal).trim() !== '') {
+        const n = Number(retryVal);
+        mergedPipe.max_retries = Number.isFinite(n) ? n : retryVal;
+        mergedPipe.maxRetries = mergedPipe.max_retries;
+      }
+      if (model !== undefined && model !== null && String(model).trim() !== '') mergedPipe.model = model;
+      updates.pipeline_config = mergedPipe;
+    }
 
     const updatedJob = db.updateJob(id, updates);
 
     // Cập nhật lại file expect.md nếu có thay đổi
     try {
-      defaultFileManager.saveExpectFile(finalWorkspace, finalCode, {
+      fileManager.saveExpectFile(finalWorkspace, finalCode, {
         title: updatedJob.title,
         prompt: updatedJob.prompt,
         featuresDir: finalFeaturesDir
@@ -924,7 +1263,6 @@ app.put(['/api/v1/jobs/:id', '/api/v1/tasks/:id'], (req, res) => {
     jobEventBus.emitJobLog(id, {
       text: `[UPDATE] Đã cập nhật thông tin Task: Mã: ${updatedJob.task_code || id} | Tiêu đề: ${updatedJob.title}\n`
     });
-
     return res.json({
       success: true,
       message: 'Cập nhật thông tin Task thành công!',
@@ -974,6 +1312,177 @@ app.get(['/api/v1/jobs/:id/evidence', '/api/v1/jobs/:id/evidences', '/api/v1/tas
     }
 
     // Xác định thư mục feature và evidence của riêng task này
+    let workspacePath = job.repo_path || job.worktree_path || './';
+    let wsFeaturesDir = 'docs/features';
+    try {
+      let ws = null;
+      if (job.workspace_id) ws = db.getWorkspaceById(job.workspace_id);
+      if (!ws && workspacePath && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(workspacePath)) {
+        ws = db.getWorkspaceById(workspacePath);
+      }
+      if (!ws && typeof db.listWorkspaces === 'function') {
+        const allWs = db.listWorkspaces();
+        ws = allWs.find(w => path.resolve(w.path) === path.resolve(workspacePath));
+      }
+      if (ws) {
+        if (ws.path) workspacePath = ws.path;
+        if (ws.features_dir) wsFeaturesDir = ws.features_dir;
+      }
+    } catch (e) {}
+    const taskCode = job.task_code || job.id;
+    const featureDir = fileManager.getFeatureDirectory(workspacePath, taskCode, wsFeaturesDir);
+    const taskEvidenceDir = path.join(featureDir, 'evidence');
+    let metadata = {};
+    const metadataPath = path.join(taskEvidenceDir, 'metadata.json');
+    if (fs.existsSync(metadataPath)) {
+      try { metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8')); } catch (e) {}
+    }
+
+    const realEvidenceList = [];
+    if (fs.existsSync(taskEvidenceDir)) {
+      const files = fs.readdirSync(taskEvidenceDir);
+      for (let idx = 0; idx < files.length; idx++) {
+        const file = files[idx];
+        if (file === 'metadata.json' || file.startsWith('.')) continue;
+        if (isEvidenceFileDeleted(metadata, file)) continue;
+
+        const fullFilePath = path.join(taskEvidenceDir, file);
+        let stat;
+        try { stat = fs.statSync(fullFilePath); } catch (e) { continue; }
+
+        // 1. Kiểm tra không được là dữ liệu rỗng (nếu rỗng thì KHÔNG coi là evidence)
+        if (stat.size <= 10) continue;
+
+        const ext = path.extname(file).toLowerCase();
+
+        // Kiểm tra nội dung json hoặc log xem có rỗng không
+        if (ext === '.json') {
+          try {
+            const jsonRaw = fs.readFileSync(fullFilePath, 'utf8').trim();
+            if (!jsonRaw || jsonRaw === '{}' || jsonRaw === '[]' || jsonRaw === 'null') {
+              continue; // Dữ liệu rỗng, bỏ qua
+            }
+          } catch (e) { continue; }
+        } else if (ext === '.log' || ext === '.txt') {
+          try {
+            const logRaw = fs.readFileSync(fullFilePath, 'utf8').trim();
+            if (!logRaw) continue; // Log rỗng, bỏ qua
+          } catch (e) { continue; }
+        }
+
+        const meta = getEvidenceFileMeta(metadata, file);
+      const evidenceHashes = buildEvidenceHashes(fullFilePath, stat);
+        let type = 'LOG_TRACE';
+        let fileContent = '';
+        let parsedData = null;
+
+        if (['.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg'].includes(ext)) {
+          type = 'UI_SCREENSHOT';
+        } else if (file.toLowerCase().includes('db') || file.toLowerCase().includes('assert') || ext === '.sql') {
+          type = 'DB_QUERY';
+          try {
+            fileContent = fs.readFileSync(fullFilePath, 'utf8');
+            if (ext === '.json') parsedData = JSON.parse(fileContent);
+          } catch (e) {}
+        } else if (ext === '.json' || file.toLowerCase().includes('api')) {
+          type = 'API_TEST';
+          try {
+            fileContent = fs.readFileSync(fullFilePath, 'utf8');
+            parsedData = JSON.parse(fileContent);
+            // Nếu file json không có trường request/response hay endpoint hợp lệ, không thể là API test chuẩn
+            if (!parsedData || (typeof parsedData === 'object' && !parsedData.endpoint && !parsedData.request && !parsedData.url && !parsedData.method && !parsedData.status)) {
+              continue;
+            }
+          } catch (e) {
+            continue;
+          }
+        } else if (ext === '.log' || ext === '.txt') {
+          type = 'LOG_TRACE';
+          try {
+            fileContent = fs.readFileSync(fullFilePath, 'utf8');
+          } catch (e) {}
+        }
+
+        const itemObj = {
+          id: `${id}-ev-${idx}`,
+          job_id: id,
+          type,
+          verdict: meta.verdict || (meta.status === 'FAILED' ? 'FAIL' : 'PASS'),
+          file_path: `/api/v1/jobs/${id}/evidence/files/${encodeURIComponent(file)}`,
+          url: `/api/v1/jobs/${id}/evidence/files/${encodeURIComponent(file)}`,
+          status: meta.status || (meta.verdict === 'FAIL' ? 'FAILED' : 'PASSED'),
+          title: meta.title || file.replace(ext, '').replace(/^[0-9]+_/, '').replace(/[-_]/g, ' '),
+          filename: file,
+          service_name: taskCode || 'Target Service',
+          service: taskCode || 'Target Service',
+          content: fileContent,
+          rawLogs: fileContent,
+          logs: fileContent,
+          log_excerpt: fileContent ? fileContent.slice(0, 300) : '',
+          created_at: stat.mtime.toISOString(),
+          size: (typeof evidenceHashes !== 'undefined' && evidenceHashes.size != null ? evidenceHashes.size : stat.size),
+          sizeBytes: (typeof evidenceHashes !== 'undefined' && evidenceHashes.sizeBytes != null ? evidenceHashes.sizeBytes : stat.size),
+          md5: (typeof evidenceHashes !== 'undefined' && evidenceHashes.md5) || null,
+          contentHash: (typeof evidenceHashes !== 'undefined' && evidenceHashes.contentHash) || null
+        };
+
+        // Nếu là API Test, gán các trường chi tiết từ file json
+        if (type === 'API_TEST' && parsedData) {
+          itemObj.method = (parsedData.method || (parsedData.request && parsedData.request.method) || 'GET').toUpperCase();
+          itemObj.endpoint = parsedData.endpoint || parsedData.url || (parsedData.request && (parsedData.request.url || parsedData.request.endpoint || parsedData.request.path)) || '/api';
+          itemObj.statusCode = parsedData.statusCode || parsedData.status_code || parsedData.status || (parsedData.response && parsedData.response.status) || 200;
+          itemObj.durationMs = parsedData.durationMs || parsedData.duration_ms || parsedData.latency_ms || parsedData.latency || 0;
+          itemObj.request = parsedData.request || { method: itemObj.method, endpoint: itemObj.endpoint, headers: parsedData.headers, body: parsedData.body || parsedData.payload };
+          itemObj.response = parsedData.response || { status: itemObj.statusCode, headers: parsedData.responseHeaders, body: parsedData.responseBody || parsedData.data };
+        }
+
+        // Nếu là DB Query, gán các trường chi tiết từ file
+        if (type === 'DB_QUERY' && parsedData) {
+          itemObj.table = parsedData.table || parsedData.tableName || parsedData.target || 'Database Table';
+          itemObj.query = parsedData.query || parsedData.sql || fileContent;
+          itemObj.expected = parsedData.expected || parsedData.expectedValues;
+          itemObj.actual = parsedData.actual || parsedData.actualRows || parsedData.rows;
+          itemObj.matched = parsedData.matched !== undefined ? parsedData.matched : (parsedData.passed !== undefined ? parsedData.passed : (itemObj.verdict === 'PASS'));
+        }
+
+        realEvidenceList.push(itemObj);
+      }
+    }
+
+    // 2. Quy chuẩn: Mỗi task TỐI ĐA 2 LOẠI EVIDENCE (có thể là 1 loại duy nhất)
+    // Thứ tự ưu tiên các loại evidence thực tế: UI_SCREENSHOT -> LOG_TRACE -> API_TEST -> DB_QUERY
+    const priorityOrder = ['UI_SCREENSHOT', 'LOG_TRACE', 'API_TEST', 'DB_QUERY'];
+    const presentTypes = priorityOrder.filter(t => realEvidenceList.some(e => e.type === t));
+    const allowedTypes = new Set(presentTypes.slice(0, 2)); // Tối đa 2 loại
+
+    const filteredEvidenceList = realEvidenceList.filter(e => allowedTypes.has(e.type));
+
+    return res.json({
+      success: true,
+      evidence: filteredEvidenceList,
+      evidences: filteredEvidenceList,
+      totalFound: realEvidenceList.length,
+      typesAllowed: Array.from(allowedTypes),
+      folder: taskEvidenceDir
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * DELETE /api/v1/jobs/:id/evidence/files/:filename
+ * Xoá cứng trong SQLite và xoá cả file vật lý trong folder lưu evidence
+ */
+app.delete(['/api/v1/jobs/:id/evidence/files/:filename', '/api/v1/tasks/:id/evidence/files/:filename', '/api/v1/jobs/:id/evidence/:filename', '/api/v1/tasks/:id/evidence/:filename'], (req, res) => {
+  try {
+    const { id, filename } = req.params;
+    if (!filename) return res.status(400).json({ success: false, error: 'Filename is required' });
+    const safeFilename = path.basename(filename);
+
+    const job = db.getJobById(id);
+    if (!job) return res.status(404).json({ success: false, error: `Job with ID '${id}' not found` });
+
     const workspacePath = job.repo_path || job.worktree_path || './';
     let wsFeaturesDir = 'docs/features';
     try {
@@ -985,45 +1494,124 @@ app.get(['/api/v1/jobs/:id/evidence', '/api/v1/jobs/:id/evidences', '/api/v1/tas
     const featureDir = fileManager.getFeatureDirectory(workspacePath, taskCode, wsFeaturesDir);
     const taskEvidenceDir = path.join(featureDir, 'evidence');
 
-    const realEvidenceList = [];
-    if (fs.existsSync(taskEvidenceDir)) {
-      const files = fs.readdirSync(taskEvidenceDir);
-      files.forEach((file, idx) => {
-        const ext = path.extname(file).toLowerCase();
-        const fullFilePath = path.join(taskEvidenceDir, file);
-        let type = 'LOG_TRACE';
-        if (['.png', '.jpg', '.jpeg', '.webp', '.gif'].includes(ext)) {
-          type = 'UI_SCREENSHOT';
-        } else if (file.toLowerCase().includes('db') || file.toLowerCase().includes('assert') || ext === '.sql') {
-          type = 'DB_QUERY';
-        } else if (ext === '.json' || file.toLowerCase().includes('api')) {
-          type = 'API_TEST';
+    // 1. Xoá cứng bản ghi tương ứng trong bảng evidence của SQLite
+    try {
+      if (typeof db.deleteEvidenceByJobAndFile === 'function') {
+        db.deleteEvidenceByJobAndFile(id, safeFilename);
+      }
+      // Đảm bảo xoá mọi record khớp tên file hoặc id
+      const dbInstance = db.getDbInstance ? db.getDbInstance() : null;
+      if (dbInstance) {
+        dbInstance.prepare(`
+          DELETE FROM evidence 
+          WHERE job_id = ? AND (id = ? OR data LIKE ? OR data LIKE ?)
+        `).run(id, safeFilename, `%${safeFilename}%`, `%${encodeURIComponent(safeFilename)}%`);
+      }
+    } catch (dbErr) {
+      console.warn(`[Evidence Delete] Không thể xoá DB evidence cho job ${id}:`, dbErr.message);
+    }
+
+    // 2. Xoá cứng file vật lý trong folder lưu evidence
+    const targetFilePath = path.join(taskEvidenceDir, safeFilename);
+    if (fs.existsSync(targetFilePath)) {
+      try {
+        fs.unlinkSync(targetFilePath);
+      } catch (unlinkErr) {
+        console.warn(`[Evidence Delete] Không thể xoá file vật lý ${targetFilePath}:`, unlinkErr.message);
+      }
+    }
+
+    // 3. Cập nhật metadata.json trên đĩa
+    const metadataPath = path.join(taskEvidenceDir, 'metadata.json');
+    if (fs.existsSync(metadataPath)) {
+      try {
+        const raw = fs.readFileSync(metadataPath, 'utf8');
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          const filtered = parsed.filter(item => {
+            if (!item) return false;
+            const name = item.fileName || item.name || item.file || '';
+            return name !== safeFilename && !item.filePath?.includes(safeFilename);
+          });
+          fs.writeFileSync(metadataPath, JSON.stringify(filtered, null, 2), 'utf-8');
+        } else if (parsed && typeof parsed === 'object') {
+          delete parsed[safeFilename];
+          fs.writeFileSync(metadataPath, JSON.stringify(parsed, null, 2), 'utf-8');
         }
-        realEvidenceList.push({
-          id: `${id}-ev-${idx}`,
-          job_id: id,
-          type,
-          verdict: 'PASS',
-          file_path: `/api/v1/jobs/${id}/evidence/files/${encodeURIComponent(file)}`,
-          url: `/api/v1/jobs/${id}/evidence/files/${encodeURIComponent(file)}`,
-          status: 'PASSED',
-          title: file.replace(ext, '').replace(/^[0-9]+_/, '').replace(/[-_]/g, ' '),
-          filename: file,
-          created_at: fs.statSync(fullFilePath).mtime.toISOString()
-        });
-      });
+      } catch (e) {}
     }
 
     return res.json({
       success: true,
-      evidence: realEvidenceList,
-      evidences: realEvidenceList,
-      folder: taskEvidenceDir
+      message: `Đã xoá cứng bằng chứng '${safeFilename}' khỏi cơ sở dữ liệu và thư mục evidence`,
+      jobId: id,
+      filename: safeFilename
     });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
   }
 });
+
+/**
+ * PATCH/POST /api/v1/jobs/:id/evidence/files/:filename/status
+ * Cập nhật status/verdict cho file evidence trong metadata.json
+ */
+const handleUpdateEvidenceStatus = (req, res) => {
+  try {
+    const { id, filename } = req.params;
+    if (!filename) return res.status(400).json({ success: false, error: 'Filename is required' });
+    const safeFilename = path.basename(filename);
+
+    const job = db.getJobById(id);
+    if (!job) return res.status(404).json({ success: false, error: `Job with ID '${id}' not found` });
+
+    const workspacePath = job.repo_path || job.worktree_path || './';
+    let wsFeaturesDir = 'docs/features';
+    try {
+      const ws = job.workspace_id ? db.getWorkspaceById(job.workspace_id) : (db.listWorkspaces ? db.listWorkspaces().find(w => path.resolve(w.path) === path.resolve(workspacePath)) : null);
+      if (ws && ws.features_dir) wsFeaturesDir = ws.features_dir;
+    } catch (e) {}
+
+    const taskCode = job.task_code || job.id;
+    const featureDir = fileManager.getFeatureDirectory(workspacePath, taskCode, wsFeaturesDir);
+    const taskEvidenceDir = path.join(featureDir, 'evidence');
+
+    if (!fs.existsSync(taskEvidenceDir)) {
+      fs.mkdirSync(taskEvidenceDir, { recursive: true });
+    }
+
+    const metadataPath = path.join(taskEvidenceDir, 'metadata.json');
+    let metadata = {};
+    if (fs.existsSync(metadataPath)) {
+      try { metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8')); } catch (e) {}
+    }
+
+    const body = req.body || {};
+    const verdict = body.verdict || (body.status === 'PASSED' ? 'PASS' : (body.status === 'FAILED' ? 'FAIL' : undefined));
+    const status = body.status || (body.verdict === 'PASS' ? 'PASSED' : (body.verdict === 'FAIL' ? 'FAILED' : undefined));
+
+    metadata[safeFilename] = {
+      ...(metadata[safeFilename] || {}),
+      ...(verdict ? { verdict } : {}),
+      ...(status ? { status } : {}),
+      updated_at: new Date().toISOString()
+    };
+
+    fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2), 'utf8');
+
+    return res.json({
+      success: true,
+      filename: safeFilename,
+      metadata: metadata[safeFilename]
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+app.patch(['/api/v1/jobs/:id/evidence/files/:filename/status', '/api/v1/tasks/:id/evidence/files/:filename/status', '/api/v1/jobs/:id/evidence/files/:filename', '/api/v1/tasks/:id/evidence/files/:filename'], handleUpdateEvidenceStatus);
+app.post(['/api/v1/jobs/:id/evidence/files/:filename/status', '/api/v1/tasks/:id/evidence/files/:filename/status', '/api/v1/jobs/:id/evidence/files/:filename', '/api/v1/tasks/:id/evidence/files/:filename'], handleUpdateEvidenceStatus);
+
 
 /**
  * POST /api/v1/jobs/:id/start và POST /api/v1/tasks/:id/start
@@ -1035,7 +1623,7 @@ const { exec } = require('child_process');
 
 const executeStep = async (id) => {
   const job = db.getJobById(id);
-  if (!job) return;
+  if (!job || job.status === 'CANCELLED') return;
   
   const taskCode = job.task_code || job.id;
   const workspacePath = job.repo_path || job.worktree_path || './';
@@ -1069,11 +1657,16 @@ const executeStep = async (id) => {
 
       const planningPrompt = promptTemplateManager.buildPrompt({
         step: 'planning', taskCode, userPrompt: (job.prompt || '') + clarificationContext, workspacePath, featureDir,
-        previousContext: fileManager.loadPreviousContext(workspacePath, taskCode)
+        previousContext: fileManager.loadPreviousContext(workspacePath, taskCode, 'planning')
       });
       jobEventBus.emitJobLog(id, { text: `\n[1/4] >>> 🤖 [PLANNING] Kích hoạt lập kế hoạch song song (Dual Planning) với Agent: ${planningAgent}\n[PLANNING] Nạp template prompt planning.md...\n[PLANNING] Agent đang phân tích mã nguồn và thiết lập Kế hoạch (Vui lòng đợi khoảng 15-30 giây)...\n` });
       const planStartTime = Date.now();
       const planProgressTimer = setInterval(() => {
+        const cur = db.getJobById(id);
+        if (!cur || cur.status === 'CANCELLED') {
+          clearInterval(planProgressTimer);
+          return;
+        }
         const elapsedSec = Math.floor((Date.now() - planStartTime) / 1000);
         jobEventBus.emitJobLog(id, { text: `\x1b[90m🤖 [PLANNING] ⏱️ ${elapsedSec}s - Agent đang tiếp tục xử lý phân tích và tổng hợp Kế hoạch...\x1b[0m\r\n` });
       }, 12000);
@@ -1090,6 +1683,10 @@ const executeStep = async (id) => {
           jobEventBus.emitJobLog(id, { text: `[PLANNING] Thông báo runner: ${runnerErr.message}\n` });
         }
         clearInterval(planProgressTimer);
+        const checkAfterPlan = db.getJobById(id);
+        if (checkAfterPlan && checkAfterPlan.status === 'CANCELLED') {
+          return;
+        }
         // Trích xuất dev_plan.md và test_plan.md từ stdout nếu chưa được tạo trên ổ cứng
         let planFiles = fileManager.readPlanFiles(workspacePath, taskCode);
         let effectiveDevPlan = planFiles.devPlan || planFiles.dev_plan || '';
@@ -1185,8 +1782,9 @@ const executeStep = async (id) => {
     }
 
     if (job.status === 'IMPLEMENT') {
-      const prevContext = fileManager.loadPreviousContext(workspacePath, taskCode);
-      const devPlanText = (prevContext && prevContext.dev_plan) || '';
+      const prevContext = fileManager.loadPreviousContext(workspacePath, taskCode, 'implement');
+      const planFiles = fileManager.readPlanFiles(workspacePath, taskCode);
+      const devPlanText = (planFiles && planFiles.devPlan) || (typeof prevContext === 'string' ? prevContext : '');
       const isReadOnlyOrVerification =
         /không phát sinh can thiệp mã nguồn|không cần sửa.*mã nguồn|không chỉnh sửa.*mã nguồn|không can thiệp.*mã nguồn/i.test(devPlanText) ||
         /^(kiểm tra|xác minh|test|check|ping|khảo sát)\s/i.test(job.prompt || '');
@@ -1209,6 +1807,11 @@ const executeStep = async (id) => {
       });
       db.updateJob(id, { runner: implementAgent });
       const impProgressTimer = setInterval(() => {
+        const cur = db.getJobById(id);
+        if (!cur || cur.status === 'CANCELLED') {
+          clearInterval(impProgressTimer);
+          return;
+        }
         jobEventBus.emitJobLog(id, { text: `🤖 [IMPLEMENT] Agent đang tiếp tục viết mã nguồn...\n` });
       }, 6000);
       const runner = runnerRegistry.getAvailableRunner(implementAgent);
@@ -1228,6 +1831,10 @@ const executeStep = async (id) => {
           return;
         } finally {
           clearInterval(impProgressTimer);
+        }
+        const checkAfterImp = db.getJobById(id);
+        if (checkAfterImp && checkAfterImp.status === 'CANCELLED') {
+          return;
         }
         // IMPLEMENT that bai (timeout hoac exit code != 0) thi DUNG pipeline, khong tu dong sang TESTING
         if (!implementResult || implementResult.timedOut || implementResult.exitCode !== 0) {
@@ -1252,130 +1859,192 @@ const executeStep = async (id) => {
     }
 
     if (job.status === 'TESTING') {
-      const testAgent = agentMapping.TESTING || 'test-runner';
+      const checkBeforeTest = db.getJobById(id);
+      if (checkBeforeTest && checkBeforeTest.status === 'CANCELLED') return;
+
+      const testAgent = agentMapping.TESTING || 'claude-code';
+      const testingPrompt = promptTemplateManager.buildPrompt({
+        step: 'testing', taskCode, userPrompt: job.prompt || '', workspacePath, featureDir,
+        previousContext: fileManager.loadPreviousContext(workspacePath, taskCode, 'testing'),
+        errorLogs: ''
+      });
       db.updateJob(id, { runner: testAgent });
       jobEventBus.emitJobLog(id, { text: `\n[3/4] >>> 🤖 [TESTING] Bắt đầu kiểm thử thật với Runner/Agent: ${testAgent}...\n` });
-      
-      let cmd = 'git status';
-      const promptText = (job.prompt || '') + ' ' + (job.title || '');
-      const urlMatch = promptText.match(/https?:\/\/[^\s"',]+/i);
-      if (urlMatch) {
-        const targetUrl = urlMatch[0];
-        cmd = `node -e "fetch('${targetUrl}').then(r => { console.log('Xác minh thành công URL ${targetUrl} - HTTP Status:', r.status); process.exit(r.status < 400 ? 0 : 1); }).catch(e => { console.error('Lỗi kết nối tới ${targetUrl}:', e.message); process.exit(1); })"`;
-      } else if (fs.existsSync(path.join(workspacePath, 'package.json'))) {
+
+      const testProgressTimer = setInterval(() => {
+        const cur = db.getJobById(id);
+        if (!cur || cur.status === 'CANCELLED') {
+          clearInterval(testProgressTimer);
+          return;
+        }
+        jobEventBus.emitJobLog(id, { text: `🤖 [TESTING] Agent đang tiếp tục kiểm thử...\n` });
+      }, 6000);
+
+      const runner = runnerRegistry.getAvailableRunner(testAgent);
+      let testingResult = null;
+      let agentFailed = false;
+
+      if (runner) {
         try {
-          const pkg = JSON.parse(fs.readFileSync(path.join(workspacePath, 'package.json'), 'utf-8'));
-          if (pkg.scripts && pkg.scripts.test && !pkg.scripts.test.includes('no test specified')) {
-            cmd = 'npm run test';
-          }
-        } catch (e) {}
-      } else if (fs.existsSync(path.join(workspacePath, 'src/index.js'))) {
-        cmd = 'node -c src/index.js';
-      } else if (fs.existsSync(path.join(workspacePath, 'index.js'))) {
-        cmd = 'node -c index.js';
-      }
-      // Thực thi kiểm thử thật (ví dụ npm test hoặc node -c)
-      let testResult = await new Promise((resolve) => {
-        jobEventBus.emitJobLog(id, { text: `\r\n\x1b[1;36m[TEST-COMMAND]\x1b[0m \x1b[1;32m$ ${cmd}\x1b[0m\r\n\x1b[90m[Thư mục kiểm thử: ${workspacePath}]\x1b[0m\r\n\x1b[90m────────────────────────────────────────────────────────────────────────────────\x1b[0m\r\n` });
-        const child = exec(cmd, { cwd: workspacePath });
-        let output = '';
-        child.stdout.on('data', d => { output += d; jobEventBus.emitJobLog(id, { text: d }); });
-        child.stderr.on('data', d => { output += d; jobEventBus.emitJobLog(id, { text: d }); });
-        child.on('close', code => {
-          resolve({ code, output });
-        });
-      });
+          testingResult = await runner.execute({
+            prompt: testingPrompt, cwd: workspacePath, jobId: id,
+            timeoutMs: 900000,
+            onStdout: (text) => jobEventBus.emitJobLog(id, { text }),
+            onStderr: (text) => jobEventBus.emitJobLog(id, { text })
+          });
+        } catch (execErr) {
+          agentFailed = true;
+          jobEventBus.emitJobLog(id, { text: `[TESTING] Lỗi thực thi Agent: ${execErr.message}\n` });
+          testingResult = { output: execErr.message, exitCode: 1 };
+        } finally {
+          clearInterval(testProgressTimer);
+        }
 
-      // Nếu có lỗi -> FIXING
-      if (testResult.code !== 0) {
-        const fixAgent = agentMapping.FIXING || 'omp';
-        jobEventBus.emitJobLog(id, { text: `\n[TESTING] Kiểm thử phát hiện lỗi. Chuyển sang FIXING với 🤖 Agent: ${fixAgent}.\n` });
-        db.updateJob(id, { status: 'FIXING', current_step: 'FIXING', runner: fixAgent, error_message: 'Kiểm thử thất bại.\n' + testResult.output.substring(0, 300) });
-        jobEventBus.emitJobStatus(id, { status: 'FIXING', runner: fixAgent });
-        setTimeout(() => executeStep(id), 100);
-        return;
+        const checkAfterTest = db.getJobById(id);
+        if (checkAfterTest && checkAfterTest.status === 'CANCELLED') {
+          return;
+        }
+
+        if (!testingResult || testingResult.timedOut || testingResult.exitCode !== 0) {
+          agentFailed = true;
+          const failReason = testingResult && testingResult.timedOut
+            ? `vượt quá giới hạn thời gian (${testingResult.timeoutMs || 900000}ms)`
+            : `exit code ${testingResult ? testingResult.exitCode : 'không xác định'}`;
+          jobEventBus.emitJobLog(id, { text: `\n[TESTING-FAILED] Kiểm thử thất bại: ${failReason}.\n` });
+        } else {
+          jobEventBus.emitJobLog(id, { text: `\n[TESTING] Hoàn tất kiểm thử qua Agent.\n` });
+        }
+      } else {
+        clearInterval(testProgressTimer);
+        agentFailed = true;
+        jobEventBus.emitJobLog(id, { text: `\n[TESTING-WARN] Không tìm thấy runner hợp lệ cho ${testAgent}\n` });
+        testingResult = { output: `Không tìm thấy runner hợp lệ cho ${testAgent}`, exitCode: 1 };
+        
+        const checkAfterTest = db.getJobById(id);
+        if (checkAfterTest && checkAfterTest.status === 'CANCELLED') return;
       }
 
-      // Tự động lưu đầy đủ 4 kênh bằng chứng thực tế vào thư mục evidence của task
+      // Tự động lưu đầy đủ các kênh bằng chứng thực tế vào thư mục evidence của task
       try {
         if (!fs.existsSync(evidenceDir)) {
           fs.mkdirSync(evidenceDir, { recursive: true });
         }
 
-        // 1. Kênh UI: Chụp ảnh kiểm thử của chính SERVICE mục tiêu (workspace.repo_path/base_branch/task),
-        // TUYỆT ĐỐI KHÔNG chụp dashboard của chính worker (localhost:3000)
-        const uiImgFile = path.join(evidenceDir, '01_ui_target_service.png');
-        try {
-          const { BrowserRunner } = require('./verification/browserRunner');
-          const br = new BrowserRunner({ evidenceBaseDir: path.dirname(path.dirname(evidenceDir)) });
-          const targetUrl = (typeof cmd === 'string' && /https?:\/\/[^\s"']+/i.test(cmd))
-            ? cmd.match(/https?:\/\/[^\s"']+/i)[0]
-            : null;
-          if (targetUrl) {
-            try { await br.navigate(targetUrl); } catch(navErr) {}
-          }
-          const record = await br.captureScreenshot(taskCode, 'ui_target_service', {
-            url: targetUrl || undefined,
-            note: targetUrl
-              ? `Anh kiem thu dich vu muc tieu: ${targetUrl}`
-              : `Anh kiem thu dich vu muc tieu tai workspace: ${workspacePath}`
+        // =====================================================================
+        // ĐỐI SOÁT EVIDENCE THỰC TẾ DO AGENT TỰ THU THẬP & VERIFY
+        // TUYỆT ĐỐI KHÔNG TỰ SINH DUMMY DATA HOẶC TỰ CHỤP ẢNH MOCKUP THAY AGENT
+        // =====================================================================
+        const getValidEvidenceFiles = () => {
+          if (!fs.existsSync(evidenceDir)) return [];
+          return fs.readdirSync(evidenceDir).filter(f => {
+            if (f === 'metadata.json' || f.startsWith('.')) return false;
+            const fullP = path.join(evidenceDir, f);
+            try {
+              const stat = fs.statSync(fullP);
+              if (stat.size <= 10) return false; // File rỗng không coi là evidence
+              const ext = path.extname(f).toLowerCase();
+              if (ext === '.json') {
+                const raw = fs.readFileSync(fullP, 'utf8').trim();
+                if (!raw || raw === '{}' || raw === '[]' || raw === 'null') return false;
+              } else if (ext === '.log' || ext === '.txt') {
+                const raw = fs.readFileSync(fullP, 'utf8').trim();
+                if (!raw) return false;
+              }
+              return true;
+            } catch (e) {
+              return false;
+            }
           });
-          if (record && record.filePath && record.filePath !== uiImgFile && fs.existsSync(record.filePath)) {
-            fs.copyFileSync(record.filePath, uiImgFile);
-          }
-          if (!fs.existsSync(uiImgFile)) {
-            const { BrowserRunner: BrowserRunnerCls } = require('./verification/browserRunner');
-            fs.writeFileSync(uiImgFile, BrowserRunnerCls.createPngBuffer(1280, 720, 15, 23, 42));
-          }
-        } catch (shotErr) {
-          jobEventBus.emitJobLog(id, { text: `[TESTING] Canh bao chup anh UI service muc tieu: ${shotErr.message}\n` });
+        };
+
+        // 1. ĐỐI SOÁT CẤU HÌNH YÊU CẦU TRONG TEST_PLAN.MD
+        let testPlanText = '';
+        const testPlanPath = path.join(featureDir, 'test_plan.md');
+        if (fs.existsSync(testPlanPath)) {
+          try { testPlanText = fs.readFileSync(testPlanPath, 'utf8'); } catch (e) {}
+        }
+        const requiresUiScreenshot = /UI_SCREENSHOT/i.test(testPlanText)
+          || /Kịch Bản Kiểm Thử Giao Diện/i.test(testPlanText)
+          || /UI\/E2E/i.test(testPlanText);
+
+        const validFiles = getValidEvidenceFiles();
+        let metadataObj = {};
+        const metaPath = path.join(evidenceDir, 'metadata.json');
+        if (fs.existsSync(metaPath)) {
+          try { metadataObj = JSON.parse(fs.readFileSync(metaPath, 'utf8')); } catch (e) {}
         }
 
-        // 2. Kênh Log: Lưu nhật ký lệnh test thực tế
-        const testLogFile = path.join(evidenceDir, '02_test_execution.log');
-        fs.writeFileSync(testLogFile, `[TEST RUNNER LOG]\nLệnh: ${cmd}\nThời gian: ${new Date().toISOString()}\nKết quả: PASSED\n\n${testResult.output}\n`, 'utf-8');
+        // Kiểm tra xem có file ảnh UI thật không
+        const uiImageFiles = validFiles.filter(f => {
+          const ext = path.extname(f).toLowerCase();
+          return ['.png', '.jpg', '.jpeg', '.webp'].includes(ext);
+        });
 
-        // 3. Kênh API: Lưu kết quả kiểm thử API
-        const apiJsonFile = path.join(evidenceDir, '03_api_verification.json');
-        fs.writeFileSync(apiJsonFile, JSON.stringify({
-          jobId: id,
-          taskCode,
-          status: 'PASSED',
-          timestamp: new Date().toISOString(),
-          healthCheck: 'OK',
-          endpointsChecked: [
-            { endpoint: 'GET /api/v1/health', status: 200, latencyMs: 12 },
-            { endpoint: 'GET /api/v1/status', status: 200, online: true },
-            { endpoint: 'GET /', status: 200, title: 'AI Worker Dashboard' }
-          ]
-        }, null, 2), 'utf-8');
+        // 1. Nếu test_plan yêu cầu chụp ảnh UI mà Agent chưa chụp ảnh thật:
+        if (requiresUiScreenshot && uiImageFiles.length === 0) {
+          agentFailed = true;
+          jobEventBus.emitJobLog(id, {
+            text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: Task yêu cầu bằng chứng chụp ảnh UI (UI_SCREENSHOT) nhưng Agent chưa chụp ảnh giao diện thực tế của service hoặc ảnh bị rỗng.\n[TESTING-VERIFY] 🔄 Chuyển sang luồng FIXING để Agent khởi chạy service và chụp ảnh bằng chứng kiểm thử lại!\n`
+          });
+        }
 
-        // 4. Kênh DB: Lưu kết quả assert cơ sở dữ liệu
-        const dbJsonFile = path.join(evidenceDir, '04_database_assertion.json');
-        fs.writeFileSync(dbJsonFile, JSON.stringify({
-          jobId: id,
-          taskCode,
-          status: 'PASSED',
-          timestamp: new Date().toISOString(),
-          assertions: [
-            { table: 'jobs', check: 'Status transitioned to TESTING/DONE', passed: true },
-            { table: 'steps', check: 'Lifecycle steps tracked', passed: true },
-            { table: 'dual_plans', check: 'Metadata persisted', passed: true }
-          ]
-        }, null, 2), 'utf-8');
+        // 2. Thẩm định metadata: Nếu bất kỳ bằng chứng nào bị đánh dấu FAIL hoặc ERROR -> Chặn không cho DONE
+        if (Array.isArray(metadataObj)) {
+          const hasFailedItem = metadataObj.some(item => item && (item.status === 'FAILED' || item.verdict === 'FAIL'));
+          if (hasFailedItem) {
+            agentFailed = true;
+            jobEventBus.emitJobLog(id, {
+              text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: Phát hiện bằng chứng kiểm thử bị đánh dấu FAILED trong metadata.json. Chuyển sang FIXING để sửa lỗi!\n`
+            });
+          }
+        } else if (metadataObj && typeof metadataObj === 'object') {
+          const hasFailedItem = Object.values(metadataObj).some(item => item && (item.status === 'FAILED' || item.verdict === 'FAIL'));
+          if (hasFailedItem) {
+            agentFailed = true;
+            jobEventBus.emitJobLog(id, {
+              text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: Phát hiện bằng chứng kiểm thử bị đánh dấu FAILED trong metadata.json. Chuyển sang FIXING để sửa lỗi!\n`
+            });
+          }
+        }
+
+        // 3. Nếu không có bất kỳ bằng chứng hợp lệ nào:
+        if (validFiles.length === 0) {
+          agentFailed = true;
+          jobEventBus.emitJobLog(id, {
+            text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: Không phát hiện bất kỳ file bằng chứng kiểm thử hợp lệ nào (hoặc dữ liệu rỗng).\n[TESTING-VERIFY] 🔄 Chuyển sang luồng FIXING để thực thi và ghi nhận bằng chứng kiểm thử xác thực!\n`
+          });
+        }
+        // TUYỆT ĐỐI KHÔNG tự động mock/sinh file evidence thay cho Agent.
+        // Nếu Agent thiếu evidence hoặc verify thất bại -> agentFailed = true để chuyển FIXING!
       } catch (evWriteErr) {
-        console.warn('Ghi bằng chứng tự động cảnh báo:', evWriteErr.message);
+        console.warn('Ghi bằng chứng cảnh báo:', evWriteErr.message);
       }
 
+      // Nếu có lỗi -> Chuyển sang FIXING
+      if (agentFailed) {
+        const fixAgent = agentMapping.FIXING || 'claude-code';
+        const failOutput = testingResult?.output || (testingResult?.timedOut ? 'Kiểm thử vượt quá thời gian (timeout)' : 'Kiểm thử thất bại');
+        const failGate = { passed: false, error: String(failOutput).substring(0, 300), timeout: Boolean(testingResult?.timedOut) || /timeout|timed\s*out|etimedout/i.test(String(failOutput)), decided_at: new Date().toISOString(), mapped_from: 'TESTING', source: 'pipeline-testing-verify' };
+        jobEventBus.emitJobLog(id, { text: `\n[TESTING] Kiểm thử phát hiện lỗi. Chuyển sang FIXING với 🤖 Agent: ${fixAgent}.\n` });
+        db.updateJob(id, { status: 'FIXING', current_step: 'FIXING', runner: fixAgent, error_message: 'Kiểm thử thất bại.\n' + failOutput.substring(0, 300), gate_result: failGate });
+        jobEventBus.emitJobStatus(id, { status: 'FIXING', runner: fixAgent });
+        setTimeout(() => executeStep(id), 100);
+        return;
+      }
+
+      // Lưu path gọn nhẹ vào SQLite DB (chỉ lưu đường dẫn, KHÔNG lưu payload lớn)
+      const relEvidencePath = `docs/features/${taskCode}/evidence`;
       const dbEv = db.addEvidence({
-        job_id: id, type: 'LOG_TRACE', verdict: 'PASS',
-        data: { title: 'Kiểm thử thật', status: 'PASSED', output: testResult.output.substring(0, 500) }
+        job_id: id,
+        type: 'TEST_EVIDENCE',
+        verdict: 'PASS',
+        data: { path: relEvidencePath, taskCode }
       });
       jobEventBus.emitJobEvidence(id, { evidence: dbEv });
-      jobEventBus.emitJobLog(id, { text: `\n[TESTING] Đã lưu bằng chứng kiểm thử thật vào thư mục feature evidence!\n` });
+      jobEventBus.emitJobLog(id, { text: `\n[TESTING] ✅ Đã xác thực bằng chứng kiểm thử thành công trong ${relEvidencePath}!\n` });
 
       const currentRunner = job.runner || (agentMapping.IMPLEMENT || 'claude-code');
-      db.updateJob(id, { status: 'DONE', current_step: 'COMPLETED', runner: currentRunner, completed_at: new Date().toISOString() });
+      db.updateJob(id, { status: 'DONE', current_step: 'COMPLETED', runner: currentRunner, completed_at: new Date().toISOString(), error_message: null, gate_result: { passed: true, error: null, timeout: false, decided_at: new Date().toISOString(), mapped_from: 'DONE', source: 'pipeline-testing-verify' } });
       jobEventBus.emitJobDone(id, { status: 'DONE', runner: currentRunner, message: `Task ${taskCode} đã hoàn thành kiểm thử.` });
       jobEventBus.emitJobLog(id, { text: `\n================================================================================\n[4/4] >>> 🏆 [DONE] Nhiệm vụ ${taskCode} ĐÃ HOÀN THÀNH TOÀN DIỆN VÀ NGHIỆM THU THÀNH CÔNG!\n================================================================================\n` });
       return;
@@ -1385,7 +2054,7 @@ const executeStep = async (id) => {
       const fixingAgent = agentMapping.FIXING || 'claude-code';
       const fixingPrompt = promptTemplateManager.buildPrompt({
         step: 'fixing', taskCode, userPrompt: job.prompt || '', workspacePath, featureDir,
-        previousContext: fileManager.loadPreviousContext(workspacePath, taskCode),
+        previousContext: fileManager.loadPreviousContext(workspacePath, taskCode, 'fixing'),
         errorLogs: job.error_message || ''
       });
       db.updateJob(id, { runner: fixingAgent });
@@ -1398,6 +2067,10 @@ const executeStep = async (id) => {
           onStderr: (text) => jobEventBus.emitJobLog(id, { text })
         });
         jobEventBus.emitJobLog(id, { text: `\n[FIXING] Hoàn tất sửa lỗi.\n` });
+        const checkAfterFix = db.getJobById(id);
+        if (checkAfterFix && checkAfterFix.status === 'CANCELLED') {
+          return;
+        }
       } else {
         jobEventBus.emitJobLog(id, { text: `\n[FIXING-WARN] Không tìm thấy runner hợp lệ.\n` });
       }
@@ -1410,8 +2083,12 @@ const executeStep = async (id) => {
     }
 
   } catch (err) {
+    const checkCancelled = db.getJobById(id);
+    if (checkCancelled && checkCancelled.status === 'CANCELLED') {
+      return;
+    }
     console.error('Lỗi pipeline task:', err);
-    db.updateJob(id, { status: 'FAILED', error_message: err.message });
+    db.updateJob(id, { status: 'FAILED', error_message: err.message, gate_result: { passed: false, error: err.message, timeout: /timeout|timed\s*out|etimedout/i.test(err.message || ''), decided_at: new Date().toISOString(), mapped_from: 'FAILED', source: 'pipeline-catch' } });
     jobEventBus.emitJobStatus(id, { status: 'FAILED' });
     jobEventBus.emitJobError(id, { error: err.message });
   }
@@ -1449,10 +2126,102 @@ app.post('/api/v1/jobs/:id/start', handleJobStart);
 app.post('/api/v1/tasks/:id/start', handleJobStart);
 
 /**
+ * POST /api/v1/jobs/:id/clone
+ * Nhân bản (Clone) task cũ sang một Task Code mới ở trạng thái TO DO
+ */
+const handleJobClone = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { newTaskCode } = req.body;
+
+    if (!newTaskCode || typeof newTaskCode !== 'string' || !newTaskCode.trim()) {
+      return res.status(400).json({ success: false, error: 'Mã task mới (Task Code) là bắt buộc' });
+    }
+
+    const safeNewTaskCode = newTaskCode.trim();
+
+    // Kiểm tra trùng mã bằng lookup trực tiếp (tránh db.listJobs() bị giới hạn limit/offset làm sai check trùng)
+    const directHit = db.getJobById ? db.getJobById(safeNewTaskCode) : null;
+    if (directHit) {
+      return res.status(400).json({ success: false, error: `Mã task '${safeNewTaskCode}' đã tồn tại trong hệ thống. Vui lòng chọn mã khác.` });
+    }
+
+    const sourceJob = db.getJobById(id);
+    if (!sourceJob) {
+      return res.status(404).json({ success: false, error: `Không tìm thấy task gốc với ID '${id}'` });
+    }
+
+    const newJobId = crypto.randomUUID();
+    const nowIso = new Date().toISOString();
+
+    let pipeConfig = {};
+    if (sourceJob.pipeline_config) {
+      try {
+        pipeConfig = typeof sourceJob.pipeline_config === 'string'
+          ? JSON.parse(sourceJob.pipeline_config)
+          : sourceJob.pipeline_config;
+      } catch (e) {}
+    }
+
+    const promptLines = (sourceJob.prompt || '').trim().split('\n');
+    const titleSummary = promptLines[0] ? promptLines[0].substring(0, 60) : `Task ${safeNewTaskCode}`;
+
+    const newJobData = {
+      id: newJobId,
+      task_code: safeNewTaskCode,
+      title: `[${safeNewTaskCode}] ${titleSummary}`,
+      prompt: sourceJob.prompt || '',
+      repo_path: sourceJob.repo_path || './',
+      workspace_id: sourceJob.workspace_id || null,
+      base_branch: sourceJob.base_branch || sourceJob.branch || 'main',
+      runner: sourceJob.runner || 'claude-code',
+      status: 'TO DO',
+      current_step: null,
+      error_message: null,
+      exit_code: null,
+      completed_at: null,
+      summary: null,
+      had_pending: 0,
+      pipeline_config: JSON.stringify(pipeConfig),
+      created_at: nowIso,
+      updated_at: nowIso
+    };
+
+    const createdJob = db.createJob(newJobData);
+    const responseJob = createdJob || newJobData;
+    // Tạo thư mục features/<safeNewTaskCode> HOÀN TOÀN TRỐNG (chưa có bất kỳ dữ liệu gì trong folder đó)
+    try {
+      const workspacePath = sourceJob.repo_path || './';
+      let wsFeaturesDir = 'docs/features';
+      if (sourceJob.workspace_id) {
+        const ws = db.getWorkspaceById(sourceJob.workspace_id);
+        if (ws && ws.features_dir) wsFeaturesDir = ws.features_dir;
+      }
+      const newFeatureDir = fileManager.getFeatureDirectory(workspacePath, safeNewTaskCode, wsFeaturesDir);
+      if (!fs.existsSync(newFeatureDir)) {
+        fs.mkdirSync(newFeatureDir, { recursive: true });
+      }
+    } catch (dirErr) {
+      console.warn('[Clone Task] Cảnh báo tạo thư mục feature mới:', dirErr.message);
+    }
+    jobEventBus.emitJobCreated(responseJob);
+    return res.status(201).json({
+      success: true,
+      message: `Nhân bản task thành công thành '${safeNewTaskCode}' ở trạng thái TO DO`,
+      job: responseJob
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+app.post('/api/v1/jobs/:id/clone', handleJobClone);
+app.post('/api/v1/tasks/:id/clone', handleJobClone);
+/**
  * POST /api/v1/jobs/:id/cancel
  * Hủy job đang chạy hoặc trong hàng đợi
  */
-app.post('/api/v1/jobs/:id/cancel', (req, res) => {
+app.post('/api/v1/jobs/:id/cancel', async (req, res) => {
   try {
     const { id } = req.params;
     const job = db.getJobById(id);
@@ -1464,7 +2233,7 @@ app.post('/api/v1/jobs/:id/cancel', (req, res) => {
     // 1. Hủy trong taskQueue
     taskQueue.cancel(id);
 
-    // 2. Cập nhật trạng thái CANCELLED trong DB
+    // 2. Cập nhật trạng thái CANCELLED trong DB ngay lập tức
     try {
       if (canTransition(job.status, JOB_STATUSES.CANCELLED)) {
         transition(id, JOB_STATUSES.CANCELLED, db);
@@ -1481,10 +2250,26 @@ app.post('/api/v1/jobs/:id/cancel', (req, res) => {
       });
     }
 
-    // 3. Phát event SSE
+    // 3. Phát event SSE cập nhật giao diện
     jobEventBus.emitJobStatus(id, { status: JOB_STATUSES.CANCELLED });
     jobEventBus.emitJobLog(id, {
       text: `\n[CANCEL] Job đã bị hủy theo yêu cầu của người dùng.\n`,
+      level: 'warn'
+    });
+
+    // 4. Ngắt an toàn toàn bộ tiến trình con (process tree 2-phase: SIGTERM -> grace 5000ms -> SIGKILL)
+    let killedCount = 0;
+    try {
+      const { defaultProcessManager } = require('./execution/processManager');
+      if (defaultProcessManager) {
+        killedCount = await defaultProcessManager.killProcessesByJobId(id, 5000);
+      }
+    } catch (e) {
+      console.warn('[SERVER] Không thể gọi processManager khi cancel:', e);
+    }
+
+    jobEventBus.emitJobLog(id, {
+      text: `[CANCEL] Đã dừng tiến trình con (process tree) của job (số tiến trình đã hủy: ${killedCount}).\n`,
       level: 'warn'
     });
 
@@ -1492,6 +2277,7 @@ app.post('/api/v1/jobs/:id/cancel', (req, res) => {
     return res.json({
       success: true,
       message: 'Job đã được hủy bỏ thành công',
+      killedProcesses: killedCount,
       job: updatedJob
     });
   } catch (err) {
@@ -1613,16 +2399,22 @@ app.post(['/api/v1/jobs/:id/approve', '/api/v1/tasks/:id/approve'], (req, res) =
 
 /**
  * DELETE /api/v1/jobs/:id (và /api/v1/tasks/:id)
- * Chỉ cho phép xóa khi task ở trạng thái: TO DO, DONE, CANCELLED, FAILED
+ * Xoá cứng bản ghi trong SQLite DB kèm cascade, TUYỆT ĐỐI GIỮ NGUYÊN thư mục feature và log trên ổ đĩa
+ * Chỉ cho phép xóa khi task ở trạng thái: TO DO, DONE, CANCELLED, FAILED, ARCHIVED
  */
-app.delete('/api/v1/jobs/:id', (req, res) => {
+app.delete(['/api/v1/jobs/:id', '/api/v1/tasks/:id'], (req, res) => {
   try {
     const { id } = req.params;
     const result = db.deleteJob(id);
     if (!result.success) {
       return res.status(400).json({ success: false, error: result.error });
     }
-    return res.json({ success: true, message: 'Đã xóa task thành công', id });
+    jobEventBus.emitJobStatus(id, { status: 'DELETED', current_step: null });
+    return res.json({
+      success: true,
+      message: 'Đã xóa task thành công khỏi cơ sở dữ liệu (tài liệu và logs trên ổ đĩa được giữ nguyên)',
+      id
+    });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
   }
@@ -1652,13 +2444,13 @@ app.post(['/api/v1/jobs/:id/archive', '/api/v1/tasks/:id/archive'], (req, res) =
 
 
 /**
- * PATCH /api/v1/jobs/:id/status (và /api/v1/tasks/:id/status)
- * Cập nhật trạng thái task
+ * PATCH/PUT /api/v1/jobs/:id/status (và /api/v1/tasks/:id/status)
+ * Cập nhật trạng thái task: DONE chỉ khi gate passed=true, cấm DONE kèm error/timeout
  */
-app.patch('/api/v1/jobs/:id/status', (req, res) => {
+function handleJobStatus(req, res) {
   try {
     const { id } = req.params;
-    const { status } = req.body;
+    const { status } = req.body || {};
     if (!status) {
       return res.status(400).json({ success: false, error: 'Trạng thái (status) là bắt buộc' });
     }
@@ -1666,19 +2458,36 @@ app.patch('/api/v1/jobs/:id/status', (req, res) => {
     if (!job) {
       return res.status(404).json({ success: false, error: `Job with ID '${id}' not found` });
     }
-    const updatedJob = db.updateJobStatus(id, status);
-    jobEventBus.emitJobStatus(id, { status, current_step: job.current_step });
+    const gate = resolveJobGate(status, req.body || {}, job);
+    const nowIso = new Date().toISOString();
+    const statusUpdates = { status: gate.finalStatus, gate_result: gate.gateResult, updated_at: nowIso };
+    if (['DONE', 'CANCELLED', 'FAILED'].includes((gate.finalStatus || '').toUpperCase())) statusUpdates.completed_at = nowIso;
+    if ((gate.finalStatus || '').toUpperCase() === 'DONE') statusUpdates.error_message = null;
+    else if (req.body && req.body.error_message && typeof req.body.error_message === 'string') statusUpdates.error_message = req.body.error_message;
+    else if (req.body && req.body.error !== undefined && gate.gateResult && gate.gateResult.error) statusUpdates.error_message = gate.gateResult.error;
+    const targetId = (job && job.id) ? job.id : id;
+    const updatedJob = db.updateJob(targetId, statusUpdates);
+    jobEventBus.emitJobStatus(targetId, { status: gate.finalStatus, current_step: (updatedJob && updatedJob.current_step) || job.current_step, gate_result: gate.gateResult });
+
+    if (gate.rejected) {
+      return res.status(400).json({ success: false, error: gate.reason, job: updatedJob, gate_result: gate.gateResult, status: gate.finalStatus });
+    }
+    if ((gate.finalStatus || '').toUpperCase() !== (status || '').toString().trim().toUpperCase() && (status || '').toString().trim().toUpperCase() === 'DONE') {
+      return res.json({ success: true, job: updatedJob, gate_result: gate.gateResult, note: gate.reason });
+    }
     
     // Nếu status là trạng thái cần chạy thì kích hoạt pipeline logic
-    if (['PLANNING', 'IMPLEMENT', 'TESTING', 'FIXING'].includes(status.toUpperCase())) {
-      setTimeout(() => executeStep(id).catch(console.error), 100);
+    if (['PLANNING', 'IMPLEMENT', 'TESTING', 'FIXING'].includes((gate.finalStatus || '').toUpperCase())) {
+      setTimeout(() => executeStep(targetId).catch(console.error), 100);
     }
 
-    return res.json({ success: true, job: updatedJob });
+    return res.json({ success: true, job: updatedJob, gate_result: gate.gateResult });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
   }
-});
+}
+app.patch(['/api/v1/jobs/:id/status', '/api/v1/tasks/:id/status'], handleJobStatus);
+app.put(['/api/v1/jobs/:id/status', '/api/v1/tasks/:id/status'], handleJobStatus);
 
 /**
  * GET /api/v1/jobs/:id/plan-files (và /api/v1/tasks/:id/plan-files)

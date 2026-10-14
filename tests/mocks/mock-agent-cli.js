@@ -53,6 +53,15 @@ if (args.includes('--simulate-secret')) {
   console.log('SECRET_TOKEN=sk-test-secret-123456789');
   console.error('SECRET_TOKEN=sk-test-secret-123456789');
 }
+if (args.includes('--emit-yield')) {
+  console.log('[TOOL CALL] yield ({"data": "success"})');
+}
+if (args.includes('--emit-done')) {
+  console.log('Status: DONE');
+}
+if (args.includes('--emit-json-done')) {
+  console.log('{"reason": "Status: DONE"}');
+}
 
 // 4. Kiểm tra cờ --long-running hoặc --sleep <ms>
 const isLongRunning = args.includes('--long-running');

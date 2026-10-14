@@ -329,17 +329,41 @@ body {
 
 /* 5. Terminal (xterm.js) Custom Styling */
 #xtermContainer {
-  padding: 6px;
+  width: 100% !important;
+  height: 100% !important;
+  padding: 8px 12px;
   background-color: #080d1a !important;
+  box-sizing: border-box !important;
+  position: relative;
+  overflow: hidden !important;
 }
 
 .xterm {
-  height: 100%;
+  width: 100% !important;
+  height: 100% !important;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace !important;
 }
 
+.xterm-screen {
+  width: 100% !important;
+}
+
 .xterm-viewport {
+  width: 100% !important;
   background-color: #080d1a !important;
+  overflow-y: auto !important;
+}
+/* Native log <pre> wrap: xuong dong theo khoang trang, chi ngat tu qua dai vuot chieu rong */
+#logsEvidenceList pre,
+#rawJsonContent,
+.code-block,
+.evidence-detail-code {
+  white-space: pre-wrap !important;
+  word-break: normal !important;
+  overflow-wrap: anywhere !important;
+  overflow-x: auto;
+  overflow-y: auto;
+  max-width: 100%;
 }
 
 .xterm-viewport::-webkit-scrollbar {
@@ -416,6 +440,99 @@ body {
   background-color: rgba(244, 63, 94, 0.2);
   color: #fb7185;
   border: 1px solid rgba(244, 63, 94, 0.4);
+}
+
+.evidence-match {
+  background-color: rgba(16, 185, 129, 0.2);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.4);
+}
+
+.evidence-diff {
+  background-color: rgba(244, 63, 94, 0.2);
+  color: #fb7185;
+  border: 1px solid rgba(244, 63, 94, 0.4);
+}
+
+/* HTTP Method Badges */
+.badge-method {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-weight: 700;
+  font-size: 0.65rem;
+  padding: 0.12rem 0.45rem;
+  border-radius: 0.375rem;
+  letter-spacing: 0.04em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.badge-get {
+  background-color: rgba(14, 165, 233, 0.2);
+  color: #38bdf8;
+  border: 1px solid rgba(14, 165, 233, 0.4);
+}
+
+.badge-post {
+  background-color: rgba(99, 102, 241, 0.2);
+  color: #818cf8;
+  border: 1px solid rgba(99, 102, 241, 0.4);
+}
+
+.badge-put {
+  background-color: rgba(245, 158, 11, 0.2);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+}
+
+.badge-patch {
+  background-color: rgba(168, 85, 247, 0.2);
+  color: #c084fc;
+  border: 1px solid rgba(168, 85, 247, 0.4);
+}
+
+.badge-delete {
+  background-color: rgba(244, 63, 94, 0.2);
+  color: #fb7185;
+  border: 1px solid rgba(244, 63, 94, 0.4);
+}
+
+/* Evidence Detail Modal Inspector & Table */
+.evidence-detail-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  background-color: #0b1120;
+  border: 1px solid #1e293b;
+  border-radius: 0.5rem;
+  color: #e2e8f0;
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.evidence-detail-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+}
+
+.evidence-detail-table th {
+  background-color: #0f172a;
+  color: #94a3b8;
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 0.65rem;
+  letter-spacing: 0.05em;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid #1e293b;
+}
+
+.evidence-detail-table td {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid rgba(30, 41, 59, 0.7);
+  font-family: ui-monospace, monospace;
+}
+
+.evidence-detail-table tr:last-child td {
+  border-bottom: none;
 }
 
 /* 8. Code & Markdown Styling */
@@ -737,7 +854,6 @@ pre code {
 }
 
 #xtermContainer {
-  contain: strict;
   transform: translateZ(0);
 }
 

@@ -247,29 +247,52 @@ class BaseAdapter {
    * Thực thi tiến trình Agent CLI qua processManager
    */
   async execute(options = {}) {
-    const { prompt = '', cwd = process.cwd(), onStdout = null, onStderr = null, jobId = null, extraArgs = [] } = options;
+    const { prompt = '', cwd = process.cwd(), onStderr = null, jobId = null, extraArgs = [] } = options;
+    const originalOnStdout = options.onStdout;
     const fs = require('node:fs');
-    const os = require('node:os');
     const path = require('node:path');
     const { defaultProcessManager } = require('../execution/processManager');
-
-    let effectiveArgs = this.buildArgs(prompt, options);
-
-    // Prompt dài: spill sang file TẠM HỆ THỐNG (os.tmpdir). TUYỆT ĐỐI KHÔNG ghi vào cwd/workspace root.
-    // Ngữ cảnh task (expect.md, plan.md, tasks.md, memory.md, context.md) nằm trong feature dir
-    // và đã được build sẵn vào prompt qua templates/prompt/*.md + fileManager.loadPreviousContext.
-    if (prompt && (prompt.length > 150 || prompt.includes('\n'))) {
-      try {
-        const safeJob = String(jobId || 'job').replace(/[^a-zA-Z0-9_-]/g, '-');
-        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `ai-worker-${safeJob}-`));
-        const promptFile = path.join(tmpDir, 'prompt.md');
-        fs.writeFileSync(promptFile, prompt, 'utf-8');
-        const safePrompt = `Please read and strictly execute all instructions in "${promptFile}"`;
-        effectiveArgs = this.buildArgs(safePrompt, options);
-      } catch (e) {
-        console.warn('Ghi tệp prompt tạm cảnh báo:', e.message);
+    let proc = null;
+    let earlyExitTriggered = false;
+    let earlyExitKilled = false;
+    let earlyExitTimer = null;
+    const checkEarlyExit = (chunk) => {
+      if (earlyExitTriggered) return;
+      const text = typeof chunk === 'string' ? chunk : String(chunk);
+      const clean = text.replace(/\x1b\[[0-9;]*m/g, '');
+      if (clean.includes('[TOOL CALL] yield') || clean.includes('"reason": "Status: DONE') || clean.includes('Status: DONE')) {
+        earlyExitTriggered = true;
+        earlyExitTimer = setTimeout(async () => {
+          try {
+            if (!proc || !proc.child) return;
+            if (proc.child.exitCode !== null || proc.child.signalCode !== null) return;
+            const record = typeof defaultProcessManager.getProcess === 'function' ? defaultProcessManager.getProcess(proc.pid) : null;
+            if (record && record.status && record.status !== 'RUNNING') return;
+            earlyExitKilled = true;
+            if (typeof originalOnStdout === 'function') {
+              originalOnStdout('\n[EARLY-EXIT] Phát hiện tín hiệu hoàn tất từ Agent (yield / Status: DONE). Đã tự động kết thúc tiến trình an toàn.\n');
+            }
+            if (jobId) {
+              await defaultProcessManager.killProcessesByJobId(jobId, 2000).catch(() => {});
+            } else if (proc && typeof proc.kill === 'function') {
+              await proc.kill(2000).catch(() => {});
+            }
+          } catch (e) {}
+        }, 6000);
+        if (earlyExitTimer && typeof earlyExitTimer.unref === 'function') earlyExitTimer.unref();
       }
-    }
+    };
+    const onStdout = (chunk) => {
+      if (typeof originalOnStdout === 'function') {
+        try { originalOnStdout(chunk); } catch (e) {}
+      }
+      try { checkEarlyExit(chunk); } catch (e) {}
+    };
+
+
+    // Truyền trực tiếp prompt vào args qua buildArgs, không tạo file đệm prompt.md
+    // Tránh sinh file rác, tránh lỗi quyền thư mục và Agent không phải tốn turn đọc file
+    const effectiveArgs = this.buildArgs(prompt, options);
     const detection = this.detect();
     const effectiveCommand = (detection && detection.installed && detection.path) ? detection.path : this.command;
 
@@ -280,10 +303,15 @@ class BaseAdapter {
       onStdout(`\r\n\x1b[1;36m[AI-AGENT-PROCESS]\x1b[0m \x1b[1;32m$ ${fullCliLine}\x1b[0m\r\n\x1b[90m[Thư mục làm việc: ${cwd}]\x1b[0m\r\n\x1b[90m────────────────────────────────────────────────────────────────────────────────\x1b[0m\r\n`);
     }
 
-    const proc = defaultProcessManager.spawnProcess({
+    const procEnv = Object.assign({}, process.env, {
+      OMP_MCP_TIMEOUT_MS: '60000'
+    });
+
+    proc = defaultProcessManager.spawnProcess({
       command: effectiveCommand,
       args: effectiveArgs,
       cwd,
+      env: procEnv,
       jobId,
       onStdout,
       onStderr,
@@ -341,6 +369,7 @@ class BaseAdapter {
                 for (const line of lines) {
                   const trimmed = line.trim();
                   if (!trimmed) continue;
+                  try { checkEarlyExit(trimmed); } catch (e) {}
 
                   // 1. Phân tích định dạng JSON/JSONL chuẩn
                   try {
@@ -430,6 +459,18 @@ class BaseAdapter {
     }, 2000);
 
     const result = await proc.wait();
+    if (earlyExitTimer) {
+      clearTimeout(earlyExitTimer);
+      earlyExitTimer = null;
+    }
+    
+    // Ghi đè trạng thái nếu đây là early exit thành công
+    if (earlyExitKilled) {
+      result.exitCode = 0;
+      result.timedOut = false;
+      result.status = 'COMPLETED';
+    }
+
     clearInterval(tailTimer);
     if (typeof onStdout === 'function') {
       const exitColor = result.exitCode === 0 ? '\x1b[32m' : '\x1b[31m';

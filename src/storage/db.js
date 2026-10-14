@@ -27,6 +27,7 @@ function initDb() {
 
   // Kích hoạt WAL mode và foreign keys
   dbInstance.exec('PRAGMA journal_mode = WAL;');
+  dbInstance.exec('PRAGMA busy_timeout = 10000;');
   dbInstance.exec('PRAGMA foreign_keys = ON;');
 
   // Bảng jobs
@@ -37,6 +38,7 @@ function initDb() {
       title TEXT,
       prompt TEXT,
       repo_path TEXT,
+      workspace_id TEXT,
       base_branch TEXT,
       worktree_path TEXT,
       status TEXT,
@@ -61,6 +63,8 @@ function initDb() {
     if (!colNames.includes('task_code')) {
       dbInstance.exec('ALTER TABLE jobs ADD COLUMN task_code TEXT;');
     }
+    if (!colNames.includes('gate_result')) { dbInstance.exec('ALTER TABLE jobs ADD COLUMN gate_result TEXT;'); }
+    if (!colNames.includes('workspace_id')) { dbInstance.exec('ALTER TABLE jobs ADD COLUMN workspace_id TEXT;'); }
     if (!colNames.includes('had_pending')) {
       dbInstance.exec('ALTER TABLE jobs ADD COLUMN had_pending INTEGER DEFAULT 0;');
     }
@@ -218,12 +222,12 @@ function createJob(jobData) {
 
   const stmt = db.prepare(`
     INSERT INTO jobs (
-      id, task_code, title, prompt, repo_path, base_branch, worktree_path,
+      id, task_code, title, prompt, repo_path, workspace_id, base_branch, worktree_path,
       status, created_at, updated_at, completed_at, runner,
       pipeline_config, current_step, error_message, exit_code,
       summary, priority
     ) VALUES (
-      ?, ?, ?, ?, ?, ?, ?,
+      ?, ?, ?, ?, ?, ?, ?, ?,
       ?, ?, ?, ?, ?,
       ?, ?, ?, ?,
       ?, ?
@@ -236,6 +240,7 @@ function createJob(jobData) {
     jobData.title || '',
     jobData.prompt || '',
     jobData.repo_path || '',
+    jobData.workspace_id || jobData.workspaceId || null,
     jobData.base_branch || 'main',
     jobData.worktree_path || null,
     jobData.status || 'TO DO',
@@ -255,13 +260,30 @@ function createJob(jobData) {
 }
 
 function getJobById(id) {
+  if (!id) return null;
   const db = getDb();
   const stmt = db.prepare('SELECT * FROM jobs WHERE id = ?');
-  return stmt.get(id) || null;
+  const exact = stmt.get(id);
+  if (exact) return exact;
+
+  // Hỗ trợ tìm kiếm theo prefix ID (short-id như e6b6f051) hoặc task_code (như RSGATE-50)
+  try {
+    const cleanId = String(id).trim();
+    const fuzzyStmt = db.prepare('SELECT * FROM jobs WHERE id LIKE ? OR task_code = ? ORDER BY created_at DESC LIMIT 1');
+    const fuzzy = fuzzyStmt.get(`${cleanId}%`, cleanId);
+    if (fuzzy) return fuzzy;
+  } catch (e) {}
+
+  return null;
 }
 
 function updateJob(id, updates) {
   const db = getDb();
+  let targetId = id;
+  try {
+    const resolved = getJobById(id);
+    if (resolved && resolved.id) targetId = resolved.id;
+  } catch (e) {}
   // Lấy các cột hợp lệ của bảng jobs để tránh lỗi SqliteError: no such column
   let validCols = [];
   try {
@@ -287,13 +309,13 @@ function updateJob(id, updates) {
     values.push(new Date().toISOString());
   }
 
-  values.push(id);
+  values.push(targetId);
 
   const sql = `UPDATE jobs SET ${setClauses.join(', ')} WHERE id = ?`;
   const stmt = db.prepare(sql);
   stmt.run(...values);
 
-  return getJobById(id);
+  return getJobById(targetId);
 }
 
 function listJobs(filter = {}) {
@@ -342,9 +364,22 @@ function deleteJob(id) {
       error: `Chỉ cho phép xóa task khi ở trạng thái: ${allowedStatuses.join(', ')}. Trạng thái hiện tại: "${job.status}"`
     };
   }
-  const stmt = db.prepare('DELETE FROM jobs WHERE id = ?');
-  const result = stmt.run(id);
-  return { success: result.changes > 0, id };
+  // Hard delete sạch trong DB SQLite với DatabaseSync tuần tự, cascade bảng con
+  // TUYỆT ĐỐI KHÔNG xóa file hoặc thư mục trên ổ đĩa để đảm bảo lưu vết tài liệu
+  db.exec('BEGIN');
+  try {
+    db.prepare('DELETE FROM questions WHERE job_id = ?').run(id);
+    db.prepare('DELETE FROM evidence WHERE job_id = ?').run(id);
+    db.prepare('DELETE FROM dual_plans WHERE job_id = ?').run(id);
+    db.prepare('DELETE FROM steps WHERE job_id = ?').run(id);
+    const stmt = db.prepare('DELETE FROM jobs WHERE id = ?');
+    const result = stmt.run(id);
+    db.exec('COMMIT');
+    return { success: result.changes > 0, id };
+  } catch (err) {
+    try { db.exec('ROLLBACK'); } catch (rollbackErr) {}
+    throw err;
+  }
 }
 
 function archiveJob(id) {
@@ -555,6 +590,30 @@ function getEvidenceByJobId(jobId) {
     };
   });
 }
+function deleteEvidence(id) {
+  const db = getDb();
+  const stmt = db.prepare('DELETE FROM evidence WHERE id = ?');
+  const result = stmt.run(id);
+  return { success: result.changes > 0, id };
+}
+
+function deleteEvidenceByJobAndFile(jobId, filename) {
+  const db = getDb();
+  const safeFilename = path.basename(filename);
+  const pattern = `%${safeFilename}%`;
+  const stmt = db.prepare(`
+    DELETE FROM evidence
+    WHERE job_id = ?
+      AND (
+        id = ?
+        OR data LIKE ?
+        OR id LIKE ?
+      )
+  `);
+  const result = stmt.run(jobId, safeFilename, pattern, pattern);
+  return { success: result.changes > 0, changes: result.changes };
+}
+
 
 // ==========================================
 // QUESTIONS CRUD
@@ -808,6 +867,9 @@ module.exports = {
   addEvidence,
   createEvidence: addEvidence,
   getEvidenceByJobId,
+  deleteEvidence,
+  deleteEvidenceByJobAndFile,
+  deleteEvidenceFile: deleteEvidenceByJobAndFile,
   // Questions
   addQuestion,
   getPendingQuestionByJobId,

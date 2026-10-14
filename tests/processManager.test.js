@@ -200,6 +200,42 @@ describe('ProcessManager & Subprocess Execution Test Suite', () => {
     await new Promise((resolve) => setTimeout(resolve, 200));
     assert.strictEqual(isPidRunning(handle.pid), false, 'Tiến trình phải bị ngắt hoàn toàn sau watchdog timeout');
   });
+  it('Test 5: Cancel job -> killProcessesByJobId ngắt đúng toàn bộ tiến trình con của job', async () => {
+    const pm = new ProcessManager();
+    const targetJobId = 'job-cancel-test-42';
+    let killedEventData = null;
+
+    pm.on('killed', (data) => {
+      killedEventData = data;
+    });
+
+    const handle = pm.spawnProcess({
+      command: process.execPath,
+      args: [mockCliPath, '--long-running'],
+      cwd: testTempDir,
+      jobId: targetJobId,
+      timeoutMs: 30000
+    });
+
+    // Đảm bảo tiến trình đang chạy và được quản lý theo jobId
+    assert.ok(isPidRunning(handle.pid), 'Tiến trình phải đang chạy');
+    const activeProcs = pm.getProcessesByJobId(targetJobId);
+    assert.strictEqual(activeProcs.length, 1, 'Phải tìm thấy 1 tiến trình của targetJobId');
+    assert.strictEqual(activeProcs[0].pid, handle.pid, 'PID phải khớp với handle');
+
+    // Kích hoạt hủy job: gọi killProcessesByJobId (tree-kill SIGTERM -> SIGKILL)
+    const killedCount = await pm.killProcessesByJobId(targetJobId, 2000);
+    assert.strictEqual(killedCount, 1, 'Số tiến trình bị ngắt phải là 1');
+
+    const result = await handle.wait();
+    assert.strictEqual(result.status, 'KILLED', 'Trạng thái tiến trình phải chuyển sang KILLED');
+
+    // Chờ ngắn để OS giải phóng PID
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.strictEqual(isPidRunning(handle.pid), false, 'PID không còn tồn tại sau khi bị tree-kill');
+    assert.ok(killedEventData !== null, 'Sự kiện killed phải được phát ra');
+    assert.strictEqual(killedEventData.jobId, targetJobId, 'jobId trong sự kiện killed phải khớp');
+  });
 
   it('Test bổ sung: isPidRunning với các giá trị PID không hợp lệ', () => {
     assert.strictEqual(isPidRunning(null), false);

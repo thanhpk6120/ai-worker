@@ -14,6 +14,7 @@
 
 const { EventEmitter } = require('node:events');
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const path = require('node:path');
 const http = require('node:http');
 const https = require('node:https');
@@ -64,11 +65,12 @@ class UiEvidenceCollector {
    * @param {Object} [params.browserRunner] - Đối tượng BrowserRunner nếu cần gọi trực tiếp
    * @returns {Promise<Object>} ChannelResult
    */
-  async verify({ featureName, testPlan = {}, evidenceDir = null, browserRunner = null }) {
+  async verify({ featureName, testPlan = {}, evidenceDir = null, browserRunner = null, executionLogs = null }) {
     const targetDir = evidenceDir || path.resolve(process.cwd(), 'feature', featureName || 'default', 'evidence');
     const defects = [];
     const foundScreenshots = [];
     const missingScreenshots = [];
+    const duplicateGroups = [];
     let metadata = null;
 
     // Kiểm tra sự tồn tại của thư mục evidence
@@ -91,6 +93,7 @@ class UiEvidenceCollector {
             type: 'MISSING_EVIDENCE_DIRECTORY',
             message: `Thư mục bằng chứng UI không tồn tại: ${targetDir}`
           }],
+          duplicateGroups: [],
           summary: 'Thất bại: Không tìm thấy thư mục lưu ảnh chụp màn hình UI'
         };
       }
@@ -105,6 +108,7 @@ class UiEvidenceCollector {
         foundScreenshots: [],
         missingScreenshots: [],
         defects: [],
+        duplicateGroups: [],
         summary: 'Bỏ qua kiểm chứng UI: Tính năng không có kịch bản tương tác giao diện'
       };
     }
@@ -123,6 +127,7 @@ class UiEvidenceCollector {
         foundScreenshots: [],
         missingScreenshots: [],
         defects: [{ type: 'FS_READ_ERROR', message: `Lỗi đọc thư mục evidence: ${err.message}` }],
+        duplicateGroups: [],
         summary: `Lỗi đọc thư mục bằng chứng UI: ${err.message}`
       };
     }
@@ -135,7 +140,7 @@ class UiEvidenceCollector {
         metadata = JSON.parse(rawContent);
 
         // Kiểm tra cờ visual defects trong metadata
-        if (metadata.hasVisualDefects === true) {
+        if (metadata && metadata.hasVisualDefects === true) {
           defects.push({
             type: 'VISUAL_DEFECT_FLAGGED',
             message: metadata.visualDefectReason || 'Metadata ghi nhận tồn tại visual defect trong giao diện'
@@ -143,7 +148,7 @@ class UiEvidenceCollector {
         }
 
         // Kiểm tra lỗi console hoặc runtime của trình duyệt ghi nhận trong metadata
-        if (Array.isArray(metadata.consoleErrors) && metadata.consoleErrors.length > 0) {
+        if (metadata && Array.isArray(metadata.consoleErrors) && metadata.consoleErrors.length > 0) {
           defects.push({
             type: 'BROWSER_CONSOLE_ERROR',
             message: `Phát hiện ${metadata.consoleErrors.length} lỗi trong console trình duyệt`,
@@ -158,28 +163,188 @@ class UiEvidenceCollector {
       }
     }
 
-    // Thu thập danh sách ảnh screenshot hợp lệ (.png, .jpg, .jpeg, .webp)
+    // Thu thập danh sách ảnh screenshot (.png, .jpg, .jpeg, .webp) và kiểm tra toàn vẹn
     const imageExtensions = new Set(['.png', '.jpg', '.jpeg', '.webp']);
+    const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+    const fileStatsMap = new Map();
+
     for (const file of files) {
       const ext = path.extname(file).toLowerCase();
       if (imageExtensions.has(ext)) {
         const fullPath = path.join(targetDir, file);
         try {
           const stats = fs.statSync(fullPath);
+          fileStatsMap.set(file, stats);
           if (stats.size === 0) {
             defects.push({
               type: 'EMPTY_SCREENSHOT',
               file,
               message: `Tệp ảnh chụp màn hình rỗng (0 bytes): ${file}`
             });
-          } else {
-            foundScreenshots.push(file);
+            continue;
           }
+
+          // Kiểm tra PNG magic bytes đối với file .png
+          if (ext === '.png') {
+            let isValidPng = false;
+            try {
+              const headerBuf = Buffer.alloc(8);
+              const fd = fs.openSync(fullPath, 'r');
+              const bytesRead = fs.readSync(fd, headerBuf, 0, 8, 0);
+              fs.closeSync(fd);
+              if (bytesRead === 8 && headerBuf.equals(PNG_MAGIC)) {
+                isValidPng = true;
+              }
+            } catch (errMagic) {
+              isValidPng = false;
+            }
+
+            if (!isValidPng) {
+              defects.push({
+                type: 'INVALID_PNG',
+                file,
+                message: `Tệp PNG không hợp lệ (sai magic bytes 89 50 4E 47 0D 0A 1A 0A): ${file}`
+              });
+              continue;
+            }
+          }
+
+          foundScreenshots.push(file);
         } catch (e) {
           defects.push({
             type: 'FILE_ACCESS_ERROR',
             file,
-            message: `Không thể đọc dung lượng tệp ${file}: ${e.message}`
+            message: `Không thể đọc tệp ${file}: ${e.message}`
+          });
+        }
+      }
+    }
+
+    // Kiểm tra trùng lặp ảnh bằng MD5 và SHA256
+    try {
+      const hashMap = new Map();
+      for (const file of foundScreenshots) {
+        try {
+          const buf = fs.readFileSync(path.join(targetDir, file));
+          const md5 = crypto.createHash('md5').update(buf).digest('hex');
+          const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
+          if (!hashMap.has(md5)) {
+            hashMap.set(md5, { hash: md5, sha256, files: [] });
+          }
+          hashMap.get(md5).files.push(file);
+        } catch { /* bỏ qua lỗi đọc file, đã ghi nhận */ }
+      }
+
+      for (const entry of hashMap.values()) {
+        if (entry.files.length >= 2) {
+          duplicateGroups.push({
+            hash: entry.hash,
+            sha256: entry.sha256,
+            files: [...entry.files]
+          });
+          defects.push({
+            type: 'DUPLICATE_SCREENSHOT',
+            files: [...entry.files],
+            hash: entry.hash,
+            sha256: entry.sha256,
+            message: `Phát hiện ${entry.files.length} ảnh chụp trùng lặp nội dung (MD5=${entry.hash}): ${entry.files.join(', ')}`
+          });
+        }
+      }
+    } catch { /* không chặn luồng */ }
+
+    // Kiểm tra tính nhất quán của metadata.json (nếu metadata khai báo danh sách screenshots)
+    if (metadata && typeof metadata === 'object') {
+      const declaredScreenshots = Array.isArray(metadata)
+        ? metadata
+        : (Array.isArray(metadata.screenshots)
+          ? metadata.screenshots
+          : (Array.isArray(metadata.records) ? metadata.records : null));
+
+      if (Array.isArray(declaredScreenshots)) {
+        const declaredNames = new Set();
+        for (const item of declaredScreenshots) {
+          const rawName = typeof item === 'string' ? item : (item && (item.fileName || item.filename || item.name || item.filePath));
+          if (rawName && typeof rawName === 'string') {
+            const baseName = path.basename(rawName);
+            declaredNames.add(baseName);
+
+            // Kiểm tra file trên đĩa có tồn tại không
+            if (!files.includes(baseName)) {
+              defects.push({
+                type: 'METADATA_SCREENSHOT_MISSING_ON_DISK',
+                file: baseName,
+                message: `metadata khai báo ảnh "${baseName}" nhưng file không tồn tại trên đĩa`
+              });
+            }
+
+            // Kiểm tra fileSizeBytes nếu item là object
+            if (item && typeof item === 'object' && item.fileSizeBytes !== undefined && item.fileSizeBytes !== null) {
+              const claimedSize = Number(item.fileSizeBytes);
+              if (Number.isFinite(claimedSize)) {
+                const diskStats = fileStatsMap.get(baseName);
+                if (diskStats && diskStats.size !== claimedSize) {
+                  defects.push({
+                    type: 'METADATA_FILESIZE_MISMATCH',
+                    file: baseName,
+                    claimedSize,
+                    actualSize: diskStats.size,
+                    message: `metadata khai báo fileSizeBytes=${claimedSize} cho "${baseName}" nhưng kích thước thực tế là ${diskStats.size}`
+                  });
+                }
+              }
+            }
+          }
+        }
+
+        // Kiểm tra file ảnh trên đĩa thừa so với metadata
+        for (const diskImg of foundScreenshots) {
+          if (!declaredNames.has(diskImg)) {
+            defects.push({
+              type: 'DISK_SCREENSHOT_EXTRA_NOT_IN_METADATA',
+              file: diskImg,
+              message: `File ảnh "${diskImg}" tồn tại trên đĩa nhưng không được khai báo trong metadata`
+            });
+          }
+        }
+      }
+    }
+
+    // Kiểm tra log browser capture thật (01_test_execution.log hoặc executionLogs truyền vào)
+    let testExecutionLogContent = '';
+    const logFilePath = path.join(targetDir, '01_test_execution.log');
+    if (fs.existsSync(logFilePath)) {
+      try {
+        testExecutionLogContent = fs.readFileSync(logFilePath, 'utf-8');
+      } catch { /* bỏ qua lỗi đọc */ }
+    } else if (typeof executionLogs === 'string' && executionLogs.trim().length > 0) {
+      testExecutionLogContent = executionLogs;
+    }
+
+    // Nếu có phát hiện screenshots hoặc testPlan yêu cầu UI, bắt buộc kiểm tra log browser capture
+    const requiresBrowserCaptureCheck = foundScreenshots.length > 0 ||
+                                        (testPlan.uiCheckpoints && testPlan.uiCheckpoints.length > 0) ||
+                                        (testPlan.uiSteps && testPlan.uiSteps.length > 0) ||
+                                        (testPlan.browserSteps && testPlan.browserSteps.length > 0);
+
+    if (requiresBrowserCaptureCheck) {
+      if (!testExecutionLogContent || testExecutionLogContent.trim().length === 0) {
+        defects.push({
+          type: 'no-browser-capture',
+          message: 'Không tìm thấy nhật ký thực thi (01_test_execution.log) để xác thực phiên chụp màn hình từ trình duyệt thật'
+        });
+      } else {
+        const browserKeywords = [
+          'browser', 'capture', 'screenshot', 'playwright', 'chromium',
+          'puppeteer', 'cloakbrowser', 'mcp__cloakbrowser', 'webdriver', 'selenium',
+          'mcp__cloakbrowser_screenshot', 'mcp__cloakbrowser_navigate', 'page.screenshot'
+        ];
+        const lowerLog = testExecutionLogContent.toLowerCase();
+        const hasBrowserProof = browserKeywords.some(kw => lowerLog.includes(kw));
+        if (!hasBrowserProof) {
+          defects.push({
+            type: 'no-browser-capture',
+            message: 'Nhật ký kiểm thử (01_test_execution.log) không chứa từ khóa chứng minh tương tác hoặc chụp ảnh từ trình duyệt thật'
           });
         }
       }
@@ -210,6 +375,7 @@ class UiEvidenceCollector {
       totalCheckpoints: expectedCheckpoints.length,
       foundScreenshots,
       missingScreenshots,
+      duplicateGroups,
       defects,
       metadata,
       summary: passed
@@ -565,6 +731,26 @@ class LogScanner {
     // 1. Luôn làm sạch bí mật trước khi lưu vết hoặc phân tích
     const scrubbedLogs = this.maskSecrets(rawText);
 
+    const requireBrowserCapture = Boolean(options && (options.requireBrowserCapture ?? options.requireBrowserEvidence ?? options.logRequireBrowserCapture));
+    const hasBrowserCapture = /(screenshot|metadata(\.json)?|browser[-\s]?capture|capture|evidence)/i.test(scrubbedLogs || '');
+    if (requireBrowserCapture && !hasBrowserCapture) {
+      const emptyNote = (!scrubbedLogs || scrubbedLogs.trim().length === 0) ? ' (log trống, không có nội dung)' : '';
+      return {
+        passed: false,
+        channel: 'log',
+        status: 'FAILED',
+        clean: false,
+        errorCount: 1,
+        violations: [{
+          line: '',
+          errorType: 'MISSING_BROWSER_CAPTURE',
+          lineNumber: 0
+        }],
+        stackTraces: [],
+        scrubbedLogs,
+        summary: `Log Scanner THẤT BẠI: Log không chứa dấu vết browser capture${emptyNote} (không tìm thấy screenshot/metadata/capture trong log, nghi ngờ thiếu bằng chứng trình duyệt).`
+      };
+    }
     if (!scrubbedLogs || scrubbedLogs.trim().length === 0) {
       return {
         passed: true,
@@ -1073,7 +1259,8 @@ class MultiVerificationGate extends EventEmitter {
         featureName,
         testPlan,
         evidenceDir: testPlan.evidenceDir || null,
-        browserRunner: this.options.browserRunner || null
+        browserRunner: this.options.browserRunner || null,
+        executionLogs: logs
       }),
       this.apiRunner.runTests({
         baseUrl,
@@ -1082,7 +1269,8 @@ class MultiVerificationGate extends EventEmitter {
         timeoutMs: testPlan.apiTimeoutMs || 10000
       }),
       Promise.resolve(this.logScanner.scanLogs(logs, {
-        customPatterns: testPlan.logPatterns || null
+        customPatterns: testPlan.logPatterns || testPlan.logCustomPatterns || null,
+        requireBrowserCapture: testPlan.requireBrowserCapture ?? testPlan.requireBrowserEvidence ?? testPlan.logRequireBrowserCapture ?? false
       })),
       this.dbVerifier.verify({
         dbConfig: dbConfig || testPlan.dbConfig || null,
@@ -1196,6 +1384,11 @@ class MultiVerificationGate extends EventEmitter {
     return {
       passed,
       channels,
+      ui: {
+        ...uiResult,
+        duplicateGroups: uiResult.duplicateGroups || []
+      },
+      duplicateGroups: uiResult.duplicateGroups || [],
       failedChannels,
       summary,
       fixingPack

@@ -1,0 +1,16 @@
+[
+  {
+    "evidenceId": "ev_1791801035454_dmk5x",
+    "stepId": "ui_target_service",
+    "stepName": "ui_target_service",
+    "timestamp": "2026-10-12T10:30:35.454Z",
+    "fileName": "1791801035454_ui_target_service.png",
+    "filePath": "D:\\Thanhpk\\AI\\ai-worker\\docs\\features\\TEST-MCP-FLOW-01\\evidence\\1791801035454_ui_target_service.png",
+    "currentUrl": "http://localhost:3000/",
+    "selector": null,
+    "actionType": "screenshot",
+    "fileSizeBytes": 2790,
+    "status": "CAPTURED",
+    "consoleErrors": []
+  }
+]
