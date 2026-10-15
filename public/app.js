@@ -37,7 +37,7 @@
   };
 
   // Pipeline standard steps
-  const PIPELINE_STEPS = ['TO DO', 'PLANNING', 'IMPLEMENT', 'TESTING', 'FIXING', 'DONE'];
+  const PIPELINE_STEPS = ['TO DO', 'PLANNING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING', 'DONE'];
 
   // Status CSS mappings
   const STATUS_CLASSES = {
@@ -45,6 +45,7 @@
     'PLANNING': 'status-planning',
     'IMPLEMENT': 'status-implement',
     'TESTING': 'status-testing',
+    'VERIFY': 'status-verify',
     'FIXING': 'status-fixing',
     'PENDING': 'status-pending bg-amber-500/20 text-amber-300 border border-amber-500/40',
     'DONE': 'status-done',
@@ -1005,7 +1006,7 @@
     // Start Button State: Nút Chạy Pipeline luôn hiển thị sẵn sàng (trừ khi đang chạy IMPLEMENT/TESTING)
     const startBtn = document.getElementById('btnStartTask');
     if (startBtn) {
-      const isRunning = ['IMPLEMENT', 'TESTING'].includes((job.status || '').toUpperCase());
+      const isRunning = ['IMPLEMENT', 'TESTING', 'VERIFY'].includes((job.status || '').toUpperCase());
       if (isRunning) {
         startBtn.classList.add('hidden');
       } else {
@@ -1021,7 +1022,7 @@
     const editBtn = document.getElementById('btnEditTask');
     if (editBtn) {
       editBtn.classList.remove('hidden');
-      const isPipelineRunning = ['PLANNING', 'PENDING', 'IMPLEMENT', 'TESTING', 'FIXING'].includes((job.status || '').toUpperCase());
+      const isPipelineRunning = ['PLANNING', 'PENDING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING'].includes((job.status || '').toUpperCase());
       editBtn.disabled = isPipelineRunning;
       if (isPipelineRunning) {
         editBtn.title = 'Không thể chỉnh sửa khi Task đang chạy Pipeline';
@@ -1114,9 +1115,10 @@
     svg.innerHTML = ''; // Xóa các đường vẽ cũ
 
     const status = (job.status || 'TO DO').toUpperCase();
-    const hasReachedPlanning = ['PLANNING', 'PENDING', 'IMPLEMENT', 'TESTING', 'FIXING', 'DONE'].includes(status);
-    const hasReachedImplement = ['IMPLEMENT', 'TESTING', 'FIXING', 'DONE'].includes(status);
-    const hasReachedTesting = ['TESTING', 'FIXING', 'DONE'].includes(status);
+    const hasReachedPlanning = ['PLANNING', 'PENDING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING', 'DONE'].includes(status);
+    const hasReachedImplement = ['IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING', 'DONE'].includes(status);
+    const hasReachedTesting = ['TESTING', 'VERIFY', 'FIXING', 'DONE'].includes(status);
+    const hasReachedVerify = ['VERIFY', 'FIXING', 'DONE'].includes(status);
     const hasTouchedPending = status === 'PENDING' || job.had_pending === true || (Array.isArray(job.questions) && job.questions.length > 0);
     const hasTouchedFixing = status === 'FIXING' || (job.fixing_retries && job.fixing_retries > 0);
     const isDone = status === 'DONE';
@@ -1137,6 +1139,7 @@
     const pPend = getNodeCenter('stepNode_PENDING');
     const pImp = getNodeCenter('stepNode_IMPLEMENT');
     const pTest = getNodeCenter('stepNode_TESTING');
+    const pVerify = getNodeCenter('stepNode_VERIFY');
     const pFix = getNodeCenter('stepNode_FIXING');
     const pDone = getNodeCenter('stepNode_DONE');
 
@@ -1193,11 +1196,15 @@
       hasReachedTesting ? 'stepper-svg-path active' : 'stepper-svg-path'
     );
 
-    // 4. Đường nối TESTING -> FIXING -> DONE
+    // 4. Đường nối TESTING -> VERIFY -> FIXING -> DONE
+    createPath(
+      `M ${pTest.x + 17} 17 L ${pVerify.x - 17} 17`,
+      hasReachedVerify ? 'stepper-svg-path active' : 'stepper-svg-path'
+    );
     if (hasTouchedFixing) {
-      // Chạm FIXING: đường nối mép vào FIXING rồi sang DONE
+      // Chạm FIXING: đường nối mép VERIFY -> FIXING rồi sang DONE
       createPath(
-        `M ${pTest.x + 17} 17 L ${pFix.x - 17} 17`,
+        `M ${pVerify.x + 17} 17 L ${pFix.x - 17} 17`,
         status === 'FIXING' ? 'stepper-svg-path fixing' : 'stepper-svg-path active'
       );
       createPath(
@@ -1208,7 +1215,7 @@
       // KHÔNG chạm FIXING: ĐƯỜNG NỐI VÒNG LÊN TRÊN ĐẦU FIXING RỒI VÒNG XUỐNG DONE!
       // Bắt đầu và kết thúc tại mép trên-ngoài của hình tròn (r=17, góc 30 độ: dx=15, dy=8 -> y=9)
       createPath(
-        `M ${pTest.x + 15} 9 Q ${pFix.x} -14 ${pDone.x - 15} 9`,
+        `M ${pVerify.x + 15} 9 Q ${pFix.x} -14 ${pDone.x - 15} 9`,
         isDone ? 'stepper-svg-path stepper-svg-bridge' : 'stepper-svg-path'
       );
     }
@@ -1229,18 +1236,20 @@
     const nodePending = document.getElementById('stepNode_PENDING');
     const nodeImplement = document.getElementById('stepNode_IMPLEMENT');
     const nodeTesting = document.getElementById('stepNode_TESTING');
+    const nodeVerify = document.getElementById('stepNode_VERIFY');
     const nodeFixing = document.getElementById('stepNode_FIXING');
     const nodeDone = document.getElementById('stepNode_DONE');
 
-    [nodeTodo, nodePlanning, nodePending, nodeImplement, nodeTesting, nodeFixing, nodeDone].forEach(n => {
+    [nodeTodo, nodePlanning, nodePending, nodeImplement, nodeTesting, nodeVerify, nodeFixing, nodeDone].forEach(n => {
       if (!n) return;
       n.classList.remove('completed', 'active', 'pending', 'failed', 'untouched');
       n.classList.add('untouched');
     });
 
-    const hasReachedPlanning = ['PLANNING', 'PENDING', 'IMPLEMENT', 'TESTING', 'FIXING', 'DONE'].includes(status);
-    const hasReachedImplement = ['IMPLEMENT', 'TESTING', 'FIXING', 'DONE'].includes(status);
-    const hasReachedTesting = ['TESTING', 'FIXING', 'DONE'].includes(status);
+    const hasReachedPlanning = ['PLANNING', 'PENDING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING', 'DONE'].includes(status);
+    const hasReachedImplement = ['IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING', 'DONE'].includes(status);
+    const hasReachedTesting = ['TESTING', 'VERIFY', 'FIXING', 'DONE'].includes(status);
+    const hasReachedVerify = ['VERIFY', 'FIXING', 'DONE'].includes(status);
     const hasTouchedPending = status === 'PENDING' || job.had_pending === true || (Array.isArray(job.questions) && job.questions.length > 0);
     const hasTouchedFixing = status === 'FIXING' || (job.fixing_retries && job.fixing_retries > 0);
     const isDone = status === 'DONE';
@@ -1277,6 +1286,12 @@
       nodeTesting.classList.remove('untouched');
       if (status === 'TESTING') nodeTesting.classList.add('active');
       else nodeTesting.classList.add('completed');
+    }
+
+    if (nodeVerify && hasReachedVerify) {
+      nodeVerify.classList.remove('untouched');
+      if (status === 'VERIFY') nodeVerify.classList.add('active');
+      else nodeVerify.classList.add('completed');
     }
 
     if (nodeFixing) {
@@ -2799,7 +2814,7 @@
     const mapping = state.agentMapping || {};
     if (status === 'PLANNING') return mapping.PLANNING || 'claude-code';
     if (status === 'IMPLEMENT') return mapping.IMPLEMENT || 'omp';
-    if (status === 'TESTING') return mapping.TESTING || 'test-runner';
+    if (status === 'TESTING') return mapping.TESTING || 'test-runner'; if (status === 'VERIFY') return mapping.VERIFY || 'verify-gate';
     if (status === 'FIXING') return mapping.FIXING || 'omp';
     if (status === 'DONE') {
       return job.runner || mapping.IMPLEMENT || mapping.PLANNING || 'claude-code';

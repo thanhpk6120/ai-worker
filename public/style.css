@@ -71,6 +71,12 @@ body {
   border-color: rgba(168, 85, 247, 0.4);
 }
 
+.status-verify {
+  background-color: rgba(34, 211, 238, 0.15);
+  color: #22d3ee;
+  border-color: rgba(34, 211, 238, 0.4);
+}
+
 .status-fixing {
   background-color: rgba(249, 115, 22, 0.15);
   color: #fb923c;

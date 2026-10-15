@@ -39,7 +39,7 @@ Nhiệm vụ của bạn là khảo sát codebase tại workspace và lập kế
          * `LOG_TRACE`: Chọn nếu task cần chạy lệnh test mã nguồn (ghi rõ lệnh test ví dụ `npm test`, `npx tsc`).
          * `API_TEST`: Chọn nếu task cần gọi API backend thực tế.
          * `DB_ASSERT`: Chọn nếu task có sửa đổi schema hoặc dữ liệu DB.
-       - Lưu ý: Hệ thống Worker sẽ đối soát chặt chẽ ở bước TESTING. Nếu `test_plan.md` đánh dấu kênh nào mà bước TESTING không có bằng chứng hợp lệ của kênh đó, task sẽ bị coi là FAILED và bắt buộc chuyển FIXING để làm lại!
+       - Lưu ý: Hệ thống Worker sẽ đối soát chặt chẽ ở bước VERIFY (sau TESTING). Nếu `test_plan.md` đánh dấu kênh nào mà bước VERIFY không tìm thấy bằng chứng hợp lệ của kênh đó, task sẽ bị coi là FAILED và bắt buộc chuyển FIXING để làm lại!
 5. Nếu phát hiện yêu cầu mơ hồ, mâu thuẫn hoặc cần quyết định lựa chọn quan trọng, hãy đặt câu hỏi làm rõ. BẠN PHẢI xuất một khối ```json:questions chứa một **mảng** các đối tượng câu hỏi, ví dụ: `[{"id":"q1", "question":"...", "context":"...", "options":["A", "B"]}, {"id":"q2",...}]`.
 6. Xác nhận cả 2 tệp `dev_plan.md` và `test_plan.md` đã có đầy đủ nội dung bên trong thư mục `{{FEATURE_DIR}}` trước khi hoàn tất phản hồi.
 ## 🔌 QUY TẮC DÙNG TOOL (MCP-FIRST, KHÔNG CẤM BROWSER):

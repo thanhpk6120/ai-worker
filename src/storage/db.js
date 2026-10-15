@@ -25,9 +25,9 @@ function initDb() {
 
   dbInstance = new DatabaseSync(config.DB_PATH);
 
-  // Kích hoạt WAL mode và foreign keys
-  dbInstance.exec('PRAGMA journal_mode = WAL;');
+  // Kích hoạt timeout chờ lock, WAL mode và foreign keys
   dbInstance.exec('PRAGMA busy_timeout = 10000;');
+  dbInstance.exec('PRAGMA journal_mode = WAL;');
   dbInstance.exec('PRAGMA foreign_keys = ON;');
 
   // Bảng jobs

@@ -600,12 +600,17 @@ app.post('/api/v1/workspaces/browse', (req, res) => {
  */
 app.get('/api/v1/settings', (req, res) => {
   try {
-    const agentMapping = db.getSetting('agent_mapping', {
+    const defaultMapping = {
       PLANNING: 'claude-code',
       IMPLEMENT: 'claude-code',
       TESTING: 'claude-code',
+      VERIFY: 'verify-gate',
       FIXING: 'claude-code'
-    });
+    };
+    const saved = db.getSetting('agent_mapping', defaultMapping);
+    const agentMapping = (typeof saved === 'object' && saved !== null)
+      ? { ...defaultMapping, ...saved }
+      : defaultMapping;
     return res.json({
       success: true,
       settings: {
@@ -1092,7 +1097,7 @@ app.put(['/api/v1/jobs/:id', '/api/v1/tasks/:id'], (req, res) => {
       return res.status(404).json({ success: false, error: `Task with ID '${id}' not found` });
     }
 
-    const runningStatuses = ['PLANNING', 'PENDING', 'IMPLEMENT', 'TESTING', 'FIXING'];
+    const runningStatuses = ['PLANNING', 'PENDING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING'];
     if (runningStatuses.includes((job.status || '').toUpperCase())) {
       return res.status(400).json({
         success: false,
@@ -1621,6 +1626,278 @@ app.post(['/api/v1/jobs/:id/evidence/files/:filename/status', '/api/v1/tasks/:id
 // path already declared at top
 const { exec } = require('child_process');
 
+// Đối soát evidence thực tế do Agent thu thập (dùng chung cho bước VERIFY độc lập).
+// Trả về { failed: boolean }. TUYỆT ĐỐI KHÔNG tự sinh dummy evidence thay Agent.
+const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) => {
+  let failed = false;
+        // Tự động lưu đầy đủ các kênh bằng chứng thực tế vào thư mục evidence của task
+        try {
+          if (!fs.existsSync(evidenceDir)) {
+            fs.mkdirSync(evidenceDir, { recursive: true });
+          }
+  
+          // =====================================================================
+          // ĐỐI SOÁT EVIDENCE THỰC TẾ DO AGENT TỰ THU THẬP & VERIFY
+          // TUYỆT ĐỐI KHÔNG TỰ SINH DUMMY DATA HOẶC TỰ CHỤP ẢNH MOCKUP THAY AGENT
+          // =====================================================================
+          const getValidEvidenceFiles = () => {
+            if (!fs.existsSync(evidenceDir)) return [];
+            return fs.readdirSync(evidenceDir).filter(f => {
+              if (f === 'metadata.json' || f.startsWith('.')) return false;
+              const fullP = path.join(evidenceDir, f);
+              try {
+                const stat = fs.statSync(fullP);
+                if (stat.size <= 10) return false; // File rỗng không coi là evidence
+                const ext = path.extname(f).toLowerCase();
+                if (ext === '.json') {
+                  const raw = fs.readFileSync(fullP, 'utf8').trim();
+                  if (!raw || raw === '{}' || raw === '[]' || raw === 'null') return false;
+                } else if (ext === '.log' || ext === '.txt') {
+                  const raw = fs.readFileSync(fullP, 'utf8').trim();
+                  if (!raw) return false;
+                }
+                return true;
+              } catch (e) {
+                return false;
+              }
+            });
+          };
+  
+          // 1. ĐỐI SOÁT CẤU HÌNH YÊU CẦU TRONG TEST_PLAN.MD
+          let testPlanText = '';
+          const testPlanPath = path.join(featureDir, 'test_plan.md');
+          if (fs.existsSync(testPlanPath)) {
+            try { testPlanText = fs.readFileSync(testPlanPath, 'utf8'); } catch (e) {}
+          }
+          const requiresUiScreenshot = /UI_SCREENSHOT/i.test(testPlanText)
+            || /Kịch Bản Kiểm Thử Giao Diện/i.test(testPlanText)
+            || /UI\/E2E/i.test(testPlanText);
+  
+          const validFiles = getValidEvidenceFiles();
+          let metadataObj = {};
+          const metaPath = path.join(evidenceDir, 'metadata.json');
+          if (fs.existsSync(metaPath)) {
+            try { metadataObj = JSON.parse(fs.readFileSync(metaPath, 'utf8')); } catch (e) {}
+          }
+  
+          // Kiểm tra xem có file ảnh UI thật không
+          const uiImageFiles = validFiles.filter(f => {
+            const ext = path.extname(f).toLowerCase();
+            return ['.png', '.jpg', '.jpeg', '.webp'].includes(ext);
+          });
+  
+          // 1. Nếu test_plan yêu cầu chụp ảnh UI mà Agent chưa chụp ảnh thật:
+          if (requiresUiScreenshot && uiImageFiles.length === 0) {
+            agentFailed = true;
+            jobEventBus.emitJobLog(id, {
+              text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: Task yêu cầu bằng chứng chụp ảnh UI (UI_SCREENSHOT) nhưng Agent chưa chụp ảnh giao diện thực tế của service hoặc ảnh bị rỗng.\n[TESTING-VERIFY] 🔄 Chuyển sang luồng FIXING để Agent khởi chạy service và chụp ảnh bằng chứng kiểm thử lại!\n`
+            });
+          }
+  
+          // 2. Thẩm định metadata BẮT BUỘC CHUNG CHO MỌI TASK: thiếu file, JSON hỏng/rỗng, PARTIAL lấp lửng đều FAIL
+          const metaExists = fs.existsSync(metaPath);
+          let metaRaw = '';
+          let metaParseError = false;
+          if (!metaExists) {
+            agentFailed = true;
+            jobEventBus.emitJobLog(id, {
+              text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: Thiếu file evidence/metadata.json bắt buộc. Agent phải tự verify từng evidence khớp test_plan.md và ghi metadata.json trung thực rồi mới được kết thúc TESTING.\n`
+            });
+          } else {
+            try { metaRaw = fs.readFileSync(metaPath, 'utf8').trim(); } catch (e) { metaRaw = ''; }
+            if (!metaRaw || metaRaw === '{}' || metaRaw === '[]' || metaRaw === 'null') {
+              agentFailed = true;
+              jobEventBus.emitJobLog(id, {
+                text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: metadata.json rỗng, không chứng minh được test case nào. Chuyển sang FIXING để chạy lại kiểm thử thật!\n`
+              });
+            } else {
+              try {
+                metadataObj = JSON.parse(metaRaw);
+              } catch (parseErr) {
+                metaParseError = true;
+                agentFailed = true;
+                jobEventBus.emitJobLog(id, {
+                  text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: metadata.json không phải JSON hợp lệ (${String(parseErr.message || parseErr).substring(0, 120)}). Agent phải ghi lại file JSON đúng schema rồi chạy verify lại!\n`
+                });
+              }
+            }
+          }
+          // Chỉ quét weasel words trong TRƯỜNG TRẠNG THÁI (status/verdict/result/conclusion),
+          // KHÔNG quét toàn văn báo cáo để tránh false positive khi văn mô tả nhắc từ như
+          // "trước đây lỗi Unknown Error / partial update / không dùng bypass".
+          const STATUS_WEASEL_RE = /partial|conditional|not\s*verified|skipped|bypass|unknown\s*error|chưa\s*chạy|chua\s*chay/i;
+          const STATUS_KEY_RE = /^(status|verdict|result|conclusion|trang\s*thai|ket\s*luan)$/i;
+          const collectStatusValues = (node, out) => {
+            const acc = out || [];
+            if (!node || typeof node !== 'object') return acc;
+            for (const [k, v] of Object.entries(node)) {
+              if (STATUS_KEY_RE.test(String(k).trim()) && typeof v === 'string') acc.push(v);
+              else if (v && typeof v === 'object') collectStatusValues(v, acc);
+            }
+            return acc;
+          };
+          const scanStatusWeasel = (node) => collectStatusValues(node).some(v => STATUS_WEASEL_RE.test(v));
+          if (!metaParseError && metaRaw) {
+            if (Array.isArray(metadataObj)) {
+              if (metadataObj.length === 0) {
+                agentFailed = true;
+                jobEventBus.emitJobLog(id, {
+                  text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: metadata.json là mảng rỗng, không chứng minh được test case nào!\n`
+                });
+              } else {
+                const hasFailedItem = metadataObj.some(item => item && (item.status === 'FAILED' || item.verdict === 'FAIL' || item.status === 'FAIL' || item.verdict === 'FAILED'));
+                if (hasFailedItem) {
+                  agentFailed = true;
+                  jobEventBus.emitJobLog(id, {
+                    text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: Phát hiện bằng chứng kiểm thử bị đánh dấu FAILED trong metadata.json. Chuyển sang FIXING để sửa lỗi!\n`
+                  });
+                }
+                if (scanStatusWeasel(metadataObj)) {
+                  agentFailed = true;
+                  jobEventBus.emitJobLog(id, {
+                    text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: metadata.json có trường status/verdict lấp lửng (PARTIAL/CONDITIONAL/NOT VERIFIED/SKIPPED/BYPASS/Unknown Error). Chỉ exit 0 khi 100% case đạt thật!\n`
+                  });
+                }
+              }
+            } else if (metadataObj && typeof metadataObj === 'object') {
+              const vals = Object.values(metadataObj);
+              const hasFailedItem = vals.some(item => item && (item.status === 'FAILED' || item.verdict === 'FAIL' || item.status === 'FAIL' || item.verdict === 'FAILED')) || metadataObj.status === 'FAILED' || metadataObj.verdict === 'FAIL' || metadataObj.verdict === 'FAILED';
+              if (hasFailedItem) {
+                agentFailed = true;
+                jobEventBus.emitJobLog(id, {
+                  text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: Phát hiện bằng chứng kiểm thử bị đánh dấu FAILED trong metadata.json. Chuyển sang FIXING để sửa lỗi!\n`
+                });
+              }
+              const testsArr = Array.isArray(metadataObj.tests) ? metadataObj.tests : [];
+              if (testsArr.length > 0) {
+                const badTest = testsArr.some(t => !t || !/^(PASSED|PASS)$/i.test(String((t.status || t.verdict || '')).trim()) || scanStatusWeasel(t));
+                if (badTest) {
+                  agentFailed = true;
+                  jobEventBus.emitJobLog(id, {
+                    text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: metadata.json có test case chưa PASSED thật (FAILED/PARTIAL/SKIPPED). Chỉ DONE khi 100% case PASSED!\n`
+                  });
+                }
+                // Mọi file evidence phải được khai báo trong metadata.json để chứng minh mapping với test case
+                const declared = new Set();
+                testsArr.forEach(t => { (t.evidence || t.evidences || t.files || []).forEach(f => declared.add(String(f))); });
+                const undeclared = validFiles.filter(f => f !== 'metadata.json' && ![...declared].some(d => d.includes(f) || f.includes(d)));
+                if (undeclared.length > 0) {
+                  agentFailed = true;
+                  jobEventBus.emitJobLog(id, {
+                    text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: File evidence chưa được khai trong metadata.json nên không chứng minh cho test case nào: ${undeclared.join(', ')}. Agent phải mapping mỗi file với đúng test case trong plan!\n`
+                  });
+                }
+              } else {
+                // Bắt buộc schema tests[] non-empty: metadata parse được nhưng không liệt kê case nào là FAIL
+                agentFailed = true;
+                jobEventBus.emitJobLog(id, {
+                  text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: metadata.json thiếu mảng tests[] non-empty theo schema bắt buộc (mỗi test case trong test_plan.md phải có 1 entry PASSED/FAILED với evidence mapping). Chuyển sang FIXING để bổ sung!\n`
+                });
+              }
+            }
+          }
+          // 2b. Chặn báo cáo lấp lửng: chỉ xét DÒNG TRẠNG THÁI và Ô BẢNG TRẠNG THÁI trong
+          // test_report.md/testcase.md/report.md, không quét toàn văn để tránh oan khi phần
+          // diễn giải nguyên nhân nhắc từ như "Unknown Error / partial update / bypass".
+          try {
+            const reportFiles = ['test_report.md', 'testcase.md', 'report.md'].map(f => path.join(featureDir, f)).filter(p => fs.existsSync(p));
+            const STATUS_LINE_RE = /^\s*(?:[-*]\s*)?(trạng thái|trang thai|status|verdict|result|kết luận|ket luan)\s*[:|：]/i;
+            const STATUS_CELL_RE = /^(PASSED|PASS|FAILED|FAIL|PARTIAL|CONDITIONAL(\s*PASS)?|NOT\s*VERIFIED|SKIPPED|BYPASS|UNKNOWN\s*ERROR)$/i;
+            for (const rp of reportFiles) {
+              const txt = fs.readFileSync(rp, 'utf8');
+              let hit = '';
+              for (const line of txt.split(/\r?\n/)) {
+                if (STATUS_LINE_RE.test(line) && STATUS_WEASEL_RE.test(line)) { hit = line.trim().substring(0, 160); break; }
+                if (line.includes('|')) {
+                  const cells = line.split('|').map(c => c.trim()).filter(c => c && !/^-+$/.test(c));
+                  if (cells.some(c => STATUS_CELL_RE.test(c) && STATUS_WEASEL_RE.test(c))) { hit = line.trim().substring(0, 160); break; }
+                }
+              }
+              if (hit) {
+                agentFailed = true;
+                jobEventBus.emitJobLog(id, {
+                  text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: ${path.basename(rp)} có trạng thái lấp lửng (PARTIAL/CONDITIONAL/NOT VERIFIED/SKIPPED): "${hit}". Bổ sung môi trường full-stack rồi chạy lại!\n`
+                });
+                break;
+              }
+            }
+          } catch (e) {}
+          // 2c. Chặn log rỗng giả: log chỉ có tên lệnh, stdout=(empty), không keyword test thật
+          try {
+            const logFiles = validFiles.filter(f => ['.log', '.txt'].includes(path.extname(f).toLowerCase()));
+            const LOG_KEY_RE = /browser|capture|screenshot|playwright|puppeteer|navigate|GET\s+\/api|POST\s+\/api|tsc|pytest|npm\s+test|mvn\s+test|go\s+test|passed|failed|assert|✓|✔|PASS/i;
+            for (const lf of logFiles) {
+              const raw = fs.readFileSync(path.join(evidenceDir, lf), 'utf8');
+              const trimmed = (raw || '').trim();
+              if (/stdout\s*=\s*\(empty\)/i.test(trimmed) || /\(empty\)/i.test(trimmed) && trimmed.length < 1024 || (trimmed.length < 200 && !LOG_KEY_RE.test(trimmed))) {
+                agentFailed = true;
+                jobEventBus.emitJobLog(id, {
+                  text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: ${lf} rỗng giả (stdout empty, thiếu output/keyword test thật). Agent phải chạy lại lệnh test thật và lưu log đầy đủ!\n`
+                });
+                break;
+              }
+            }
+          } catch (e) {}
+          // 2d. Ảnh UI bắt buộc có kích thước tối thiểu để loại ảnh trắng/placeholder 1x1
+          try {
+            for (const img of uiImageFiles) {
+              const st = fs.statSync(path.join(evidenceDir, img));
+              if (st.size < 5120) {
+                agentFailed = true;
+                jobEventBus.emitJobLog(id, {
+                  text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: ${img} quá nhỏ (${st.size} bytes), nghi là ảnh trắng/placeholder. Agent phải chụp lại giao diện thật có dữ liệu!\n`
+                });
+                break;
+              }
+            }
+          } catch (e) {}
+          // 2e. Chặn ảnh UI trùng lặp nội dung (cùng MD5): 2 PNG giống hệt nhau không chứng minh được 2 case khác nhau
+          try {
+            const seen = new Map();
+            for (const img of uiImageFiles) {
+              const buf = fs.readFileSync(path.join(evidenceDir, img));
+              const md5 = crypto.createHash('md5').update(buf).digest('hex');
+              if (seen.has(md5)) {
+                agentFailed = true;
+                jobEventBus.emitJobLog(id, {
+                  text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: ${img} trùng nội dung (MD5 ${md5}) với ${seen.get(md5)} — không chứng minh được test case riêng biệt. Agent phải chụp lại từng kịch bản thật!\n`
+                });
+                break;
+              }
+              seen.set(md5, img);
+            }
+          } catch (e) {}
+          // 2f. Đối chiếu số lượng test case trong test_plan.md với metadata.json tests[]
+          try {
+            const expectedIds = new Set((testPlanText.match(/TC-[A-ZÀ-Ỹ]+-\d+/gi) || []).map(s => s.toUpperCase()));
+            const testsArr2 = (!metaParseError && metadataObj && !Array.isArray(metadataObj) && Array.isArray(metadataObj.tests)) ? metadataObj.tests : [];
+            if (expectedIds.size > 0 && testsArr2.length > 0) {
+              const declaredIds = new Set(testsArr2.map(t => String(t.id || t.test_id || t.case_id || t.caseId || '')).map(s => s.toUpperCase()).filter(Boolean));
+              const missing = [...expectedIds].filter(x => !declaredIds.has(x));
+              if (missing.length > 0) {
+                agentFailed = true;
+                jobEventBus.emitJobLog(id, {
+                  text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: metadata.json thiếu ${missing.length} test case trong test_plan.md: ${missing.slice(0, 10).join(', ')}${missing.length > 10 ? ', ...' : ''}. Agent phải chạy và khai đủ mọi case!\n`
+                });
+              }
+            }
+          } catch (e) {}
+  
+          // 3. Nếu không có bất kỳ bằng chứng hợp lệ nào:
+          if (validFiles.length === 0) {
+            agentFailed = true;
+            jobEventBus.emitJobLog(id, {
+              text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: Không phát hiện bất kỳ file bằng chứng kiểm thử hợp lệ nào (hoặc dữ liệu rỗng).\n[TESTING-VERIFY] 🔄 Chuyển sang luồng FIXING để thực thi và ghi nhận bằng chứng kiểm thử xác thực!\n`
+            });
+          }
+          // TUYỆT ĐỐI KHÔNG tự động mock/sinh file evidence thay cho Agent.
+          // Nếu Agent thiếu evidence hoặc verify thất bại -> agentFailed = true để chuyển FIXING!
+        } catch (evWriteErr) {
+          console.warn('Ghi bằng chứng cảnh báo:', evWriteErr.message);
+        }
+  return { failed };
+};
+
 const executeStep = async (id) => {
   const job = db.getJobById(id);
   if (!job || job.status === 'CANCELLED') return;
@@ -1633,7 +1910,7 @@ const executeStep = async (id) => {
     if (ws && ws.features_dir) wsFeaturesDir = ws.features_dir;
   } catch (e) {}
   const { dir: featureDir, evidenceDir } = fileManager.ensureFeatureDirectory(workspacePath, taskCode, { allowExisting: true, featuresDir: wsFeaturesDir });
-  let agentMapping = { PLANNING: 'claude-code', IMPLEMENT: 'claude-code', TESTING: 'claude-code', FIXING: 'claude-code' };
+  let agentMapping = { PLANNING: 'claude-code', IMPLEMENT: 'claude-code', TESTING: 'claude-code', VERIFY: 'verify-gate', FIXING: 'claude-code' };
   try {
     if (typeof db.getSetting === 'function') {
       const rawMapping = db.getSetting('agent_mapping', agentMapping);
@@ -1659,7 +1936,7 @@ const executeStep = async (id) => {
         step: 'planning', taskCode, userPrompt: (job.prompt || '') + clarificationContext, workspacePath, featureDir,
         previousContext: fileManager.loadPreviousContext(workspacePath, taskCode, 'planning')
       });
-      jobEventBus.emitJobLog(id, { text: `\n[1/4] >>> 🤖 [PLANNING] Kích hoạt lập kế hoạch song song (Dual Planning) với Agent: ${planningAgent}\n[PLANNING] Nạp template prompt planning.md...\n[PLANNING] Agent đang phân tích mã nguồn và thiết lập Kế hoạch (Vui lòng đợi khoảng 15-30 giây)...\n` });
+      jobEventBus.emitJobLog(id, { text: `\n[1/5] >>> 🤖 [PLANNING] Kích hoạt lập kế hoạch song song (Dual Planning) với Agent: ${planningAgent}\n[PLANNING] Nạp template prompt planning.md...\n[PLANNING] Agent đang phân tích mã nguồn và thiết lập Kế hoạch (Vui lòng đợi khoảng 15-30 giây)...\n` });
       const planStartTime = Date.now();
       const planProgressTimer = setInterval(() => {
         const cur = db.getJobById(id);
@@ -1791,7 +2068,7 @@ const executeStep = async (id) => {
 
       if (isReadOnlyOrVerification) {
         jobEventBus.emitJobLog(id, {
-          text: `\n[2/4] >>> 🤖 [IMPLEMENT] Phân tích Dev Plan xác nhận: Task thuộc diện Thẩm định / Vận hành / Không phát sinh can thiệp mã nguồn.\n[IMPLEMENT] Đã hoàn tất thẩm định phạm vi. Tự động chuyển tiếp trực tiếp sang bước [TESTING] để kiểm tra thực tế!\n`
+          text: `\n[2/5] >>> 🤖 [IMPLEMENT] Phân tích Dev Plan xác nhận: Task thuộc diện Thẩm định / Vận hành / Không phát sinh can thiệp mã nguồn.\n[IMPLEMENT] Đã hoàn tất thẩm định phạm vi. Tự động chuyển tiếp trực tiếp sang bước [TESTING] để kiểm tra thực tế!\n`
         });
         const testAgent = agentMapping.TESTING || 'test-runner';
         db.updateJob(id, { status: 'TESTING', current_step: 'TESTING', runner: testAgent });
@@ -1869,7 +2146,7 @@ const executeStep = async (id) => {
         errorLogs: ''
       });
       db.updateJob(id, { runner: testAgent });
-      jobEventBus.emitJobLog(id, { text: `\n[3/4] >>> 🤖 [TESTING] Bắt đầu kiểm thử thật với Runner/Agent: ${testAgent}...\n` });
+      jobEventBus.emitJobLog(id, { text: `\n[3/5] >>> 🤖 [TESTING] Bắt đầu kiểm thử thật với Runner/Agent: ${testAgent}...\n` });
 
       const testProgressTimer = setInterval(() => {
         const cur = db.getJobById(id);
@@ -1924,299 +2201,51 @@ const executeStep = async (id) => {
         if (checkAfterTest && checkAfterTest.status === 'CANCELLED') return;
       }
 
-      // Tự động lưu đầy đủ các kênh bằng chứng thực tế vào thư mục evidence của task
-      try {
-        if (!fs.existsSync(evidenceDir)) {
-          fs.mkdirSync(evidenceDir, { recursive: true });
-        }
-
-        // =====================================================================
-        // ĐỐI SOÁT EVIDENCE THỰC TẾ DO AGENT TỰ THU THẬP & VERIFY
-        // TUYỆT ĐỐI KHÔNG TỰ SINH DUMMY DATA HOẶC TỰ CHỤP ẢNH MOCKUP THAY AGENT
-        // =====================================================================
-        const getValidEvidenceFiles = () => {
-          if (!fs.existsSync(evidenceDir)) return [];
-          return fs.readdirSync(evidenceDir).filter(f => {
-            if (f === 'metadata.json' || f.startsWith('.')) return false;
-            const fullP = path.join(evidenceDir, f);
-            try {
-              const stat = fs.statSync(fullP);
-              if (stat.size <= 10) return false; // File rỗng không coi là evidence
-              const ext = path.extname(f).toLowerCase();
-              if (ext === '.json') {
-                const raw = fs.readFileSync(fullP, 'utf8').trim();
-                if (!raw || raw === '{}' || raw === '[]' || raw === 'null') return false;
-              } else if (ext === '.log' || ext === '.txt') {
-                const raw = fs.readFileSync(fullP, 'utf8').trim();
-                if (!raw) return false;
-              }
-              return true;
-            } catch (e) {
-              return false;
-            }
-          });
-        };
-
-        // 1. ĐỐI SOÁT CẤU HÌNH YÊU CẦU TRONG TEST_PLAN.MD
-        let testPlanText = '';
-        const testPlanPath = path.join(featureDir, 'test_plan.md');
-        if (fs.existsSync(testPlanPath)) {
-          try { testPlanText = fs.readFileSync(testPlanPath, 'utf8'); } catch (e) {}
-        }
-        const requiresUiScreenshot = /UI_SCREENSHOT/i.test(testPlanText)
-          || /Kịch Bản Kiểm Thử Giao Diện/i.test(testPlanText)
-          || /UI\/E2E/i.test(testPlanText);
-
-        const validFiles = getValidEvidenceFiles();
-        let metadataObj = {};
-        const metaPath = path.join(evidenceDir, 'metadata.json');
-        if (fs.existsSync(metaPath)) {
-          try { metadataObj = JSON.parse(fs.readFileSync(metaPath, 'utf8')); } catch (e) {}
-        }
-
-        // Kiểm tra xem có file ảnh UI thật không
-        const uiImageFiles = validFiles.filter(f => {
-          const ext = path.extname(f).toLowerCase();
-          return ['.png', '.jpg', '.jpeg', '.webp'].includes(ext);
-        });
-
-        // 1. Nếu test_plan yêu cầu chụp ảnh UI mà Agent chưa chụp ảnh thật:
-        if (requiresUiScreenshot && uiImageFiles.length === 0) {
-          agentFailed = true;
-          jobEventBus.emitJobLog(id, {
-            text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: Task yêu cầu bằng chứng chụp ảnh UI (UI_SCREENSHOT) nhưng Agent chưa chụp ảnh giao diện thực tế của service hoặc ảnh bị rỗng.\n[TESTING-VERIFY] 🔄 Chuyển sang luồng FIXING để Agent khởi chạy service và chụp ảnh bằng chứng kiểm thử lại!\n`
-          });
-        }
-
-        // 2. Thẩm định metadata BẮT BUỘC CHUNG CHO MỌI TASK: thiếu file, JSON hỏng/rỗng, PARTIAL lấp lửng đều FAIL
-        const metaExists = fs.existsSync(metaPath);
-        let metaRaw = '';
-        let metaParseError = false;
-        if (!metaExists) {
-          agentFailed = true;
-          jobEventBus.emitJobLog(id, {
-            text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: Thiếu file evidence/metadata.json bắt buộc. Agent phải tự verify từng evidence khớp test_plan.md và ghi metadata.json trung thực rồi mới được kết thúc TESTING.\n`
-          });
-        } else {
-          try { metaRaw = fs.readFileSync(metaPath, 'utf8').trim(); } catch (e) { metaRaw = ''; }
-          if (!metaRaw || metaRaw === '{}' || metaRaw === '[]' || metaRaw === 'null') {
-            agentFailed = true;
-            jobEventBus.emitJobLog(id, {
-              text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: metadata.json rỗng, không chứng minh được test case nào. Chuyển sang FIXING để chạy lại kiểm thử thật!\n`
-            });
-          } else {
-            try {
-              metadataObj = JSON.parse(metaRaw);
-            } catch (parseErr) {
-              metaParseError = true;
-              agentFailed = true;
-              jobEventBus.emitJobLog(id, {
-                text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: metadata.json không phải JSON hợp lệ (${String(parseErr.message || parseErr).substring(0, 120)}). Agent phải ghi lại file JSON đúng schema rồi chạy verify lại!\n`
-              });
-            }
-          }
-        }
-        // Chỉ quét weasel words trong TRƯỜNG TRẠNG THÁI (status/verdict/result/conclusion),
-        // KHÔNG quét toàn văn báo cáo để tránh false positive khi văn mô tả nhắc từ như
-        // "trước đây lỗi Unknown Error / partial update / không dùng bypass".
-        const STATUS_WEASEL_RE = /partial|conditional|not\s*verified|skipped|bypass|unknown\s*error|chưa\s*chạy|chua\s*chay/i;
-        const STATUS_KEY_RE = /^(status|verdict|result|conclusion|trang\s*thai|ket\s*luan)$/i;
-        const collectStatusValues = (node, out) => {
-          const acc = out || [];
-          if (!node || typeof node !== 'object') return acc;
-          for (const [k, v] of Object.entries(node)) {
-            if (STATUS_KEY_RE.test(String(k).trim()) && typeof v === 'string') acc.push(v);
-            else if (v && typeof v === 'object') collectStatusValues(v, acc);
-          }
-          return acc;
-        };
-        const scanStatusWeasel = (node) => collectStatusValues(node).some(v => STATUS_WEASEL_RE.test(v));
-        if (!metaParseError && metaRaw) {
-          if (Array.isArray(metadataObj)) {
-            if (metadataObj.length === 0) {
-              agentFailed = true;
-              jobEventBus.emitJobLog(id, {
-                text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: metadata.json là mảng rỗng, không chứng minh được test case nào!\n`
-              });
-            } else {
-              const hasFailedItem = metadataObj.some(item => item && (item.status === 'FAILED' || item.verdict === 'FAIL' || item.status === 'FAIL' || item.verdict === 'FAILED'));
-              if (hasFailedItem) {
-                agentFailed = true;
-                jobEventBus.emitJobLog(id, {
-                  text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: Phát hiện bằng chứng kiểm thử bị đánh dấu FAILED trong metadata.json. Chuyển sang FIXING để sửa lỗi!\n`
-                });
-              }
-              if (scanStatusWeasel(metadataObj)) {
-                agentFailed = true;
-                jobEventBus.emitJobLog(id, {
-                  text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: metadata.json có trường status/verdict lấp lửng (PARTIAL/CONDITIONAL/NOT VERIFIED/SKIPPED/BYPASS/Unknown Error). Chỉ exit 0 khi 100% case đạt thật!\n`
-                });
-              }
-            }
-          } else if (metadataObj && typeof metadataObj === 'object') {
-            const vals = Object.values(metadataObj);
-            const hasFailedItem = vals.some(item => item && (item.status === 'FAILED' || item.verdict === 'FAIL' || item.status === 'FAIL' || item.verdict === 'FAILED')) || metadataObj.status === 'FAILED' || metadataObj.verdict === 'FAIL' || metadataObj.verdict === 'FAILED';
-            if (hasFailedItem) {
-              agentFailed = true;
-              jobEventBus.emitJobLog(id, {
-                text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: Phát hiện bằng chứng kiểm thử bị đánh dấu FAILED trong metadata.json. Chuyển sang FIXING để sửa lỗi!\n`
-              });
-            }
-            const testsArr = Array.isArray(metadataObj.tests) ? metadataObj.tests : [];
-            if (testsArr.length > 0) {
-              const badTest = testsArr.some(t => !t || !/^(PASSED|PASS)$/i.test(String((t.status || t.verdict || '')).trim()) || scanStatusWeasel(t));
-              if (badTest) {
-                agentFailed = true;
-                jobEventBus.emitJobLog(id, {
-                  text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: metadata.json có test case chưa PASSED thật (FAILED/PARTIAL/SKIPPED). Chỉ DONE khi 100% case PASSED!\n`
-                });
-              }
-              // Mọi file evidence phải được khai báo trong metadata.json để chứng minh mapping với test case
-              const declared = new Set();
-              testsArr.forEach(t => { (t.evidence || t.evidences || t.files || []).forEach(f => declared.add(String(f))); });
-              const undeclared = validFiles.filter(f => f !== 'metadata.json' && ![...declared].some(d => d.includes(f) || f.includes(d)));
-              if (undeclared.length > 0) {
-                agentFailed = true;
-                jobEventBus.emitJobLog(id, {
-                  text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: File evidence chưa được khai trong metadata.json nên không chứng minh cho test case nào: ${undeclared.join(', ')}. Agent phải mapping mỗi file với đúng test case trong plan!\n`
-                });
-              }
-            } else {
-              // Bắt buộc schema tests[] non-empty: metadata parse được nhưng không liệt kê case nào là FAIL
-              agentFailed = true;
-              jobEventBus.emitJobLog(id, {
-                text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: metadata.json thiếu mảng tests[] non-empty theo schema bắt buộc (mỗi test case trong test_plan.md phải có 1 entry PASSED/FAILED với evidence mapping). Chuyển sang FIXING để bổ sung!\n`
-              });
-            }
-          }
-        }
-        // 2b. Chặn báo cáo lấp lửng: chỉ xét DÒNG TRẠNG THÁI và Ô BẢNG TRẠNG THÁI trong
-        // test_report.md/testcase.md/report.md, không quét toàn văn để tránh oan khi phần
-        // diễn giải nguyên nhân nhắc từ như "Unknown Error / partial update / bypass".
-        try {
-          const reportFiles = ['test_report.md', 'testcase.md', 'report.md'].map(f => path.join(featureDir, f)).filter(p => fs.existsSync(p));
-          const STATUS_LINE_RE = /^\s*(?:[-*]\s*)?(trạng thái|trang thai|status|verdict|result|kết luận|ket luan)\s*[:|：]/i;
-          const STATUS_CELL_RE = /^(PASSED|PASS|FAILED|FAIL|PARTIAL|CONDITIONAL(\s*PASS)?|NOT\s*VERIFIED|SKIPPED|BYPASS|UNKNOWN\s*ERROR)$/i;
-          for (const rp of reportFiles) {
-            const txt = fs.readFileSync(rp, 'utf8');
-            let hit = '';
-            for (const line of txt.split(/\r?\n/)) {
-              if (STATUS_LINE_RE.test(line) && STATUS_WEASEL_RE.test(line)) { hit = line.trim().substring(0, 160); break; }
-              if (line.includes('|')) {
-                const cells = line.split('|').map(c => c.trim()).filter(c => c && !/^-+$/.test(c));
-                if (cells.some(c => STATUS_CELL_RE.test(c) && STATUS_WEASEL_RE.test(c))) { hit = line.trim().substring(0, 160); break; }
-              }
-            }
-            if (hit) {
-              agentFailed = true;
-              jobEventBus.emitJobLog(id, {
-                text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: ${path.basename(rp)} có trạng thái lấp lửng (PARTIAL/CONDITIONAL/NOT VERIFIED/SKIPPED): "${hit}". Bổ sung môi trường full-stack rồi chạy lại!\n`
-              });
-              break;
-            }
-          }
-        } catch (e) {}
-        // 2c. Chặn log rỗng giả: log chỉ có tên lệnh, stdout=(empty), không keyword test thật
-        try {
-          const logFiles = validFiles.filter(f => ['.log', '.txt'].includes(path.extname(f).toLowerCase()));
-          const LOG_KEY_RE = /browser|capture|screenshot|playwright|puppeteer|navigate|GET\s+\/api|POST\s+\/api|tsc|pytest|npm\s+test|mvn\s+test|go\s+test|passed|failed|assert|✓|✔|PASS/i;
-          for (const lf of logFiles) {
-            const raw = fs.readFileSync(path.join(evidenceDir, lf), 'utf8');
-            const trimmed = (raw || '').trim();
-            if (/stdout\s*=\s*\(empty\)/i.test(trimmed) || /\(empty\)/i.test(trimmed) && trimmed.length < 1024 || (trimmed.length < 200 && !LOG_KEY_RE.test(trimmed))) {
-              agentFailed = true;
-              jobEventBus.emitJobLog(id, {
-                text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: ${lf} rỗng giả (stdout empty, thiếu output/keyword test thật). Agent phải chạy lại lệnh test thật và lưu log đầy đủ!\n`
-              });
-              break;
-            }
-          }
-        } catch (e) {}
-        // 2d. Ảnh UI bắt buộc có kích thước tối thiểu để loại ảnh trắng/placeholder 1x1
-        try {
-          for (const img of uiImageFiles) {
-            const st = fs.statSync(path.join(evidenceDir, img));
-            if (st.size < 5120) {
-              agentFailed = true;
-              jobEventBus.emitJobLog(id, {
-                text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: ${img} quá nhỏ (${st.size} bytes), nghi là ảnh trắng/placeholder. Agent phải chụp lại giao diện thật có dữ liệu!\n`
-              });
-              break;
-            }
-          }
-        } catch (e) {}
-        // 2e. Chặn ảnh UI trùng lặp nội dung (cùng MD5): 2 PNG giống hệt nhau không chứng minh được 2 case khác nhau
-        try {
-          const seen = new Map();
-          for (const img of uiImageFiles) {
-            const buf = fs.readFileSync(path.join(evidenceDir, img));
-            const md5 = crypto.createHash('md5').update(buf).digest('hex');
-            if (seen.has(md5)) {
-              agentFailed = true;
-              jobEventBus.emitJobLog(id, {
-                text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: ${img} trùng nội dung (MD5 ${md5}) với ${seen.get(md5)} — không chứng minh được test case riêng biệt. Agent phải chụp lại từng kịch bản thật!\n`
-              });
-              break;
-            }
-            seen.set(md5, img);
-          }
-        } catch (e) {}
-        // 2f. Đối chiếu số lượng test case trong test_plan.md với metadata.json tests[]
-        try {
-          const expectedIds = new Set((testPlanText.match(/TC-[A-ZÀ-Ỹ]+-\d+/gi) || []).map(s => s.toUpperCase()));
-          const testsArr2 = (!metaParseError && metadataObj && !Array.isArray(metadataObj) && Array.isArray(metadataObj.tests)) ? metadataObj.tests : [];
-          if (expectedIds.size > 0 && testsArr2.length > 0) {
-            const declaredIds = new Set(testsArr2.map(t => String(t.id || t.test_id || t.case_id || t.caseId || '')).map(s => s.toUpperCase()).filter(Boolean));
-            const missing = [...expectedIds].filter(x => !declaredIds.has(x));
-            if (missing.length > 0) {
-              agentFailed = true;
-              jobEventBus.emitJobLog(id, {
-                text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: metadata.json thiếu ${missing.length} test case trong test_plan.md: ${missing.slice(0, 10).join(', ')}${missing.length > 10 ? ', ...' : ''}. Agent phải chạy và khai đủ mọi case!\n`
-              });
-            }
-          }
-        } catch (e) {}
-
-        // 3. Nếu không có bất kỳ bằng chứng hợp lệ nào:
-        if (validFiles.length === 0) {
-          agentFailed = true;
-          jobEventBus.emitJobLog(id, {
-            text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: Không phát hiện bất kỳ file bằng chứng kiểm thử hợp lệ nào (hoặc dữ liệu rỗng).\n[TESTING-VERIFY] 🔄 Chuyển sang luồng FIXING để thực thi và ghi nhận bằng chứng kiểm thử xác thực!\n`
-          });
-        }
-        // TUYỆT ĐỐI KHÔNG tự động mock/sinh file evidence thay cho Agent.
-        // Nếu Agent thiếu evidence hoặc verify thất bại -> agentFailed = true để chuyển FIXING!
-      } catch (evWriteErr) {
-        console.warn('Ghi bằng chứng cảnh báo:', evWriteErr.message);
-      }
-
-      // Nếu có lỗi -> Chuyển sang FIXING
+      // TESTING chỉ chạy agent kiểm thử; đối soát evidence dời sang bước VERIFY độc lập.
       if (agentFailed) {
+        // Agent lỗi ngay (timeout/exit!=0/thiếu runner): vẫn đi qua VERIFY để ghi nhận đầy đủ.
+        jobEventBus.emitJobLog(id, { text: `\n[TESTING] Agent kiểm thử báo lỗi, chuyển sang [VERIFY] để đối soát evidence...\n` });
+      } else {
+        jobEventBus.emitJobLog(id, { text: `\n[TESTING] Hoàn tất kiểm thử qua Agent, chuyển sang [VERIFY] để đối soát evidence...\n` });
+      }
+      const verifyAgent = 'verify-gate';
+      db.updateJob(id, { status: 'VERIFY', current_step: 'VERIFY', runner: verifyAgent });
+      jobEventBus.emitJobStatus(id, { status: 'VERIFY', runner: verifyAgent });
+      jobEventBus.emitJobLog(id, { text: `\n[3/5] >>> 🔍 [VERIFY] Bắt đầu đối soát evidence thực tế trong ${evidenceDir}...\n` });
+      setTimeout(() => executeStep(id), 100);
+      return;
+    }
+
+    if (job.status === 'VERIFY') {
+      const checkVerify = db.getJobById(id);
+      if (checkVerify && checkVerify.status === 'CANCELLED') return;
+      const { failed: verifyFailed } = verifyTaskEvidence({
+        jobId: id, evidenceDir, featureDir, taskCode,
+        emit: (text) => jobEventBus.emitJobLog(id, { text })
+      });
+      if (verifyFailed) {
         const fixAgent = agentMapping.FIXING || 'claude-code';
-        const failOutput = testingResult?.output || (testingResult?.timedOut ? 'Kiểm thử vượt quá thời gian (timeout)' : 'Kiểm thử thất bại');
-        const failGate = { passed: false, error: String(failOutput).substring(0, 300), timeout: Boolean(testingResult?.timedOut) || /timeout|timed\s*out|etimedout/i.test(String(failOutput)), decided_at: new Date().toISOString(), mapped_from: 'TESTING', source: 'pipeline-testing-verify' };
-        jobEventBus.emitJobLog(id, { text: `\n[TESTING] Kiểm thử phát hiện lỗi. Chuyển sang FIXING với 🤖 Agent: ${fixAgent}.\n` });
-        db.updateJob(id, { status: 'FIXING', current_step: 'FIXING', runner: fixAgent, error_message: 'Kiểm thử thất bại.\n' + failOutput.substring(0, 300), gate_result: failGate });
+        const failGate = { passed: false, error: 'Đối soát evidence thất bại (VERIFY)', timeout: false, decided_at: new Date().toISOString(), mapped_from: 'VERIFY', source: 'pipeline-verify-evidence' };
+        jobEventBus.emitJobLog(id, { text: `\n[VERIFY] ❌ Đối soát evidence thất bại. Chuyển sang FIXING với 🤖 Agent: ${fixAgent}.\n` });
+        db.updateJob(id, { status: 'FIXING', current_step: 'FIXING', runner: fixAgent, error_message: 'Đối soát evidence thất bại (VERIFY).', gate_result: failGate });
         jobEventBus.emitJobStatus(id, { status: 'FIXING', runner: fixAgent });
         setTimeout(() => executeStep(id), 100);
         return;
       }
-
       // Lưu path gọn nhẹ vào SQLite DB (chỉ lưu đường dẫn, KHÔNG lưu payload lớn)
       const relEvidencePath = `docs/features/${taskCode}/evidence`;
       const dbEv = db.addEvidence({
         job_id: id,
-        type: 'TEST_EVIDENCE',
+        type: 'VERIFY_EVIDENCE',
         verdict: 'PASS',
         data: { path: relEvidencePath, taskCode }
       });
       jobEventBus.emitJobEvidence(id, { evidence: dbEv });
-      jobEventBus.emitJobLog(id, { text: `\n[TESTING] ✅ Đã xác thực bằng chứng kiểm thử thành công trong ${relEvidencePath}!\n` });
-
+      jobEventBus.emitJobLog(id, { text: `\n[VERIFY] ✅ Đã đối soát bằng chứng thành công trong ${relEvidencePath}!\n` });
       const currentRunner = job.runner || (agentMapping.IMPLEMENT || 'claude-code');
-      db.updateJob(id, { status: 'DONE', current_step: 'COMPLETED', runner: currentRunner, completed_at: new Date().toISOString(), error_message: null, gate_result: { passed: true, error: null, timeout: false, decided_at: new Date().toISOString(), mapped_from: 'DONE', source: 'pipeline-testing-verify' } });
-      jobEventBus.emitJobDone(id, { status: 'DONE', runner: currentRunner, message: `Task ${taskCode} đã hoàn thành kiểm thử.` });
-      jobEventBus.emitJobLog(id, { text: `\n================================================================================\n[4/4] >>> 🏆 [DONE] Nhiệm vụ ${taskCode} ĐÃ HOÀN THÀNH TOÀN DIỆN VÀ NGHIỆM THU THÀNH CÔNG!\n================================================================================\n` });
+      db.updateJob(id, { status: 'DONE', current_step: 'COMPLETED', runner: currentRunner, completed_at: new Date().toISOString(), error_message: null, gate_result: { passed: true, error: null, timeout: false, decided_at: new Date().toISOString(), mapped_from: 'VERIFY', source: 'pipeline-verify-evidence' } });
+      jobEventBus.emitJobDone(id, { status: 'DONE', runner: currentRunner, message: `Task ${taskCode} đã hoàn thành đối soát evidence.` });
+      jobEventBus.emitJobLog(id, { text: `\n================================================================================\n[5/5] >>> 🏆 [DONE] Nhiệm vụ ${taskCode} ĐÃ HOÀN THÀNH TOÀN DIỆN VÀ NGHIỆM THU THÀNH CÔNG!\n================================================================================\n` });
       return;
     }
 
@@ -2764,7 +2793,7 @@ function handleJobStatus(req, res) {
     
     // Nếu status là trạng thái cần chạy thì đi qua TaskQueue để tôn trọng Workspace Lock.
     // Không gọi executeStep trực tiếp để tránh 2 job cùng workspace chạy đè nhau.
-    if (['PLANNING', 'IMPLEMENT', 'TESTING', 'FIXING'].includes((gate.finalStatus || '').toUpperCase())) {
+    if (['PLANNING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING'].includes((gate.finalStatus || '').toUpperCase())) {
       if (!taskQueue.isJobEnqueuedOrRunning(targetId)) {
         const freshJob = db.getJobById(targetId) || updatedJob || job;
         const probeJob = freshJob || job;

@@ -16,6 +16,7 @@ describe('StateMachine Test Suite', () => {
       assert.strictEqual(JOB_STATUSES.PLANNING, 'PLANNING');
       assert.strictEqual(JOB_STATUSES.IMPLEMENT, 'IMPLEMENT');
       assert.strictEqual(JOB_STATUSES.TESTING, 'TESTING');
+      assert.strictEqual(JOB_STATUSES.VERIFY, 'VERIFY');
       assert.strictEqual(JOB_STATUSES.FIXING, 'FIXING');
       assert.strictEqual(JOB_STATUSES.DONE, 'DONE');
       assert.strictEqual(JOB_STATUSES.PENDING, 'PENDING');
@@ -34,16 +35,18 @@ describe('StateMachine Test Suite', () => {
   });
 
   describe('Valid Lifecycle Transitions', () => {
-    it('chuyển đổi tuần tự hợp lệ qua chu trình: TO DO -> PLANNING -> PENDING -> PLANNING -> IMPLEMENT -> TESTING -> FIXING -> TESTING -> DONE', () => {
+    it('chuyển đổi tuần tự hợp lệ qua chu trình: TO DO -> PLANNING -> PENDING -> PLANNING -> IMPLEMENT -> TESTING -> VERIFY -> FIXING -> TESTING -> VERIFY -> DONE', () => {
       const lifecycle = [
         [JOB_STATUSES.TO_DO, JOB_STATUSES.PLANNING],
         [JOB_STATUSES.PLANNING, JOB_STATUSES.PENDING],
         [JOB_STATUSES.PENDING, JOB_STATUSES.PLANNING],
         [JOB_STATUSES.PLANNING, JOB_STATUSES.IMPLEMENT],
         [JOB_STATUSES.IMPLEMENT, JOB_STATUSES.TESTING],
-        [JOB_STATUSES.TESTING, JOB_STATUSES.FIXING],
+        [JOB_STATUSES.TESTING, JOB_STATUSES.VERIFY],
+        [JOB_STATUSES.VERIFY, JOB_STATUSES.FIXING],
         [JOB_STATUSES.FIXING, JOB_STATUSES.TESTING],
-        [JOB_STATUSES.TESTING, JOB_STATUSES.DONE]
+        [JOB_STATUSES.TESTING, JOB_STATUSES.VERIFY],
+        [JOB_STATUSES.VERIFY, JOB_STATUSES.DONE]
       ];
 
       for (const [from, to] of lifecycle) {
@@ -65,6 +68,7 @@ describe('StateMachine Test Suite', () => {
         JOB_STATUSES.PLANNING,
         JOB_STATUSES.IMPLEMENT,
         JOB_STATUSES.TESTING,
+        JOB_STATUSES.VERIFY,
         JOB_STATUSES.FIXING
       ];
 
@@ -78,6 +82,7 @@ describe('StateMachine Test Suite', () => {
         JOB_STATUSES.PENDING,
         JOB_STATUSES.IMPLEMENT,
         JOB_STATUSES.TESTING,
+        JOB_STATUSES.VERIFY,
         JOB_STATUSES.FIXING
       ];
 
@@ -117,6 +122,22 @@ describe('StateMachine Test Suite', () => {
       assert.strictEqual(canTransition(JOB_STATUSES.TESTING, JOB_STATUSES.PLANNING), false);
       assert.throws(
         () => validateTransition(JOB_STATUSES.TESTING, JOB_STATUSES.PLANNING),
+        /Chuyển trạng thái không hợp lệ/
+      );
+    });
+
+    it('chặn TESTING nhảy thẳng DONE (bắt buộc qua VERIFY đối soát evidence)', () => {
+      assert.strictEqual(canTransition(JOB_STATUSES.TESTING, JOB_STATUSES.DONE), false);
+      assert.throws(
+        () => validateTransition(JOB_STATUSES.TESTING, JOB_STATUSES.DONE),
+        /Chuyển trạng thái không hợp lệ/
+      );
+    });
+
+    it('chặn FIXING nhảy thẳng DONE (bắt buộc quay lại TESTING rồi VERIFY)', () => {
+      assert.strictEqual(canTransition(JOB_STATUSES.FIXING, JOB_STATUSES.DONE), false);
+      assert.throws(
+        () => validateTransition(JOB_STATUSES.FIXING, JOB_STATUSES.DONE),
         /Chuyển trạng thái không hợp lệ/
       );
     });
@@ -200,7 +221,7 @@ describe('StateMachine Test Suite', () => {
     });
 
     it('ghi nhận completed_at khi chuyển sang terminal status', () => {
-      let currentJob = { id: 'job-2', status: JOB_STATUSES.TESTING };
+      let currentJob = { id: 'job-2', status: JOB_STATUSES.VERIFY };
 
       const mockDb = {
         getJobById: (id) => (id === currentJob.id ? { ...currentJob } : null),

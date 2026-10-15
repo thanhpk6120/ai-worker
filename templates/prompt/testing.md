@@ -36,7 +36,7 @@ Nhiệm vụ của bạn là kiểm thử toàn diện giải pháp của task *
      * Thực hiện các thao tác theo kịch bản trong `test_plan.md`, chụp ảnh màn hình giao diện thật và lưu vào:
        👉 `{{FEATURE_DIR}}/evidence/01_ui_<tên_case>.png`
      * Bạn PHẢI tự VERIFY ảnh vừa chụp (xác nhận nội dung trên màn hình đúng với kết quả kỳ vọng).
-   - **CẢNH BÁO QUAN TRỌNG:** Nếu `test_plan.md` yêu cầu `UI_SCREENSHOT` mà bạn kết thúc bước TESTING mà KHÔNG CÓ ảnh chụp UI thật trong `evidence/`, Worker sẽ đánh giá KIỂM THỬ THẤT BẠI và chuyển sang FIXING để bạn làm lại!
+   - **CẢNH BÁO QUAN TRỌNG:** Nếu `test_plan.md` yêu cầu `UI_SCREENSHOT` mà bạn kết thúc bước TESTING mà KHÔNG CÓ ảnh chụp UI thật trong `evidence/`, Worker sẽ đánh giá ĐỐI SOÁT THẤT BẠI ở bước VERIFY và chuyển sang FIXING để bạn làm lại!
 3. **CHẠY KIỂM THỬ THẬT & BẰNG CHỨNG XÁC THỰC:**
    - Thực thi lệnh test chuẩn của repository theo chỉ định trong `test_plan.md` (ví dụ: `npm test`, `npx tsc`, `pytest`, `mvn test`, `go test`...).
    - Lưu nhật ký chạy test thực tế vào `{{FEATURE_DIR}}/evidence/01_test_execution.log`.

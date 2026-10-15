@@ -1,7 +1,7 @@
 /**
  * src/execution/clarificationManager.js
  * Quản lý trạng thái PENDING (Human-in-the-Loop Clarification) ĐỘC QUYỀN trong giai đoạn PLANNING.
- * Đảm bảo các giai đoạn khác (IMPLEMENT, TESTING, FIXING) tự động bypass câu hỏi để tránh treo headless.
+ * Đảm bảo các giai đoạn khác (IMPLEMENT, TESTING, VERIFY, FIXING) tự động bypass câu hỏi để tránh treo headless.
  */
 
 const { EventEmitter } = require('node:events');
@@ -27,7 +27,7 @@ class ClarificationManager extends EventEmitter {
    * Chặn câu hỏi từ Agent CLI và kiểm tra điều kiện kích hoạt trạng thái PENDING
    * @param {Object} params Tham số yêu cầu làm rõ
    * @param {string} params.jobId ID của Job hiện tại
-   * @param {string} params.currentStage Giai đoạn hiện tại của Job (ví dụ 'PLANNING', 'IMPLEMENT', 'TESTING', 'FIXING')
+   * @param {string} params.currentStage Giai đoạn hiện tại của Job (ví dụ 'PLANNING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING')
    * @param {string} params.question Nội dung câu hỏi cần người dùng làm rõ
    * @param {string[]} [params.options=[]] Danh sách tùy chọn có sẵn (nếu là dạng trắc nghiệm/radio/checkbox)
    * @param {boolean} [params.allowCustomInput=true] Cho phép nhập văn bản tùy biến ngoài các lựa chọn có sẵn
