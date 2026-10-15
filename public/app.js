@@ -1471,6 +1471,11 @@
             const latency = api.duration_ms || api.durationMs || api.latency_ms || api.latency || 12;
             const isPass = api.verdict === 'PASS' || api.status === 'PASSED' || api.passed === true || (statusCode >= 200 && statusCode < 400 && !api.error);
             const methodClass = getMethodBadgeClass(method);
+            const apiFilename = api.filename || (api.file_path ? String(api.file_path).split('/').pop() : '') || '';
+            const apiStep = api.stepName || api.step || api.stepId || '';
+            const apiCase = api.caseName || api.testCase || api.testcase || (typeof api.case === 'string' ? api.case : '') || '';
+            const apiDesc = api.description || api.displayName || api.title || '';
+            const apiCapturedAt = api.capturedAt || api.timestamp || api.created_at || api.time || '';
 
             return `
               <div class="p-3 rounded-xl bg-surface-900 border border-slate-800 hover:border-slate-700 transition shadow-sm space-y-2">
@@ -1480,6 +1485,10 @@
                     <span class="text-xs font-mono text-slate-200 font-medium truncate" title="${escapeHtml(endpoint)}">${escapeHtml(endpoint)}</span>
                   </div>
                   <span class="evidence-badge ${isPass ? 'evidence-pass' : 'evidence-fail'} shrink-0">${isPass ? 'PASS' : 'FAIL'}</span>
+                </div>
+                <div class="min-w-0 space-y-0.5">
+                  <p class="text-xs font-semibold text-slate-100 truncate" title="${escapeHtml(apiDesc || apiFilename || endpoint)}">${escapeHtml(apiDesc || endpoint)}</p>
+                  <p class="text-[10px] font-mono text-slate-400 truncate" title="${escapeHtml(apiFilename)}">${escapeHtml(apiFilename)}${apiStep ? ` · Step: ${escapeHtml(apiStep)}` : ''}${apiCase ? ` · Case: ${escapeHtml(apiCase)}` : ''}${apiCapturedAt ? ` · ${escapeHtml(apiCapturedAt)}` : ''}</p>
                 </div>
 
                 <div class="flex items-center justify-between text-[11px] font-mono bg-surface-950/70 px-2.5 py-1.5 rounded-lg border border-slate-800/80">
@@ -1520,8 +1529,12 @@
           .map((item, idx) => {
             const serviceName = item.service_name || item.service || 'Service App';
             const level = ((item.level || (item.error || item.stack_trace ? 'ERROR' : (item.warn ? 'WARN' : 'INFO')))).toUpperCase();
-            const timestamp = item.timestamp || item.time || item.created_at || '';
+            const timestamp = item.capturedAt || item.timestamp || item.time || item.created_at || '';
             const logExcerpt = item.log_excerpt || item.excerpt || item.message || (item.stack_trace ? item.stack_trace.split('\n')[0] : '') || 'Ghi nhận log hệ thống';
+            const logFilename = item.filename || (item.file_path ? String(item.file_path).split('/').pop() : '') || '';
+            const logStep = item.stepName || item.step || item.stepId || '';
+            const logCase = item.caseName || item.testCase || item.testcase || (typeof item.case === 'string' ? item.case : '') || '';
+            const logDesc = item.description || item.displayName || item.title || '';
             const isError = level === 'ERROR' || level === 'FATAL';
             const isWarn = level === 'WARN' || level === 'WARNING';
             const levelClass = isError
@@ -1543,6 +1556,10 @@
                   <span class="text-[10px] font-mono text-slate-400">${escapeHtml(timestamp)}</span>
                 </div>
 
+                <div class="min-w-0 space-y-0.5">
+                  <p class="text-xs font-semibold text-slate-100 truncate" title="${escapeHtml(logDesc || logFilename || serviceName)}">${escapeHtml(logDesc || logFilename || serviceName)}</p>
+                  <p class="text-[10px] font-mono text-slate-400 truncate" title="${escapeHtml(logFilename)}">${escapeHtml(logFilename)}${logStep ? ` · Step: ${escapeHtml(logStep)}` : ''}${logCase ? ` · Case: ${escapeHtml(logCase)}` : ''}</p>
+                </div>
                 <div class="bg-surface-950 p-2 rounded-lg border border-slate-800/80 font-mono text-[11px] text-slate-300 max-h-16 overflow-hidden line-clamp-2 leading-relaxed">
                   ${escapeHtml(logExcerpt)}
                 </div>

@@ -29,6 +29,10 @@ Nhiệm vụ của bạn là tiếp nhận toàn bộ ngữ cảnh kiểm thử 
    - CHỈ KHI SỬA CODE: Bạn mới xác định service/module cần sửa trong workspace `{{WORKSPACE_PATH}}` và chỉ sửa đổi các tệp mã nguồn thuộc service đó.
    - Không được sửa đổi mã nguồn ngoài phạm vi xử lý lỗi.
    - Tuyệt đối không xóa vĩnh viễn tệp tin của người dùng (nếu dọn dẹp, chuyển vào Recycle Bin / Trash).
+3. **QUY TẮC NGÔN NGỮ TÀI LIỆU:**
+   - Mọi tài liệu tạo ra (`.md`, báo cáo, ghi chú...) BẮT BUỘC viết bằng tiếng Việt có dấu, mã hóa UTF-8.
+   - Giữ nguyên tiếng Anh cho tên riêng, thuật ngữ chuyên ngành, lệnh, API, tên file và đoạn code.
+
 
 ## Hướng dẫn thực thi:
 0. **BƯỚC 0 BẮT BUỘC — LOAD DANH SÁCH MCP VÀ CHỌN TOOL (áp dụng cho MỌI prompt, không riêng Jira):** Đọc mục `🔌 DANH SÁCH MCP SERVERS` ở trên, đối chiếu yêu cầu với khả năng tool MCP. Có MCP làm được → DÙNG MCP TRƯỚC; không có hoặc MCP lỗi → dùng cách khác và ghi lý do fallback vào log.
@@ -36,7 +40,20 @@ Nhiệm vụ của bạn là tiếp nhận toàn bộ ngữ cảnh kiểm thử 
 2. Xác định nguyên nhân gốc rễ (Root Cause) và định vị service/module bị lỗi trong workspace.
 3. Sửa đổi trực tiếp mã nguồn trong service đó của workspace để khắc phục lỗi.
 4. Bảo đảm không làm gãy các tính năng đã hoạt động trước đó (không gây regression).
-5. Sau khi sửa xong, hoàn tất để hệ thống chuyển tiếp sang bước kiểm thử lại (Re-test).
+5. **XỬ LÝ LỖI LỆCH DỮ LIỆU API & DATABASE (DATA MISMATCH & RECONCILIATION):**
+   - Nếu lỗi do dữ liệu trả về giữa API và câu lệnh SELECT trong CSDL không khớp:
+     + Rà soát ngay 6 nguyên nhân kinh điển:
+       1. Lệch cột thời gian (ví dụ `TRANSACTION_TIME` - thời điểm phát sinh giao dịch vs `CREATED_AT` - thời điểm insert bản ghi).
+       2. Thiếu bộ lọc loại giao dịch / trạng thái (ví dụ `TRANS_TYPE = 'C'`, `STATUS = 'ACTIVE'`).
+       3. Phân trang mặc định ở controller (ví dụ `@RequestParam(defaultValue = "20") int size`).
+       4. Lọc ngầm theo phân quyền đối tác / tenant (`PARTNER_CODE = :partnerCode`).
+       5. Lệch múi giờ UTC (+00:00) vs Giờ địa phương (+07:00).
+       6. Bộ lọc soft-delete (`DELETED = 0`).
+     + Viết lại câu SQL query hoặc assertion script để phản ánh ĐÚNG logic nghiệp vụ của API trước khi chạy lại test.
+5b. **THU THẬP RUNTIME LOG SERVICE + GỌI LẠI API NGHIỆP VỤ (BẮT BUỘC SAU SỬA):**
+   - Khởi động lại service thật, lưu stdout/stderr lúc phục vụ request vào `{{FEATURE_DIR}}/evidence/05_service_runtime.log` (phải chứa listening/started/ready + dòng request GET/POST/PUT/DELETE + status 2xx).
+   - Gọi lại API nghiệp vụ thật (đủ method + URL http://localhost:PORT + path nghiệp vụ, không chỉ /health), lưu `evidence/02_api_verification.json` với responseStatus 2xx + request/response body thật. Cấm lấy build log làm API evidence.
+6. Sau khi sửa xong, chạy lại kiểm thử thật (Re-test) kèm đủ runtime log + API nghiệp vụ rồi hoàn tất để hệ thống chuyển tiếp.
 ## 🔌 QUY TẮC DÙNG TOOL (MCP-FIRST, KHÔNG CẤM BROWSER):
 1. **Nguyên tắc chung:** Trước khi làm việc gì, LUÔN kiểm tra tool MCP đang có; nếu có MCP làm được thì DÙNG MCP TRƯỚC. Trình duyệt và các công cụ khác vẫn được dùng bình thường cho các tác vụ mà MCP không cover được.
 2. **Jira/Confluence nội bộ:** ưu tiên MCP Atlassian; trình duyệt chỉ dùng cho trang public hoặc kiểm thử UI.

@@ -26,6 +26,10 @@ Nhiệm vụ của bạn là hiện thực hóa toàn bộ mã nguồn của tas
    - CHỈ KHI SỬA CODE / VIẾT MÃ NGUỒN: Bạn mới xác định service/module cần sửa trong workspace `{{WORKSPACE_PATH}}` (dựa trên bản thiết kế trong `dev_plan.md`) và chỉ sửa đổi các tệp mã nguồn thuộc service đó.
    - Không được sửa đổi mã nguồn hoặc tạo file rác bên ngoài service/module liên quan.
    - Tuyệt đối không xóa vĩnh viễn tệp tin của người dùng (nếu cần dọn dẹp, chuyển vào Recycle Bin / Trash).
+3. **QUY TẮC NGÔN NGỮ TÀI LIỆU:**
+   - Mọi tài liệu tạo ra (`.md`, báo cáo, ghi chú...) BẮT BUỘC viết bằng tiếng Việt có dấu, mã hóa UTF-8.
+   - Giữ nguyên tiếng Anh cho tên riêng, thuật ngữ chuyên ngành, lệnh, API, tên file và đoạn code.
+
 
 ## Hướng dẫn thực thi:
 0. **BƯỚC 0 BẮT BUỘC — LOAD DANH SÁCH MCP VÀ CHỌN TOOL (áp dụng cho MỌI prompt, không riêng Jira):** Đọc mục `🔌 DANH SÁCH MCP SERVERS` ở trên, đối chiếu yêu cầu với khả năng tool MCP. Có MCP làm được → DÙNG MCP TRƯỚC; không có hoặc MCP lỗi → dùng cách khác (browser, curl, CLI...) và ghi lý do fallback vào log. Trình duyệt vẫn dùng bình thường cho tác vụ MCP không cover được.

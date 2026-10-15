@@ -273,16 +273,28 @@ function isEvidenceFileDeleted(metadata, filename) {
   return false;
 }
 
-// Helper lấy metadata của 1 file evidence
+// Helper lấy metadata của 1 file evidence (tương thích metadata cũ thiếu trường)
 function getEvidenceFileMeta(metadata, filename) {
   if (!metadata || !filename) return {};
+  let raw = {};
   if (Array.isArray(metadata)) {
-    return metadata.find(m => m && (m.fileName === filename || m.name === filename || m.file === filename || (m.file_path && m.file_path.includes(filename)))) || {};
+    raw = metadata.find(m => m && (m.fileName === filename || m.name === filename || m.file === filename || (m.file_path && m.file_path.includes(filename)))) || {};
+  } else if (typeof metadata === 'object') {
+    raw = metadata[filename] || {};
   }
-  if (typeof metadata === 'object') {
-    return metadata[filename] || {};
-  }
-  return {};
+  if (!raw || typeof raw !== 'object') return {};
+  const strOrNull = (v) => (typeof v === 'string' && v.trim() ? v : (v != null && typeof v !== 'object' ? String(v) : null));
+  const stepName = strOrNull(raw.stepName) || strOrNull(raw.step_name) || (typeof raw.step === 'string' ? raw.step : null) || null;
+  const stepId = strOrNull(raw.stepId) || strOrNull(raw.step_id) || strOrNull(raw.stepIndex) || strOrNull(raw.step_index) || null;
+  const step = strOrNull(raw.step) || stepName || stepId || null;
+  const evidenceId = strOrNull(raw.evidenceId) || strOrNull(raw.evidence_id) || strOrNull(raw.id) || null;
+  const timestamp = strOrNull(raw.timestamp) || strOrNull(raw.capturedAt) || strOrNull(raw.captured_at) || strOrNull(raw.created_at) || strOrNull(raw.createdAt) || strOrNull(raw.time) || null;
+  const description = strOrNull(raw.description) || strOrNull(raw.desc) || strOrNull(raw.message) || strOrNull(raw.caption) || null;
+  const testCase = strOrNull(raw.testCase) || strOrNull(raw.testcase) || (typeof raw.case === 'string' ? raw.case : null) || strOrNull(raw.caseName) || strOrNull(raw.case_name) || null;
+  const caseName = strOrNull(raw.caseName) || strOrNull(raw.case_name) || testCase || null;
+  const actionType = strOrNull(raw.actionType) || strOrNull(raw.action_type) || strOrNull(raw.action) || null;
+  const currentUrl = strOrNull(raw.currentUrl) || strOrNull(raw.current_url) || strOrNull(raw.pageUrl) || strOrNull(raw.page_url) || null;
+  return { ...raw, stepId, stepName, step, evidenceId, timestamp, description, testCase, testcase: strOrNull(raw.testcase) || testCase, case: raw.case != null ? raw.case : (caseName || null), caseName, actionType, currentUrl };
 }
 
 function hashEvidenceBuffer(buf) {
@@ -995,6 +1007,11 @@ function getTaskEvidences(job) {
       }
 
       const taskCode = job.task_code || job.id;
+      const fallbackTitle1 = file.replace(ext, '').replace(/^[0-9]+_/, '').replace(/[-_]/g, ' ');
+      const evidenceTitle1 = meta.stepName || meta.description || meta.title || fallbackTitle1;
+      const evidenceStep1 = meta.stepName || meta.step || meta.stepId || null;
+      const evidenceCase1 = meta.caseName || meta.testCase || meta.testcase || (typeof meta.case === 'string' ? meta.case : null) || null;
+      const evidenceCapturedAt1 = meta.timestamp || meta.capturedAt || meta.captured_at || meta.created_at || meta.createdAt || meta.time || null;
       const itemObj = {
         id: `${job.id}-ev-${idx}`,
         job_id: job.id,
@@ -1003,8 +1020,23 @@ function getTaskEvidences(job) {
         file_path: `/api/v1/jobs/${job.id}/evidence/files/${encodeURIComponent(file)}`,
         url: `/api/v1/jobs/${job.id}/evidence/files/${encodeURIComponent(file)}`,
         status: meta.status || (meta.verdict === 'FAIL' ? 'FAILED' : 'PASSED'),
-        title: meta.title || file.replace(ext, '').replace(/^[0-9]+_/, '').replace(/[-_]/g, ' '),
+        title: evidenceTitle1,
+        displayName: evidenceTitle1,
         filename: file,
+        stepId: meta.stepId || null,
+        stepName: meta.stepName || null,
+        step: evidenceStep1,
+        evidenceId: meta.evidenceId || null,
+        timestamp: meta.timestamp || null,
+        capturedAt: evidenceCapturedAt1,
+        created_at: evidenceCapturedAt1 || (stat && stat.mtime ? stat.mtime.toISOString() : null),
+        description: meta.description || null,
+        testCase: meta.testCase || null,
+        testcase: meta.testcase || meta.testCase || null,
+        case: meta.case != null ? meta.case : (evidenceCase1 || null),
+        caseName: evidenceCase1,
+        actionType: meta.actionType || null,
+        currentUrl: meta.currentUrl || null,
         service_name: taskCode || 'Target Service',
         service: taskCode || 'Target Service',
         content: fileContent,
@@ -1408,6 +1440,11 @@ app.get(['/api/v1/jobs/:id/evidence', '/api/v1/jobs/:id/evidences', '/api/v1/tas
           } catch (e) {}
         }
 
+        const fallbackTitle2 = file.replace(ext, '').replace(/^[0-9]+_/, '').replace(/[-_]/g, ' ');
+        const evidenceTitle2 = meta.stepName || meta.description || meta.title || fallbackTitle2;
+        const evidenceStep2 = meta.stepName || meta.step || meta.stepId || null;
+        const evidenceCase2 = meta.caseName || meta.testCase || meta.testcase || (typeof meta.case === 'string' ? meta.case : null) || null;
+        const evidenceCapturedAt2 = meta.timestamp || meta.capturedAt || meta.captured_at || meta.created_at || meta.createdAt || meta.time || null;
         const itemObj = {
           id: `${id}-ev-${idx}`,
           job_id: id,
@@ -1416,15 +1453,29 @@ app.get(['/api/v1/jobs/:id/evidence', '/api/v1/jobs/:id/evidences', '/api/v1/tas
           file_path: `/api/v1/jobs/${id}/evidence/files/${encodeURIComponent(file)}`,
           url: `/api/v1/jobs/${id}/evidence/files/${encodeURIComponent(file)}`,
           status: meta.status || (meta.verdict === 'FAIL' ? 'FAILED' : 'PASSED'),
-          title: meta.title || file.replace(ext, '').replace(/^[0-9]+_/, '').replace(/[-_]/g, ' '),
+          title: evidenceTitle2,
+          displayName: evidenceTitle2,
           filename: file,
+          stepId: meta.stepId || null,
+          stepName: meta.stepName || null,
+          step: evidenceStep2,
+          evidenceId: meta.evidenceId || null,
+          timestamp: meta.timestamp || null,
+          capturedAt: evidenceCapturedAt2,
+          description: meta.description || null,
+          testCase: meta.testCase || null,
+          testcase: meta.testcase || meta.testCase || null,
+          case: meta.case != null ? meta.case : (evidenceCase2 || null),
+          caseName: evidenceCase2,
+          actionType: meta.actionType || null,
+          currentUrl: meta.currentUrl || null,
           service_name: taskCode || 'Target Service',
           service: taskCode || 'Target Service',
           content: fileContent,
           rawLogs: fileContent,
           logs: fileContent,
           log_excerpt: fileContent ? fileContent.slice(0, 300) : '',
-          created_at: stat.mtime.toISOString(),
+          created_at: evidenceCapturedAt2 || stat.mtime.toISOString(),
           size: (typeof evidenceHashes !== 'undefined' && evidenceHashes.size != null ? evidenceHashes.size : stat.size),
           sizeBytes: (typeof evidenceHashes !== 'undefined' && evidenceHashes.sizeBytes != null ? evidenceHashes.sizeBytes : stat.size),
           md5: (typeof evidenceHashes !== 'undefined' && evidenceHashes.md5) || null,
@@ -1629,7 +1680,8 @@ const { exec } = require('child_process');
 // Đối soát evidence thực tế do Agent thu thập (dùng chung cho bước VERIFY độc lập).
 // Trả về { failed: boolean }. TUYỆT ĐỐI KHÔNG tự sinh dummy evidence thay Agent.
 const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) => {
-  let failed = false;
+  const id = jobId;
+  let agentFailed = false;
         // Tự động lưu đầy đủ các kênh bằng chứng thực tế vào thư mục evidence của task
         try {
           if (!fs.existsSync(evidenceDir)) {
@@ -1777,6 +1829,21 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
                     text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: metadata.json có test case chưa PASSED thật (FAILED/PARTIAL/SKIPPED). Chỉ DONE khi 100% case PASSED!\n`
                   });
                 }
+                // Phát hiện tự mâu thuẫn: note/mô tả ghi nhận mismatch/lệch dữ liệu nhưng test case lại để status PASSED
+                const CONTRADICTION_RE = /\b(mismatch|discrepanc|unmatched)\b|không\s*khớp|khong\s*khop|lệch\s*(dữ\s*liệu|cột|thời\s*gian|múi\s*giờ|kết\s*quả|bản\s*ghi)|lech\s*(du\s*lieu|cot|thoi\s*gian|mui\s*gio|ket\s*qua|ban\s*ghi)/i;
+                const hasContradiction = testsArr.some(t => {
+                  if (!t || typeof t !== 'object') return false;
+                  const isPass = /^(PASSED|PASS)$/i.test(String((t.status || t.verdict || '')).trim());
+                  if (!isPass) return false;
+                  const noteStr = [t.note, t.description, t.summary, t.reason, t.details, t.message, t.error].filter(Boolean).join(' ');
+                  return CONTRADICTION_RE.test(noteStr);
+                });
+                if (hasContradiction) {
+                  agentFailed = true;
+                  jobEventBus.emitJobLog(id, {
+                    text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: Phát hiện test case tự mâu thuẫn (ghi nhận mismatch/lệch dữ liệu API-DB nhưng vẫn để status PASSED). Phải sửa nguyên nhân lệch và đối soát khớp 100% mới được PASS!\n`
+                  });
+                }
                 // Mọi file evidence phải được khai báo trong metadata.json để chứng minh mapping với test case
                 const declared = new Set();
                 testsArr.forEach(t => { (t.evidence || t.evidences || t.files || []).forEach(f => declared.add(String(f))); });
@@ -1826,6 +1893,8 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
           try {
             const logFiles = validFiles.filter(f => ['.log', '.txt'].includes(path.extname(f).toLowerCase()));
             const LOG_KEY_RE = /browser|capture|screenshot|playwright|puppeteer|navigate|GET\s+\/api|POST\s+\/api|tsc|pytest|npm\s+test|mvn\s+test|go\s+test|passed|failed|assert|✓|✔|PASS/i;
+            const RUNTIME_KEY_RE = /listening|started|ready|listening on|server.*port|GET\s+\/|POST\s+\/|PUT\s+\/|DELETE\s+\/|PATCH\s+\/|incoming|request|response|status\s*2\d\d|200 OK/i;
+            const BUILD_ONLY_RE = /npm install|npm run build|building|compiled|vite|webpack|tsc -b/i;
             for (const lf of logFiles) {
               const raw = fs.readFileSync(path.join(evidenceDir, lf), 'utf8');
               const trimmed = (raw || '').trim();
@@ -1835,6 +1904,50 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
                   text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: ${lf} rỗng giả (stdout empty, thiếu output/keyword test thật). Agent phải chạy lại lệnh test thật và lưu log đầy đủ!\n`
                 });
                 break;
+              }
+            }
+          } catch (e) {}
+          // 2c2. Chan API evidence chi la build log: *api*.json thieu HTTP runtime (method+url+status+body)
+          try {
+            const apiFiles = validFiles.filter(f => /api/i.test(f) && f.toLowerCase().endsWith('.json'));
+            const HTTP_RUNTIME_RE = /GET|POST|PUT|DELETE|PATCH|http:\/\/localhost|\/api\//i;
+            for (const af of apiFiles) {
+              let rawA = '';
+              try { rawA = fs.readFileSync(path.join(evidenceDir, af), 'utf8'); } catch (e) { rawA = ''; }
+              let objA = null;
+              try { objA = JSON.parse(rawA); } catch (e) { objA = null; }
+              const strA = (rawA || '');
+              const eps = (objA && Array.isArray(objA.endpointsChecked)) ? objA.endpointsChecked : [];
+              const hasMethod = !!(objA && (objA.method || objA.request || objA.endpoint || objA.url || eps.length > 0));
+              const hasUrl = !!(objA && (objA.url || objA.endpoint || objA.request || eps.some(e => e && e.endpoint)));
+              const hasStatus = !!(objA && (objA.status || objA.responseStatus || objA.statusCode || eps.some(e => e && e.status)));
+              const hasBody = !!(objA && (objA.body || objA.data || objA.response || objA.payload || objA.result || objA.count || objA.items || objA.rows || objA.records || objA.total || eps.length > 0));
+              const buildOnlyApi = /npm install|npm run build|building|compiled|vite|webpack|tsc -b/i.test(strA) && !HTTP_RUNTIME_RE.test(strA);
+              if (!objA || !hasMethod || !hasUrl || !hasStatus || !hasBody || buildOnlyApi) {
+                agentFailed = true;
+                jobEventBus.emitJobLog(id, {
+                  text: '\n[TESTING-VERIFY] KIEM THU THAT BAI: ' + af + ' khong phai API runtime (thieu method+url day du http://localhost:PORT + path nghiep vu, responseStatus 2xx, request/response body that, hoac chi la build log). Agent phai khoi dong service that, goi API nghiep vu that va luu 02_api_verification.json day du!\n'
+                });
+                break;
+              }
+            }
+          } catch (e) {}
+          // 2c3. Chan log thieu runtime service khi co api_verification
+          try {
+            const hasApiFile = validFiles.some(f => /api/i.test(f) && f.toLowerCase().endsWith('.json'));
+            if (hasApiFile) {
+              const logFiles2 = validFiles.filter(f => ['.log', '.txt'].includes(path.extname(f).toLowerCase()));
+              let hasRuntime = false;
+              for (const lf of logFiles2) {
+                let raw2 = '';
+                try { raw2 = fs.readFileSync(path.join(evidenceDir, lf), 'utf8'); } catch (e) { raw2 = ''; }
+                if (/listening|started|ready|listening on|server.*port|GET\s+\/|POST\s+\/|PUT\s+\/|DELETE\s+\/|PATCH\s+\/|incoming|request|response|status\s*2\d\d|200 OK/i.test(raw2 || '')) { hasRuntime = true; break; }
+              }
+              if (!hasRuntime) {
+                agentFailed = true;
+                jobEventBus.emitJobLog(id, {
+                  text: '\n[TESTING-VERIFY] KIEM THU THAT BAI: Co api_verification nhung thieu runtime log service (05_service_runtime.log phai chua listening/started/ready + dong request GET/POST/PUT/DELETE + status 2xx luc phuc vu request test). Log hien tai chi la build log. Agent phai khoi dong service that va luu runtime log!\n'
+                });
               }
             }
           } catch (e) {}
@@ -1867,7 +1980,29 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
               seen.set(md5, img);
             }
           } catch (e) {}
-          // 2f. Đối chiếu số lượng test case trong test_plan.md với metadata.json tests[]
+          // 2f. Đối soát tính nhất quán của Database Assertion / Reconciliation nếu có file assertion CSDL
+          try {
+            const dbAssertionFiles = validFiles.filter(f => /database.*assertion|db.*assertion|reconciliation/i.test(f) && f.endsWith('.json'));
+            for (const dbFile of dbAssertionFiles) {
+              try {
+                const dbContent = JSON.parse(fs.readFileSync(path.join(evidenceDir, dbFile), 'utf8'));
+                if (dbContent && typeof dbContent === 'object') {
+                  const isDbFailed = dbContent.matched === false || dbContent.passed === false || dbContent.status === 'FAILED' || dbContent.status === 'FAIL' || dbContent.verdict === 'FAILED' || dbContent.verdict === 'FAIL';
+                  const hasDiscrepancies = (Array.isArray(dbContent.discrepancies) && dbContent.discrepancies.length > 0) ||
+                                          (Array.isArray(dbContent.inconsistencies) && dbContent.inconsistencies.length > 0) ||
+                                          (Array.isArray(dbContent.diffs) && dbContent.diffs.length > 0);
+                  if (isDbFailed || hasDiscrepancies) {
+                    agentFailed = true;
+                    jobEventBus.emitJobLog(id, {
+                      text: `\n[TESTING-VERIFY] ❌ ĐỐI SOÁT THẤT BẠI: File ${dbFile} ghi nhận kết quả không khớp (matched: false hoặc có discrepancies/inconsistencies). Chuyển sang FIXING để xử lý triệt để!\n`
+                    });
+                    break;
+                  }
+                }
+              } catch (e) {}
+            }
+          } catch (e) {}
+          // 2g. Đối chiếu số lượng test case trong test_plan.md với metadata.json tests[]
           try {
             const expectedIds = new Set((testPlanText.match(/TC-[A-ZÀ-Ỹ]+-\d+/gi) || []).map(s => s.toUpperCase()));
             const testsArr2 = (!metaParseError && metadataObj && !Array.isArray(metadataObj) && Array.isArray(metadataObj.tests)) ? metadataObj.tests : [];
@@ -1895,7 +2030,7 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
         } catch (evWriteErr) {
           console.warn('Ghi bằng chứng cảnh báo:', evWriteErr.message);
         }
-  return { failed };
+  return { failed: agentFailed };
 };
 
 const executeStep = async (id) => {
@@ -2201,13 +2336,18 @@ const executeStep = async (id) => {
         if (checkAfterTest && checkAfterTest.status === 'CANCELLED') return;
       }
 
-      // TESTING chỉ chạy agent kiểm thử; đối soát evidence dời sang bước VERIFY độc lập.
+      // TESTING that bai (timeout/exit!=0/thieu runner): chuyen thang sang FIXING, KHONG qua VERIFY.
       if (agentFailed) {
-        // Agent lỗi ngay (timeout/exit!=0/thiếu runner): vẫn đi qua VERIFY để ghi nhận đầy đủ.
-        jobEventBus.emitJobLog(id, { text: `\n[TESTING] Agent kiểm thử báo lỗi, chuyển sang [VERIFY] để đối soát evidence...\n` });
-      } else {
-        jobEventBus.emitJobLog(id, { text: `\n[TESTING] Hoàn tất kiểm thử qua Agent, chuyển sang [VERIFY] để đối soát evidence...\n` });
+        const fixAgentAfterTest = agentMapping.FIXING || 'claude-code';
+        const failReasonText = !testingResult ? 'khong co ket qua kiem thu' : (testingResult.timedOut ? ('vuot qua gioi han thoi gian ('+(testingResult.timeoutMs || 900000)+'ms)') : ('exit code '+testingResult.exitCode));
+        const failGate = { passed: false, error: 'Kiem thu that bai ('+failReasonText+')', timeout: !!(testingResult && testingResult.timedOut), decided_at: new Date().toISOString(), mapped_from: 'TESTING', source: 'pipeline-testing-failed' };
+        jobEventBus.emitJobLog(id, { text: `\n[TESTING] Agent kiem thu bao loi ('+failReasonText+'), chuyen sang [FIXING]...` });
+        db.updateJob(id, { status: 'FIXING', current_step: 'FIXING', runner: fixAgentAfterTest, error_message: 'Kiem thu that bai ('+failReasonText+').', gate_result: failGate });
+        jobEventBus.emitJobStatus(id, { status: 'FIXING', runner: fixAgentAfterTest });
+        setTimeout(() => executeStep(id), 100);
+        return;
       }
+      jobEventBus.emitJobLog(id, { text: `\n[TESTING] Hoan tat kiem thu qua Agent, chuyen sang [VERIFY] de doi soat evidence...` });
       const verifyAgent = 'verify-gate';
       db.updateJob(id, { status: 'VERIFY', current_step: 'VERIFY', runner: verifyAgent });
       jobEventBus.emitJobStatus(id, { status: 'VERIFY', runner: verifyAgent });
@@ -2990,5 +3130,6 @@ app.use((err, req, res, next) => {
 
 module.exports = {
   app,
-  jobEventBus
+  jobEventBus,
+  verifyTaskEvidence
 };

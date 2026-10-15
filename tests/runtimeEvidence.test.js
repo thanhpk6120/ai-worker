@@ -1,0 +1,39 @@
+const { describe, it, beforeEach, afterEach } = require('node:test');
+const assert = require('node:assert/strict');
+const fss = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { verifyTaskEvidence } = require('../src/server');
+
+describe('Runtime Evidence Gate (build log vs runtime log)', () => {
+  let fdir; let edir;
+  beforeEach(() => {
+    fdir = fss.mkdtempSync(path.join(os.tmpdir(), 'feature-runtime-'));
+    edir = path.join(fdir, 'evidence');
+    fss.mkdirSync(edir, { recursive: true });
+    fss.writeFileSync(path.join(fdir, 'test_plan.md'), '# Test Plan\n## TC-API-01: API nghiep vu\n');
+  });
+  afterEach(() => { try { fss.rmSync(fdir, { recursive: true, force: true }); } catch (e) {} });
+  const meta = (tests) => ({ taskCode: 'RT-01', verdict: 'PASSED', tests });
+  it('1. API json chi la build log -> FAIL', () => {
+    fss.writeFileSync(path.join(edir, '02_api_verification.json'), JSON.stringify({ log: 'npm install done, building vite compiled successfully' }));
+    fss.writeFileSync(path.join(edir, '01_test_execution.log'), 'npm run build\nbuilding... vite compiled successfully\n');
+    fss.writeFileSync(path.join(edir, 'metadata.json'), JSON.stringify(meta([{ id: 'TC-API-01', name: 'API', status: 'PASSED', evidence: ['02_api_verification.json'], note: 'build ok' }])));
+    const r = verifyTaskEvidence({ jobId: 'rt-build-only', evidenceDir: edir, featureDir: fdir, taskCode: 'RT-01', emit: () => {} });
+    assert.strictEqual(r.failed, true);
+  });
+  it('2. Co API nhung log chi build, thieu runtime service -> FAIL', () => {
+    fss.writeFileSync(path.join(edir, '02_api_verification.json'), JSON.stringify({ method: 'GET', url: 'http://localhost:8080/api/v1/orders', responseStatus: 200, body: [{ id: 1 }] }));
+    fss.writeFileSync(path.join(edir, '01_test_execution.log'), 'npm test passed 5 tests\n');
+    fss.writeFileSync(path.join(edir, 'metadata.json'), JSON.stringify(meta([{ id: 'TC-API-01', name: 'API', status: 'PASSED', evidence: ['02_api_verification.json', '01_test_execution.log'], note: 'API 200' }])));
+    const r = verifyTaskEvidence({ jobId: 'rt-no-runtime', evidenceDir: edir, featureDir: fdir, taskCode: 'RT-01', emit: () => {} });
+    assert.strictEqual(r.failed, true);
+  });
+  it('3. Du API nghiep vu + runtime log service -> PASS', () => {
+    fss.writeFileSync(path.join(edir, '02_api_verification.json'), JSON.stringify({ method: 'GET', url: 'http://localhost:8080/api/v1/orders', responseStatus: 200, body: [{ id: 1 }] }));
+    fss.writeFileSync(path.join(edir, '05_service_runtime.log'), 'Server listening on port 8080\nGET /api/v1/orders 200 OK 8ms\nrequest received response sent status 200\n');
+    fss.writeFileSync(path.join(edir, 'metadata.json'), JSON.stringify(meta([{ id: 'TC-API-01', name: 'API', status: 'PASSED', evidence: ['02_api_verification.json', '05_service_runtime.log'], note: 'service running, API 200' }])));
+    const r = verifyTaskEvidence({ jobId: 'rt-ok', evidenceDir: edir, featureDir: fdir, taskCode: 'RT-01', emit: () => {} });
+    assert.strictEqual(r.failed, false);
+  });
+});
