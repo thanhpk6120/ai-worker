@@ -18,6 +18,7 @@ const { taskQueue } = require('./queue/taskQueue');
 const { JOB_STATUSES, transition, canTransition } = require('./state/stateMachine');
 const { runnerRegistry } = require('./runners/runnerRegistry');
 const { ensureGitWorkspace } = require('./utils/gitWorkspaceHelper');
+const systemone = require('./systemone/client');
 // Quản lý event bus tập trung cho SSE Realtime Logs & Events
 class JobEventBus extends EventEmitter {
   constructor() {
@@ -296,6 +297,57 @@ function getEvidenceFileMeta(metadata, filename) {
   const currentUrl = strOrNull(raw.currentUrl) || strOrNull(raw.current_url) || strOrNull(raw.pageUrl) || strOrNull(raw.page_url) || null;
   return { ...raw, stepId, stepName, step, evidenceId, timestamp, description, testCase, testcase: strOrNull(raw.testcase) || testCase, case: raw.case != null ? raw.case : (caseName || null), caseName, actionType, currentUrl };
 }
+// Chuan phan loai evidence (log vs api): uu tien metadata ghi ro, suy luan cu de tuong thich.
+// Noi ghi (BrowserRunner/agent) co the gan meta.type|evidence_type|channel; noi doc dung helper nay.
+function normalizeEvidenceTypeHint(meta) {
+  if (!meta || typeof meta !== 'object') return null;
+  const raw = meta.type || meta.evidence_type || meta.evidenceType || meta.channel || meta.kind || null;
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  const v = raw.trim().toUpperCase();
+  if (v === 'UI_SCREENSHOT' || v === 'UI' || v === 'IMAGE' || v === 'SCREENSHOT') return 'UI_SCREENSHOT';
+  if (v === 'API_TEST' || v === 'API' || v === 'API_CALL' || v === 'API_RESULT') return 'API_TEST';
+  if (v === 'DB_QUERY' || v === 'DB_ASSERT' || v === 'DB' || v === 'SQL') return 'DB_QUERY';
+  if (v === 'LOG_TRACE' || v === 'SERVICE_LOG' || v === 'LOG' || v === 'LOGS' || v === 'TXT') return 'LOG_TRACE';
+  return null;
+}
+function hasApiRuntimeShape(parsedData) {
+  if (!parsedData || typeof parsedData !== 'object' || Array.isArray(parsedData)) return false;
+  const req = parsedData.request && typeof parsedData.request === 'object' ? parsedData.request : null;
+  const hasEndpoint = !!(parsedData.endpoint || parsedData.url || (req && (req.url || req.endpoint || req.path)));
+  const hasMethod = !!(parsedData.method || (req && req.method));
+  const hasStatus = parsedData.status !== undefined || parsedData.statusCode !== undefined || parsedData.status_code !== undefined || (parsedData.response && typeof parsedData.response === 'object' && parsedData.response.status !== undefined);
+  return hasEndpoint && (hasMethod || hasStatus);
+}
+function hasDbShape(parsedData, filename) {
+  const name = String(filename || '').toLowerCase();
+  if (parsedData && typeof parsedData === 'object' && !Array.isArray(parsedData)) {
+    if (parsedData.query || parsedData.sql || parsedData.table || parsedData.tableName || parsedData.rows || parsedData.actualRows) return true;
+  }
+  return name.includes('db') || name.includes('assert');
+}
+// ponytail: .log/.txt luôn là LOG (kể cả tên chứa "api"); .json thiếu dáng API thì giữ ở LOG, không drop.
+function resolveEvidenceType({ filename = '', ext = '', meta = {}, parsedData = null } = {}) {
+  const name = String(filename || '').toLowerCase();
+  const e = String(ext || '').toLowerCase();
+  if (['.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg'].includes(e)) return 'UI_SCREENSHOT';
+  if (e === '.log' || e === '.txt') return 'LOG_TRACE';
+  if (e === '.sql') return 'DB_QUERY';
+  const hint = normalizeEvidenceTypeHint(meta);
+  if (hint === 'UI_SCREENSHOT') return 'UI_SCREENSHOT';
+  if (hint === 'LOG_TRACE') return 'LOG_TRACE';
+  if (hint === 'DB_QUERY') return 'DB_QUERY';
+  if (hint === 'API_TEST') return hasApiRuntimeShape(parsedData) || hasDbShape(parsedData, name) ? (hasDbShape(parsedData, name) && !hasApiRuntimeShape(parsedData) ? 'DB_QUERY' : 'API_TEST') : 'API_TEST';
+  if (hasDbShape(parsedData, name) && (e === '.json' || e === '.sql' || e === '.db' || e === '.sqlite')) return 'DB_QUERY';
+  if (e === '.json') return hasApiRuntimeShape(parsedData) ? 'API_TEST' : 'LOG_TRACE';
+  if (name.includes('api') && hasApiRuntimeShape(parsedData)) return 'API_TEST';
+  return 'LOG_TRACE';
+}
+function evidenceChannelOf(type) {
+  if (type === 'UI_SCREENSHOT') return 'ui';
+  if (type === 'API_TEST') return 'api';
+  if (type === 'DB_QUERY') return 'db';
+  return 'log';
+}
 
 function hashEvidenceBuffer(buf) {
   try { return crypto.createHash('md5').update(buf).digest('hex'); } catch (e) { return null; }
@@ -423,7 +475,8 @@ function handleHealthCheck(req, res) {
     const runningJobs = taskQueue.getRunningJobs();
     const queuedJobs = taskQueue.getQueuedJobs();
     const runners = runnerRegistry.detectAll();
-
+    let systemoneStats = { calls: 0, hits: 0, misses: 0, fallbacks: 0, cliSaved: 0, cost: 0 };
+    try { systemoneStats = systemone.getStats(); } catch (e) {}
     return res.json({
       status: 'ok',
       online: true,
@@ -435,7 +488,8 @@ function handleHealthCheck(req, res) {
       queuedJobs: queuedJobs.length,
       concurrency: config.CONCURRENCY,
       maxConcurrency: config.CONCURRENCY,
-      runners
+      runners,
+      systemone: systemoneStats
     });
   } catch (err) {
     return res.status(500).json({ status: 'error', error: err.message });
@@ -980,31 +1034,17 @@ function getTaskEvidences(job) {
 
       const meta = getEvidenceFileMeta(metadata, file);
       const evidenceHashes = buildEvidenceHashes(fullFilePath, stat);
-      let type = 'LOG_TRACE';
       let fileContent = '';
       let parsedData = null;
-
       if (['.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg'].includes(ext)) {
-        type = 'UI_SCREENSHOT';
-      } else if (file.toLowerCase().includes('db') || file.toLowerCase().includes('assert') || ext === '.sql') {
-        type = 'DB_QUERY';
-        try {
-          fileContent = fs.readFileSync(fullFilePath, 'utf8');
-          if (ext === '.json') parsedData = JSON.parse(fileContent);
-        } catch (e) {}
-      } else if (ext === '.json' || file.toLowerCase().includes('api')) {
-        type = 'API_TEST';
-        try {
-          fileContent = fs.readFileSync(fullFilePath, 'utf8');
-          parsedData = JSON.parse(fileContent);
-          if (!parsedData || (typeof parsedData === 'object' && !parsedData.endpoint && !parsedData.request && !parsedData.url && !parsedData.method && !parsedData.status)) {
-            return;
-          }
-        } catch (e) { return; }
-      } else if (ext === '.log' || ext === '.txt') {
-        type = 'LOG_TRACE';
-        try { fileContent = fs.readFileSync(fullFilePath, 'utf8'); } catch (e) {}
+        parsedData = null;
+      } else {
+        try { fileContent = fs.readFileSync(fullFilePath, 'utf8'); } catch (e) { fileContent = ''; }
+        if (ext === '.json' && fileContent) {
+          try { parsedData = JSON.parse(fileContent); } catch (e) { parsedData = null; }
+        }
       }
+      let type = resolveEvidenceType({ filename: file, ext, meta, parsedData });
 
       const taskCode = job.task_code || job.id;
       const fallbackTitle1 = file.replace(ext, '').replace(/^[0-9]+_/, '').replace(/[-_]/g, ' ');
@@ -1016,6 +1056,8 @@ function getTaskEvidences(job) {
         id: `${job.id}-ev-${idx}`,
         job_id: job.id,
         type,
+        evidence_type: type,
+        channel: evidenceChannelOf(type),
         verdict: meta.verdict || (meta.status === 'FAILED' ? 'FAIL' : 'PASS'),
         file_path: `/api/v1/jobs/${job.id}/evidence/files/${encodeURIComponent(file)}`,
         url: `/api/v1/jobs/${job.id}/evidence/files/${encodeURIComponent(file)}`,
@@ -1070,11 +1112,8 @@ function getTaskEvidences(job) {
     });
   }
 
-  // Giới hạn tối đa 2 loại evidence thực tế
-  const priorityOrder = ['UI_SCREENSHOT', 'LOG_TRACE', 'API_TEST', 'DB_QUERY'];
-  const presentTypes = priorityOrder.filter(t => list.some(e => e.type === t));
-  const allowedTypes = new Set(presentTypes.slice(0, 2));
-  return list.filter(e => allowedTypes.has(e.type));
+  // Giữ toàn bộ evidence (không cắt 2 loại) để tab API/Log không mất mục cũ.
+  return list;
 }
 
 /**
@@ -1407,38 +1446,17 @@ app.get(['/api/v1/jobs/:id/evidence', '/api/v1/jobs/:id/evidences', '/api/v1/tas
           } catch (e) { continue; }
         }
 
-        const meta = getEvidenceFileMeta(metadata, file);
+      const meta = getEvidenceFileMeta(metadata, file);
       const evidenceHashes = buildEvidenceHashes(fullFilePath, stat);
-        let type = 'LOG_TRACE';
-        let fileContent = '';
-        let parsedData = null;
-
-        if (['.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg'].includes(ext)) {
-          type = 'UI_SCREENSHOT';
-        } else if (file.toLowerCase().includes('db') || file.toLowerCase().includes('assert') || ext === '.sql') {
-          type = 'DB_QUERY';
-          try {
-            fileContent = fs.readFileSync(fullFilePath, 'utf8');
-            if (ext === '.json') parsedData = JSON.parse(fileContent);
-          } catch (e) {}
-        } else if (ext === '.json' || file.toLowerCase().includes('api')) {
-          type = 'API_TEST';
-          try {
-            fileContent = fs.readFileSync(fullFilePath, 'utf8');
-            parsedData = JSON.parse(fileContent);
-            // Nếu file json không có trường request/response hay endpoint hợp lệ, không thể là API test chuẩn
-            if (!parsedData || (typeof parsedData === 'object' && !parsedData.endpoint && !parsedData.request && !parsedData.url && !parsedData.method && !parsedData.status)) {
-              continue;
-            }
-          } catch (e) {
-            continue;
-          }
-        } else if (ext === '.log' || ext === '.txt') {
-          type = 'LOG_TRACE';
-          try {
-            fileContent = fs.readFileSync(fullFilePath, 'utf8');
-          } catch (e) {}
+      let fileContent = '';
+      let parsedData = null;
+      if (!['.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg'].includes(ext)) {
+        try { fileContent = fs.readFileSync(fullFilePath, 'utf8'); } catch (e) { fileContent = ''; }
+        if (ext === '.json' && fileContent) {
+          try { parsedData = JSON.parse(fileContent); } catch (e) { parsedData = null; }
         }
+      }
+      let type = resolveEvidenceType({ filename: file, ext, meta, parsedData });
 
         const fallbackTitle2 = file.replace(ext, '').replace(/^[0-9]+_/, '').replace(/[-_]/g, ' ');
         const evidenceTitle2 = meta.stepName || meta.description || meta.title || fallbackTitle2;
@@ -1449,6 +1467,8 @@ app.get(['/api/v1/jobs/:id/evidence', '/api/v1/jobs/:id/evidences', '/api/v1/tas
           id: `${id}-ev-${idx}`,
           job_id: id,
           type,
+          evidence_type: type,
+          channel: evidenceChannelOf(type),
           verdict: meta.verdict || (meta.status === 'FAILED' ? 'FAIL' : 'PASS'),
           file_path: `/api/v1/jobs/${id}/evidence/files/${encodeURIComponent(file)}`,
           url: `/api/v1/jobs/${id}/evidence/files/${encodeURIComponent(file)}`,
@@ -1505,20 +1525,15 @@ app.get(['/api/v1/jobs/:id/evidence', '/api/v1/jobs/:id/evidences', '/api/v1/tas
       }
     }
 
-    // 2. Quy chuẩn: Mỗi task TỐI ĐA 2 LOẠI EVIDENCE (có thể là 1 loại duy nhất)
-    // Thứ tự ưu tiên các loại evidence thực tế: UI_SCREENSHOT -> LOG_TRACE -> API_TEST -> DB_QUERY
-    const priorityOrder = ['UI_SCREENSHOT', 'LOG_TRACE', 'API_TEST', 'DB_QUERY'];
-    const presentTypes = priorityOrder.filter(t => realEvidenceList.some(e => e.type === t));
-    const allowedTypes = new Set(presentTypes.slice(0, 2)); // Tối đa 2 loại
-
-    const filteredEvidenceList = realEvidenceList.filter(e => allowedTypes.has(e.type));
+    // Giữ toàn bộ evidence (không cắt 2 loại) để tab API/Log không mất mục cũ.
+    const filteredEvidenceList = realEvidenceList;
 
     return res.json({
       success: true,
       evidence: filteredEvidenceList,
       evidences: filteredEvidenceList,
       totalFound: realEvidenceList.length,
-      typesAllowed: Array.from(allowedTypes),
+      typesAllowed: Array.from(new Set(realEvidenceList.map((e) => e.type))),
       folder: taskEvidenceDir
     });
   } catch (err) {
@@ -1650,6 +1665,11 @@ const handleUpdateEvidenceStatus = (req, res) => {
       ...(metadata[safeFilename] || {}),
       ...(verdict ? { verdict } : {}),
       ...(status ? { status } : {}),
+      ...(() => {
+        const hint = normalizeEvidenceTypeHint({ type: body.type, evidence_type: body.evidence_type, channel: body.channel });
+        if (!hint) return {};
+        return { type: hint, evidence_type: hint, channel: evidenceChannelOf(hint) };
+      })(),
       updated_at: new Date().toISOString()
     };
 
@@ -2066,11 +2086,18 @@ const executeStep = async (id) => {
         clarificationContext = '\n## CÁC YÊU CẦU ĐÃ ĐƯỢC NGƯỜI DÙNG GIẢI ĐÁP (CLARIFICATION ANSWERS):\n' +
           answeredQuestions.map((q, idx) => `Câu hỏi ${idx+1}: ${q.question}\nCâu trả lời của người dùng: ${q.answer}\n`).join('\n');
       }
-
       const planningPrompt = promptTemplateManager.buildPrompt({
         step: 'planning', taskCode, userPrompt: (job.prompt || '') + clarificationContext, workspacePath, featureDir,
         previousContext: fileManager.loadPreviousContext(workspacePath, taskCode, 'planning')
       });
+      const planningGuard = await systemone.checkGuard({ taskCode, prompt: planningPrompt });
+      if (planningGuard.blocked) {
+        jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-GUARD] ⛔ Prompt PLANNING bị chặn (secret/injection, confidence ${planningGuard.decision.confidence}). Dừng spawn CLI để an toàn.\n` });
+        db.updateJob(id, { status: 'FAILED', current_step: 'PLANNING', error_message: 'SystemOne guard block: prompt chứa secret/injection.' });
+        jobEventBus.emitJobStatus(id, { status: 'FAILED' });
+        jobEventBus.emitJobError(id, { error: 'SystemOne guard block: prompt chứa secret/injection.' });
+        return;
+      }
       jobEventBus.emitJobLog(id, { text: `\n[1/5] >>> 🤖 [PLANNING] Kích hoạt lập kế hoạch song song (Dual Planning) với Agent: ${planningAgent}\n[PLANNING] Nạp template prompt planning.md...\n[PLANNING] Agent đang phân tích mã nguồn và thiết lập Kế hoạch (Vui lòng đợi khoảng 15-30 giây)...\n` });
       const planStartTime = Date.now();
       const planProgressTimer = setInterval(() => {
@@ -2082,12 +2109,18 @@ const executeStep = async (id) => {
         const elapsedSec = Math.floor((Date.now() - planStartTime) / 1000);
         jobEventBus.emitJobLog(id, { text: `\x1b[90m🤖 [PLANNING] ⏱️ ${elapsedSec}s - Agent đang tiếp tục xử lý phân tích và tổng hợp Kế hoạch...\x1b[0m\r\n` });
       }, 12000);
-      const runner = runnerRegistry.getAvailableRunner(planningAgent);
+      const pickedPlanning = await systemone.pickRunner({ runnerRegistry, preferredName: planningAgent, taskCode, step: 'planning', jobId: id });
+      const effectivePlanningAgent = pickedPlanning.name || planningAgent;
+      if (effectivePlanningAgent !== planningAgent) {
+        db.updateJob(id, { runner: effectivePlanningAgent });
+        jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-ROUTER] 🔀 Đổi runner PLANNING ${planningAgent} → ${effectivePlanningAgent} (confidence ${pickedPlanning.decision.confidence}).\n` });
+      }
+      const runner = runnerRegistry.getAvailableRunner(effectivePlanningAgent);
       if (runner) {
         let outBuffer = '';
         try {
           await runner.execute({
-            prompt: planningPrompt, cwd: workspacePath, jobId: id,
+            prompt: planningGuard.promptToUse, cwd: workspacePath, jobId: id,
             onStdout: (text) => { outBuffer += text; jobEventBus.emitJobLog(id, { text }); },
             onStderr: (text) => { outBuffer += text; jobEventBus.emitJobLog(id, { text }); }
           });
@@ -2217,6 +2250,14 @@ const executeStep = async (id) => {
         step: 'implement', taskCode, userPrompt: job.prompt || '', workspacePath, featureDir,
         previousContext: prevContext
       });
+      const implementGuard = await systemone.checkGuard({ taskCode, prompt: implementPrompt });
+      if (implementGuard.blocked) {
+        jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-GUARD] ⛔ Prompt IMPLEMENT bị chặn (secret/injection, confidence ${implementGuard.decision.confidence}).\n` });
+        db.updateJob(id, { status: 'FAILED', current_step: 'IMPLEMENT', error_message: 'SystemOne guard block: prompt chứa secret/injection.' });
+        jobEventBus.emitJobStatus(id, { status: 'FAILED' });
+        jobEventBus.emitJobError(id, { error: 'SystemOne guard block: prompt chứa secret/injection.' });
+        return;
+      }
       db.updateJob(id, { runner: implementAgent });
       const impProgressTimer = setInterval(() => {
         const cur = db.getJobById(id);
@@ -2226,12 +2267,18 @@ const executeStep = async (id) => {
         }
         jobEventBus.emitJobLog(id, { text: `🤖 [IMPLEMENT] Agent đang tiếp tục viết mã nguồn...\n` });
       }, 6000);
-      const runner = runnerRegistry.getAvailableRunner(implementAgent);
+      const pickedImplement = await systemone.pickRunner({ runnerRegistry, preferredName: implementAgent, taskCode, step: 'implement', jobId: id });
+      const effectiveImplementAgent = pickedImplement.name || implementAgent;
+      if (effectiveImplementAgent !== implementAgent) {
+        db.updateJob(id, { runner: effectiveImplementAgent });
+        jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-ROUTER] 🔀 Đổi runner IMPLEMENT ${implementAgent} → ${effectiveImplementAgent} (confidence ${pickedImplement.decision.confidence}).\n` });
+      }
+      const runner = runnerRegistry.getAvailableRunner(effectiveImplementAgent);
       if (runner) {
         let implementResult = null;
         try {
           implementResult = await runner.execute({
-            prompt: implementPrompt, cwd: workspacePath, jobId: id,
+            prompt: implementGuard.promptToUse, cwd: workspacePath, jobId: id,
             onStdout: (text) => jobEventBus.emitJobLog(id, { text }),
             onStderr: (text) => jobEventBus.emitJobLog(id, { text })
           });
@@ -2280,6 +2327,14 @@ const executeStep = async (id) => {
         previousContext: fileManager.loadPreviousContext(workspacePath, taskCode, 'testing'),
         errorLogs: ''
       });
+      const testingGuard = await systemone.checkGuard({ taskCode, prompt: testingPrompt });
+      if (testingGuard.blocked) {
+        jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-GUARD] ⛔ Prompt TESTING bị chặn (secret/injection, confidence ${testingGuard.decision.confidence}).\n` });
+        db.updateJob(id, { status: 'FAILED', current_step: 'TESTING', error_message: 'SystemOne guard block: prompt chứa secret/injection.' });
+        jobEventBus.emitJobStatus(id, { status: 'FAILED' });
+        jobEventBus.emitJobError(id, { error: 'SystemOne guard block: prompt chứa secret/injection.' });
+        return;
+      }
       db.updateJob(id, { runner: testAgent });
       jobEventBus.emitJobLog(id, { text: `\n[3/5] >>> 🤖 [TESTING] Bắt đầu kiểm thử thật với Runner/Agent: ${testAgent}...\n` });
 
@@ -2292,14 +2347,20 @@ const executeStep = async (id) => {
         jobEventBus.emitJobLog(id, { text: `🤖 [TESTING] Agent đang tiếp tục kiểm thử...\n` });
       }, 6000);
 
-      const runner = runnerRegistry.getAvailableRunner(testAgent);
+      const pickedTesting = await systemone.pickRunner({ runnerRegistry, preferredName: testAgent, taskCode, step: 'testing', jobId: id });
+      const effectiveTestAgent = pickedTesting.name || testAgent;
+      if (effectiveTestAgent !== testAgent) {
+        db.updateJob(id, { runner: effectiveTestAgent });
+        jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-ROUTER] 🔀 Đổi runner TESTING ${testAgent} → ${effectiveTestAgent} (confidence ${pickedTesting.decision.confidence}).\n` });
+      }
+      const runner = runnerRegistry.getAvailableRunner(effectiveTestAgent);
       let testingResult = null;
       let agentFailed = false;
 
       if (runner) {
         try {
           testingResult = await runner.execute({
-            prompt: testingPrompt, cwd: workspacePath, jobId: id,
+            prompt: testingGuard.promptToUse, cwd: workspacePath, jobId: id,
             timeoutMs: 900000,
             onStdout: (text) => jobEventBus.emitJobLog(id, { text }),
             onStderr: (text) => jobEventBus.emitJobLog(id, { text })
@@ -2359,6 +2420,14 @@ const executeStep = async (id) => {
     if (job.status === 'VERIFY') {
       const checkVerify = db.getJobById(id);
       if (checkVerify && checkVerify.status === 'CANCELLED') return;
+      const preJudge = await systemone.checkPreJudge({ jobId: id, taskCode, summary: String(job.error_message || '').slice(0, 1000) });
+      jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-PREJUDGE] pass=${preJudge.pass} failed=[${(preJudge.failedFields || []).join(',')}] confidence=${preJudge.confidence}${preJudge.cached ? ' (cache)' : ''}.\n` });
+      // PreJudge chỉ gợi ý lọc kênh, TUYỆT ĐỐI KHÔNG bypass verifyTaskEvidence (quy tắc server.js: buộc đối soát file evidence thật).
+      if (preJudge && preJudge.pass === true && Number(preJudge.confidence) >= 0.5) {
+        jobEventBus.emitJobLog(id, { text: `\n[VERIFY] SystemOne pre-judge PASS — vẫn đối soát evidence thật bằng code, chỉ ưu tiên thứ tự kênh kiểm tra.\n` });
+      } else if (preJudge && Array.isArray(preJudge.failedFields) && preJudge.failedFields.length > 0) {
+        jobEventBus.emitJobLog(id, { text: `\n[VERIFY] SystemOne gợi ý tập trung kênh: [${preJudge.failedFields.join(',')}].\n` });
+      }
       const { failed: verifyFailed } = verifyTaskEvidence({
         jobId: id, evidenceDir, featureDir, taskCode,
         emit: (text) => jobEventBus.emitJobLog(id, { text })
@@ -2396,12 +2465,36 @@ const executeStep = async (id) => {
         previousContext: fileManager.loadPreviousContext(workspacePath, taskCode, 'fixing'),
         errorLogs: job.error_message || ''
       });
-      db.updateJob(id, { runner: fixingAgent });
+      const fixingGuard = await systemone.checkGuard({ taskCode, prompt: fixingPrompt });
+      if (fixingGuard.blocked) {
+        jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-GUARD] ⛔ Prompt FIXING bị chặn (secret/injection, confidence ${fixingGuard.decision.confidence}).\n` });
+        db.updateJob(id, { status: 'FAILED', current_step: 'FIXING', error_message: 'SystemOne guard block: prompt chứa secret/injection.' });
+        jobEventBus.emitJobStatus(id, { status: 'FAILED' });
+        jobEventBus.emitJobError(id, { error: 'SystemOne guard block: prompt chứa secret/injection.' });
+        return;
+      }
+      const attempt = systemone.getFixAttempt(job);
+      const maxRetries = Number(config.MAX_FIXING_RETRIES) || 3;
+      const fixGate = await systemone.checkFixGate({ jobId: id, attempt, maxRetries, failures: { error: String(job.error_message || '').slice(0, 1000) }, files: [] });
+      jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-FIXGATE] attempt=${attempt}/${maxRetries} retry=${fixGate.retry} p_success=${fixGate.p_success} scope=${fixGate.fixScope}.\n` });
+      if (fixGate && fixGate.retry === false) {
+        db.updateJob(id, { status: 'FAILED', current_step: 'FIXING', error_message: `SystemOne fixGate dừng retry (attempt ${attempt}/${maxRetries}, p_success ${fixGate.p_success}).` });
+        jobEventBus.emitJobStatus(id, { status: 'FAILED' });
+        jobEventBus.emitJobError(id, { error: `SystemOne fixGate dừng retry (p_success ${fixGate.p_success}).` });
+        return;
+      }
+      db.updateJob(id, { runner: fixingAgent, pipeline_config: systemone.withFixAttempt(job, attempt + 1) });
       jobEventBus.emitJobLog(id, { text: `\n[ERROR] Phát hiện sự cố. Đang sửa lỗi với 🤖 Agent: ${fixingAgent}...\n` });
-      const runner = runnerRegistry.getAvailableRunner(fixingAgent);
+      const pickedFixing = await systemone.pickRunner({ runnerRegistry, preferredName: fixingAgent, taskCode, step: 'fixing', jobId: id });
+      const effectiveFixingAgent = pickedFixing.name || fixingAgent;
+      if (effectiveFixingAgent !== fixingAgent) {
+        db.updateJob(id, { runner: effectiveFixingAgent });
+        jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-ROUTER] 🔀 Đổi runner FIXING ${fixingAgent} → ${effectiveFixingAgent} (confidence ${pickedFixing.decision.confidence}).\n` });
+      }
+      const runner = runnerRegistry.getAvailableRunner(effectiveFixingAgent);
       if (runner) {
         await runner.execute({
-          prompt: fixingPrompt, cwd: workspacePath, jobId: id,
+          prompt: fixingGuard.promptToUse, cwd: workspacePath, jobId: id,
           onStdout: (text) => jobEventBus.emitJobLog(id, { text }),
           onStderr: (text) => jobEventBus.emitJobLog(id, { text })
         });
@@ -2548,8 +2641,16 @@ const handleJobStart = async (req, res) => {
       });
     }
 
+    // 2b. SystemOne Triage + Dedup trước enqueue (fail-open về đường cũ)
+    const triage = await systemone.checkTriage({ taskCode, prompt: job.prompt || job.title || '', jobId: id });
+    const dedup = await systemone.checkDedup({ taskCode, prompt: job.prompt || job.title || '' });
+    jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-TRIAGE] complexity=${triage.complexity} track=${triage.track} needBrowser=${triage.needBrowser} confidence=${triage.confidence}${triage.cached ? ' (cache)' : ''} bucket=${dedup.bucketId}.\n` });
+    if (triage && triage.track === 'quick' && Number(triage.confidence) >= 0.5) {
+      systemone.addCliSaved(1);
+      jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-TRIAGE] Task nhẹ (S/quick) — ưu tiên enqueue, planning sẽ rút gọn.\n` });
+    }
     // 3. Đưa job vào TaskQueue để quản lý Concurrency & Workspace Queue Lock
-    taskQueue.enqueue(job, () => runJobPipeline(id), job.priority || 0);
+    taskQueue.enqueue(job, () => runJobPipeline(id), (triage && triage.track === 'quick' ? (job.priority || 0) + 1 : job.priority || 0));
 
     return res.json({
       success: true,
@@ -3131,5 +3232,10 @@ app.use((err, req, res, next) => {
 module.exports = {
   app,
   jobEventBus,
-  verifyTaskEvidence
+  verifyTaskEvidence,
+  resolveEvidenceType,
+  normalizeEvidenceTypeHint,
+  hasApiRuntimeShape,
+  hasDbShape,
+  evidenceChannelOf
 };

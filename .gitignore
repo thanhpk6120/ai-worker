@@ -5,6 +5,7 @@ package-lock.json
 # Environment and secrets
 .env
 .env.*
+!.env.example
 *.local
 
 # SQLite Database and WAL files

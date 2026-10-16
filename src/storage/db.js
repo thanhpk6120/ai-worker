@@ -583,6 +583,8 @@ function getEvidenceByJobId(jobId) {
       id: r.id,
       job_id: r.job_id,
       type: r.type,
+      evidence_type: parsed.evidence_type || parsed.evidenceType || r.type,
+      channel: parsed.channel || (r.type === 'UI_SCREENSHOT' ? 'ui' : r.type === 'API_TEST' ? 'api' : r.type === 'DB_QUERY' || r.type === 'DB_ASSERT' ? 'db' : r.type === 'LOG_TRACE' || r.type === 'SERVICE_LOG' ? 'log' : null),
       verdict: r.verdict === 'FAIL' ? 'FAIL' : 'PASS',
       status: parsed.status || (r.verdict === 'FAIL' ? 'FAIL' : 'PASSED'),
       file_path: parsed.file_path || (r.type === 'UI_SCREENSHOT' ? `/evidence/${r.id}.png` : null),

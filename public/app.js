@@ -1373,15 +1373,31 @@
     const logsList = document.getElementById('logsEvidenceList');
     const dbList = document.getElementById('dbEvidenceList');
 
-    const uiEvidences = state.evidences.filter((e) =>
-      e.type === 'UI_SCREENSHOT' ||
-      e.evidence_type === 'UI_SCREENSHOT' ||
-      e.type === 'ui' ||
-      (e.file_path && (e.file_path.endsWith('.png') || e.file_path.endsWith('.webp') || e.file_path.endsWith('.jpg') || e.file_path.endsWith('.jpeg') || e.file_path.endsWith('.svg')))
-    );
-    const apiEvidences = state.evidences.filter((e) => e.evidence_type === 'API_TEST' || e.type === 'API_TEST' || e.type === 'api' || (e.file_path && e.file_path.includes('api')));
-    const logEvidences = state.evidences.filter((e) => e.evidence_type === 'SERVICE_LOG' || e.evidence_type === 'LOG_TRACE' || e.type === 'LOG_TRACE' || e.type === 'logs' || (e.file_path && (e.file_path.endsWith('.log') || e.file_path.endsWith('.txt'))));
-    const dbEvidences = state.evidences.filter((e) => e.evidence_type === 'DB_QUERY' || e.evidence_type === 'DB_ASSERT' || e.type === 'DB_QUERY' || e.type === 'DB_ASSERT' || e.type === 'db' || (e.file_path && (e.file_path.includes('db') || e.file_path.includes('assert'))));
+    const evFilename = (e) => String(e.filename || e.fileName || (e.file_path ? e.file_path.split('/').pop().split('?')[0] : '') || '').toLowerCase();
+    const evExplicitChannel = (e) => {
+      const c = String(e.channel || '').toLowerCase();
+      if (c === 'ui' || c === 'api' || c === 'log' || c === 'logs' || c === 'db') return c === 'logs' ? 'log' : c;
+      const t = String(e.evidence_type || e.type || '').toUpperCase();
+      if (t === 'UI_SCREENSHOT' || t === 'UI') return 'ui';
+      if (t === 'API_TEST' || t === 'API') return 'api';
+      if (t === 'DB_QUERY' || t === 'DB_ASSERT' || t === 'DB') return 'db';
+      if (t === 'LOG_TRACE' || t === 'SERVICE_LOG' || t === 'LOGS') return 'log';
+      return null;
+    };
+    const evChannel = (e) => {
+      const explicit = evExplicitChannel(e);
+      if (explicit) return explicit;
+      const fn = evFilename(e);
+      if (/(\.png|\.webp|\.jpg|\.jpeg|\.svg)$/.test(fn)) return 'ui';
+      if (/(\.log|\.txt)$/.test(fn)) return 'log';
+      if (fn.endsWith('.sql') || fn.includes('db') || fn.includes('assert')) return 'db';
+      if (fn.endsWith('.json')) return fn.includes('api') ? 'api' : 'log';
+      return 'log';
+    };
+    const uiEvidences = state.evidences.filter((e) => evChannel(e) === 'ui');
+    const apiEvidences = state.evidences.filter((e) => evChannel(e) === 'api');
+    const logEvidences = state.evidences.filter((e) => evChannel(e) === 'log');
+    const dbEvidences = state.evidences.filter((e) => evChannel(e) === 'db');
 
     // Cache filtered arrays for quick lookup by index in showEvidenceDetailModal
     state._evidenceCache = {
