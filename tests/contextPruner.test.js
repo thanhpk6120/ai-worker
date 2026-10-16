@@ -78,11 +78,11 @@ describe('Context Pruner & Step-specific Context Loading Test Suite', () => {
     assert.ok(ctx.includes('test_plan.md'), 'Phải nạp test_plan.md');
   });
 
-  it('TESTING: Nạp test_plan.md và report.md', () => {
+  it('TESTING: Nạp dev_plan.md, test_plan.md và report.md', () => {
     const ctx = storageFileManager.loadPreviousContext(testWorkspace, taskCode, 'testing');
+    assert.ok(ctx.includes('dev_plan.md'), 'Phải chứa dev_plan.md');
     assert.ok(ctx.includes('test_plan.md'), 'Phải chứa test_plan.md');
     assert.ok(ctx.includes('report.md'), 'Phải chứa report.md');
-    assert.ok(!ctx.includes('dev_plan.md'), 'Không nạp dev_plan.md ở bước testing');
   });
 
   it('FIXING: Nạp dev_plan.md và test_plan.md', () => {

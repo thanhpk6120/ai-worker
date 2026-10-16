@@ -1,5 +1,5 @@
 const { spawnSync } = require('node:child_process');
-
+const config = require('../config');
 class BaseAdapter {
   /**
    * @param {string} name - Tên định danh của runner
@@ -256,6 +256,30 @@ class BaseAdapter {
     let earlyExitTriggered = false;
     let earlyExitKilled = false;
     let earlyExitTimer = null;
+    let lastThoughtNorm = '';
+    let thoughtRepeatCount = 0;
+    let stallWarned = false;
+    // Phát hiện thought lặp đơn giản: cùng 1 thought (chuẩn hóa 140 ký tự đầu) lặp 3 lần liên tiếp -> cảnh báo STALL 1 lần, không kill (tránh over-build).
+    const checkThoughtRepeat = (chunk) => {
+      if (stallWarned) return;
+      const raw = typeof chunk === 'string' ? chunk : String(chunk);
+      const clean = raw.replace(/\x1b\[[0-9;]*m/g, '');
+      if (clean.includes('[AI-AGENT-PROCESS')) return;
+      const norm = clean.trim().slice(0, 140);
+      if (!norm) return;
+      if (norm === lastThoughtNorm) {
+        thoughtRepeatCount += 1;
+      } else {
+        lastThoughtNorm = norm;
+        thoughtRepeatCount = 1;
+      }
+      if (thoughtRepeatCount >= 3) {
+        stallWarned = true;
+        if (typeof originalOnStdout === 'function') {
+          originalOnStdout('\n[STALL] Phat hien thought/output lap 3 lan lien tiep — agent co the bi ket, theo doi them.\n');
+        }
+      }
+    };
     const checkEarlyExit = (chunk) => {
       if (earlyExitTriggered) return;
       const text = typeof chunk === 'string' ? chunk : String(chunk);
@@ -287,6 +311,7 @@ class BaseAdapter {
         try { originalOnStdout(chunk); } catch (e) {}
       }
       try { checkEarlyExit(chunk); } catch (e) {}
+      try { checkThoughtRepeat(chunk); } catch (e) {}
     };
 
 
@@ -303,9 +328,20 @@ class BaseAdapter {
       onStdout(`\r\n\x1b[1;36m[AI-AGENT-PROCESS]\x1b[0m \x1b[1;32m$ ${fullCliLine}\x1b[0m\r\n\x1b[90m[Thư mục làm việc: ${cwd}]\x1b[0m\r\n\x1b[90m────────────────────────────────────────────────────────────────────────────────\x1b[0m\r\n`);
     }
 
-    const procEnv = Object.assign({}, process.env, {
-      OMP_MCP_TIMEOUT_MS: '60000'
-    });
+    // MCP handshake/tool-search qua env: chỉ áp cho claude/omp (CLI có cơ chế MCP xác minh được).
+    // codex/opencode/antigravity: grep --help không có flag/env MCP tương ứng nên không ép (xem comment từng adapter).
+    const mcpHandshakeTimeout = String(config.MCP_HANDSHAKE_TIMEOUT_MS !== undefined && config.MCP_HANDSHAKE_TIMEOUT_MS !== null ? config.MCP_HANDSHAKE_TIMEOUT_MS : 60000);
+    const mcpToolSearch = config.MCP_TOOL_SEARCH_ENABLED ? 'true' : 'false';
+    const cmdForMcpCheck = String((typeof effectiveCommand === 'string' && effectiveCommand) || this.command || '');
+    const isMcpManagedRunner = /(^|[^a-z])(claude|omp)([^a-z]|$)/i.test(cmdForMcpCheck) || this.name === 'claude-code' || this.name === 'omp';
+    const mcpEnv = isMcpManagedRunner ? {
+      MCP_TIMEOUT: mcpHandshakeTimeout,
+      MCP_HANDSHAKE_TIMEOUT: mcpHandshakeTimeout,
+      MCP_HANDSHAKE_TIMEOUT_MS: mcpHandshakeTimeout,
+      OMP_MCP_TIMEOUT_MS: mcpHandshakeTimeout,
+      ENABLE_TOOL_SEARCH: mcpToolSearch
+    } : {};
+    const procEnv = Object.assign({}, process.env, mcpEnv);
 
     proc = defaultProcessManager.spawnProcess({
       command: effectiveCommand,
@@ -317,7 +353,7 @@ class BaseAdapter {
       onStderr,
       // Đặt shell: false khi chạy trực tiếp binary .exe để tránh cmd.exe bóc tách làm mất dấu nháy và tham số
       shell: effectiveCommand.endsWith('.cmd') || effectiveCommand.endsWith('.bat'),
-      timeoutMs: options.timeoutMs || 900000
+      timeoutMs: config.normalizeTimeoutMs(options, config.DEFAULT_TIMEOUT_MS)
     });
 
     // Cải tiến: Nếu stdout qua pipe bị chặn (như Claude/OMP headless ẩn stream),

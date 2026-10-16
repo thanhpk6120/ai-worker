@@ -11,6 +11,8 @@ class CodexCliAdapter extends BaseAdapter {
   /**
    * Xây dựng args cho codex CLI
    * Format: codex exec "<prompt>" --non-interactive
+   * MCP: `codex exec --help` khong co flag --mcp-.../--tool-search/handshake nao nen khong ep flag bia.
+   * Muốn chỉnh MCP/timeout thì dùng -c key=value (config.toml) do caller truyền explicit, không tự thêm.
    * @param {string} prompt
    * @param {object} options
    * @returns {string[]}

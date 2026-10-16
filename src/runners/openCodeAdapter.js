@@ -11,6 +11,8 @@ class OpenCodeAdapter extends BaseAdapter {
   /**
    * Xây dựng args cho opencode CLI
    * Format: opencode run "<prompt>" --auto-approve --no-interaction
+   * MCP: `opencode run --help` không có flag/env MCP handshake/tool-search nào nên không ép flag bịa.
+   * Muốn dùng MCP thì cấu hình trong opencode.json, không qua buildArgs.
    * @param {string} prompt
    * @param {object} options
    * @returns {string[]}

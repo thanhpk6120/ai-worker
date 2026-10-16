@@ -29,6 +29,12 @@ Nhiệm vụ của bạn là kiểm thử toàn diện giải pháp của task *
    - Giữ nguyên tiếng Anh cho tên riêng, thuật ngữ chuyên ngành, lệnh, API, tên file và đoạn code.
 
 
+## QUY TẮC BATCHING KIỂM THỬ (BẮT BUỘC):
+1. BẮT BUỘC đọc toàn bộ file .md docs hướng dẫn start service (README.md, docs/, dev_plan.md mục lệnh run/port) + test_plan.md TRƯỚC khi viết test.
+2. Tạo CẢ LOẠT test một lần: viết đầy đủ mọi test case trong test_plan (happy path + edge + lỗi) rồi mới chạy, không tạo 1 test rồi chạy lẻ.
+3. Chạy BATCH: gom toàn bộ test thành một đợt chạy duy nhất, thu log tập trung vào evidence; nếu fail thì gom lỗi rồi sửa/chạy lại theo loạt tiếp theo.
+4. CẤM chạy lắt nhắt từng test đơn lẻ khi chưa tạo đủ loạt.
+
 ## Hướng dẫn thực thi:
 0. **BƯỚC 0 BẮT BUỘC — LOAD DANH SÁCH MCP VÀ CHỌN TOOL:** Đọc mục `🔌 DANH SÁCH MCP SERVERS` ở trên, đối chiếu yêu cầu với khả năng tool MCP. Có MCP làm được → DÙNG MCP TRƯỚC; không có hoặc MCP lỗi → dùng cách khác và ghi lý do fallback vào log.
 1. BẮT BUỘC đọc kỹ test_plan.md trong thư mục {{FEATURE_DIR}}, đặc biệt mục ## 0. Cấu hình Bằng Chứng Nghiệm Thu (Evidence Configuration). Đồng thời BẮT BUỘC đọc lại thư mục docs của workspace (docs/, README.md, ARCHITECTURE.md, hướng dẫn run service, lệnh build/chạy service, port/API endpoint trong dev_plan.md) để biết đúng lệnh khởi động service, port thật, thứ tự start backend/frontend và command gọi API — TUYỆT ĐỐI KHÔNG tự suy đoán lệnh chạy hay port.

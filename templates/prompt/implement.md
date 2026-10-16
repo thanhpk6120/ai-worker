@@ -31,6 +31,12 @@ Nhiệm vụ của bạn là hiện thực hóa toàn bộ mã nguồn của tas
    - Giữ nguyên tiếng Anh cho tên riêng, thuật ngữ chuyên ngành, lệnh, API, tên file và đoạn code.
 
 
+## QUY TẮC BATCHING SỬA CODE (BẮT BUỘC):
+1. Quét hết chỗ cần sửa TRƯỚC khi sửa: đọc dev_plan.md, grep/search toàn bộ service liên quan, liệt kê đầy đủ danh sách file + hàm + dòng cần chạm.
+2. Sửa 1 LOẠT duy nhất: thực hiện toàn bộ danh sách đã quét trong cùng một đợt chỉnh sửa, không sửa từng file rời rạc.
+3. Kiểm tra lại sau loạt sửa: đối chiếu dev_plan.md, grep xác nhận không còn chỗ sót; nếu thiếu thì gom thành LOẠT TIẾP THEO rồi sửa tiếp.
+4. CẤM sửa lắt nhắt: tuyệt đối không sửa 1 file rồi dừng, không sửa nhỏ giọt từng chỗ một khi chưa quét hết.
+
 ## Hướng dẫn thực thi:
 0. **BƯỚC 0 BẮT BUỘC — LOAD DANH SÁCH MCP VÀ CHỌN TOOL (áp dụng cho MỌI prompt, không riêng Jira):** Đọc mục `🔌 DANH SÁCH MCP SERVERS` ở trên, đối chiếu yêu cầu với khả năng tool MCP. Có MCP làm được → DÙNG MCP TRƯỚC; không có hoặc MCP lỗi → dùng cách khác (browser, curl, CLI...) và ghi lý do fallback vào log. Trình duyệt vẫn dùng bình thường cho tác vụ MCP không cover được.
 1. Đọc kỹ tài liệu `dev_plan.md` trong thư mục `{{FEATURE_DIR}}`.
@@ -42,3 +48,4 @@ Nhiệm vụ của bạn là hiện thực hóa toàn bộ mã nguồn của tas
 2. **Jira/Confluence nội bộ:** ưu tiên MCP Atlassian (`mcp__company-atlassian__jira_get_issue` trên Claude / `jira_get_issue` trên OMP); trình duyệt chỉ dùng cho trang public hoặc kiểm thử UI, tránh fetch trực tiếp URL nội bộ yêu cầu SSO/login.
 3. **Kiểm thử UI/trình duyệt:** kiểm tra MCP browser automation (cloakbrowser_*) trước; không có thì dùng browser thủ công bình thường.
 4. Ghi rõ lý do vào log khi phải fallback vì MCP không khả dụng.
+5. **MCP Jira rỗng → CẤM browser login Jira/Confluence nội bộ:** Nếu mục `🔌 DANH SÁCH MCP SERVERS` trống hoặc không có tool Jira/Atlassian (MCP lỗi/không khả dụng) thì TUYỆT ĐỐI KHÔNG mở browser đăng nhập (SSO) vào Jira/Confluence nội bộ; chỉ dùng code local và tài liệu trong workspace/`{{FEATURE_DIR}}`, ghi rõ lý do vào log.

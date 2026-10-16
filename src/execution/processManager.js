@@ -97,12 +97,26 @@ class ProcessManager extends EventEmitter {
       throw new Error('Tham số command là bắt buộc và phải là chuỗi ký tự');
     }
 
-    // Thời gian timeout mặc định: 900 giây (15 phút) hoặc theo config
-    const defaultTimeoutMs = (config.DEFAULT_TIMEOUT ? config.DEFAULT_TIMEOUT : 900) * 1000;
-    const timeoutMs = typeof options.timeoutMs === 'number' && options.timeoutMs >= 0
-      ? options.timeoutMs
-      : defaultTimeoutMs;
+    // Timeout mac dinh tu config.DEFAULT_TIMEOUT (giay) -> ms; uu tien timeout truyen xuong (ms/giay/phut).
+    const defaultTimeoutMs = config.DEFAULT_TIMEOUT_MS || ((config.DEFAULT_TIMEOUT ? config.DEFAULT_TIMEOUT : 900) * 1000);
+    const timeoutMs = typeof config.normalizeTimeoutMs === 'function'
+      ? config.normalizeTimeoutMs(options, defaultTimeoutMs)
+      : (typeof options.timeoutMs === 'number' && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
+        ? options.timeoutMs
+        : defaultTimeoutMs);
 
+    // MCP handshake/tool-search: chỉ truyền cho claude/omp (CLI có cơ chế MCP xác minh được).
+    // Giữ OMP_MCP_TIMEOUT_MS để tương thích với bản cứng 60000 trước đây ở baseAdapter.
+    const mcpHandshakeTimeoutMs = String(config.MCP_HANDSHAKE_TIMEOUT_MS !== undefined && config.MCP_HANDSHAKE_TIMEOUT_MS !== null ? config.MCP_HANDSHAKE_TIMEOUT_MS : 60000);
+    const mcpToolSearchFlag = config.MCP_TOOL_SEARCH_ENABLED ? 'true' : 'false';
+    const isMcpManagedCommand = typeof command === 'string' && /(^|[^a-z])(claude|omp)([^a-z]|$)/i.test(command);
+    const mcpEnv = isMcpManagedCommand ? {
+      MCP_TIMEOUT: mcpHandshakeTimeoutMs,
+      MCP_HANDSHAKE_TIMEOUT: mcpHandshakeTimeoutMs,
+      MCP_HANDSHAKE_TIMEOUT_MS: mcpHandshakeTimeoutMs,
+      OMP_MCP_TIMEOUT_MS: mcpHandshakeTimeoutMs,
+      ENABLE_TOOL_SEARCH: mcpToolSearchFlag
+    } : {};
     const mergedEnv = {
       ...process.env,
       PYTHONUNBUFFERED: '1',
@@ -112,6 +126,7 @@ class ProcessManager extends EventEmitter {
       TERM: 'xterm-256color',
       COLUMNS: '250',
       LINES: '50',
+      ...mcpEnv,
       ...env
     };
 

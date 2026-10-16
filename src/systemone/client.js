@@ -224,7 +224,7 @@ async function decideGuard({ taskCode = '', prompt = '' } = {}) {
     const j = noulOf(answers, 'has_injection');
     if (![s, j].every(Number.isFinite)) { stats.fallbacks += 1; return policy.guardHeuristic(); }
     const peak = Math.max(s, j);
-    const out = { hasSecret: s >= THRESHOLD, hasInjection: j >= THRESHOLD, action: peak >= 0.8 ? 'block' : (peak >= THRESHOLD ? 'scrub' : 'allow'), confidence: peak, cached: false };
+    const out = { hasSecret: s >= THRESHOLD, hasInjection: j >= THRESHOLD, action: peak >= 0.8 ? 'warn' : (peak >= THRESHOLD ? 'scrub' : 'allow'), confidence: peak, cached: false };
     setCache(route, payload, out);
     return { ...out };
   } catch (e) {
@@ -294,21 +294,23 @@ async function pickRunner({ runnerRegistry, preferredName, taskCode, step, jobId
   }
 }
 async function checkGuard({ taskCode, prompt }) {
-  const scrubbed = maskSecrets(String(prompt || ''));
+  const original = String(prompt || '');
+  const scrubbed = maskSecrets(original);
   try {
-    if (!isEnabled()) return { action: 'scrub', promptToUse: scrubbed, decision: policy.guardHeuristic(), blocked: false };
+    if (!isEnabled()) return { action: 'scrub', promptToUse: original, decision: policy.guardHeuristic(), blocked: false };
     const decision = await decideGuard({ taskCode, prompt });
-    if (!decision) return { action: 'scrub', promptToUse: scrubbed, decision: policy.guardHeuristic(), blocked: false };
-    if (decision.action === 'block') {
+    if (!decision) return { action: 'scrub', promptToUse: original, decision: policy.guardHeuristic(), blocked: false };
+    if (decision.action === 'block' || decision.action === 'warn') {
       addCliSaved(1);
-      return { action: 'block', promptToUse: scrubbed, decision, blocked: true };
+      console.warn(`[SYSTEMONE-GUARD] warn action=${decision.action} confidence=${decision.confidence} hasSecret=${decision.hasSecret} hasInjection=${decision.hasInjection} task=${taskCode} promptLog=${scrubbed.slice(0, 200)} -> tiep tuc bang prompt goc, khong FAILED job.`);
+      return { action: 'warn', promptToUse: original, decision, blocked: false, warned: true };
     }
     if ((decision.action || 'scrub') === 'allow' && decision.hasSecret === false && decision.hasInjection === false) {
-      return { action: 'allow', promptToUse: String(prompt || ''), decision, blocked: false };
+      return { action: 'allow', promptToUse: original, decision, blocked: false };
     }
-    return { action: decision.action || 'scrub', promptToUse: scrubbed, decision, blocked: false };
+    return { action: decision.action || 'scrub', promptToUse: original, decision, blocked: false };
   } catch (e) {
-    return { action: 'scrub', promptToUse: scrubbed, decision: policy.guardHeuristic(), blocked: false };
+    return { action: 'scrub', promptToUse: original, decision: policy.guardHeuristic(), blocked: false };
   }
 }
 async function checkTriage({ taskCode, prompt, jobId }) {

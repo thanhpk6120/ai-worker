@@ -35,10 +35,14 @@ class TaskQueue extends EventEmitter {
    */
   enqueue(job, runFn, priority = 0) {
     const jobPriority = priority !== undefined ? priority : (job.priority || 0);
+    const timeoutMs = (config && typeof config.resolveJobTimeoutMs === 'function')
+      ? config.resolveJobTimeoutMs(job, config.DEFAULT_TIMEOUT_MS)
+      : undefined;
     const item = {
       job,
       runFn,
       priority: jobPriority,
+      timeoutMs,
       enqueuedAt: Date.now()
     };
 
@@ -56,7 +60,7 @@ class TaskQueue extends EventEmitter {
     }
 
     const wsKey = this._getWorkspaceKey(job);
-    this.emit('job:enqueued', { jobId: job.id, priority: jobPriority, workspaceKey: wsKey });
+    this.emit('job:enqueued', { jobId: job.id, priority: jobPriority, timeoutMs, workspaceKey: wsKey });
     this._processNext();
     return item;
   }
@@ -86,7 +90,7 @@ class TaskQueue extends EventEmitter {
     }
 
     const [item] = this.queue.splice(candidateIndex, 1);
-    const { job, runFn, priority } = item;
+    const { job, runFn, priority, timeoutMs } = item;
     const jobId = job.id;
     const wsKey = this._getWorkspaceKey(job);
 
@@ -98,21 +102,28 @@ class TaskQueue extends EventEmitter {
       job,
       runFn,
       priority,
+      timeoutMs,
       workspaceKey: wsKey,
       startTime: Date.now()
     };
     this.runningJobs.set(jobId, runningInfo);
 
-    this.emit('job:started', { jobId, job, workspaceKey: wsKey });
+    this.emit('job:started', { jobId, job, timeoutMs, workspaceKey: wsKey });
 
     Promise.resolve()
-      .then(() => runFn(job))
+      .then(() => runFn(job, { timeoutMs }))
       .then((result) => {
         this.runningJobs.delete(jobId);
         if (wsKey && this.activeWorkspaces.get(wsKey) === jobId) {
           this.activeWorkspaces.delete(wsKey);
         }
-        this.emit('job:completed', { jobId, result, workspaceKey: wsKey });
+        const failedByResult = result && typeof result === 'object' && String(result.status || '').toUpperCase() === 'FAILED';
+        if (failedByResult) {
+          const err = result.error instanceof Error ? result.error : new Error((result.error && result.error.message) || result.error || 'Job FAILED');
+          this.emit('job:failed', { jobId, error: err, result, workspaceKey: wsKey });
+        } else {
+          this.emit('job:completed', { jobId, result, workspaceKey: wsKey });
+        }
         this._processNext();
       })
       .catch((error) => {

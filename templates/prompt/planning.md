@@ -30,13 +30,24 @@ Nhiệm vụ của bạn là khảo sát codebase tại workspace và lập kế
    - Giữ nguyên tiếng Anh cho tên riêng, thuật ngữ chuyên ngành, lệnh, API, tên file và đoạn code.
 
 
+## PHÂN LOẠI ĐỘ KHÓ TASK (BẮT BUỘC ĐẦU PHASE PLANNING):
+1. Trước khi viết dev_plan.md, BẮT BUỘC phân loại độ khó của task và ghi rõ vào đầu dev_plan.md:
+   - Đơn giản: sửa 1-2 file, logic rõ ràng, không đổi kiến trúc, không migration.
+   - Trung bình: chạm 3-5 file hoặc 1 module, có thay đổi API/DB nhỏ.
+   - Phức tạp: chạm từ 6 file trở lên, xuyên module, đổi kiến trúc, migration, hoặc yêu cầu mơ hồ.
+2. Quy tắc plan theo độ khó:
+   - Task đơn giản: dev_plan được viết NGẮN GỌN (tối đa 50 dòng, chỉ ghi file cần sửa + bước chính), KHÔNG lan man.
+   - Task đơn giản: test_plan viết NGẮN GỌN nhưng BẮT BUỘC đủ mã TC-* (happy path + edge case + lỗi chính), nội dung sau trim đạt tối thiểu length>=60 ký tự để khớp kiểm tra server.js, KHÔNG ép 100 dòng.
+   - Task trung bình/phức tạp: test_plan BẮT BUỘC đủ case chi tiết, giữ tối thiểu 100 dòng như Bước 4b, KHÔNG được rút gọn test plan theo dev_plan.
+3. Ghi dòng kết luận dạng: Mức độ khó: ĐƠN GIẢN / TRUNG BÌNH / PHỨC TẠP + lý do 1 dòng.
+
 ## Hướng dẫn thực thi:
 1. **BƯỚC 0 BẮT BUỘC — LOAD DANH SÁCH MCP VÀ CHỌN TOOL (áp dụng cho MỌI prompt, không riêng Jira):** Đọc mục `🔌 DANH SÁCH MCP SERVERS` ở trên, liệt kê các tool MCP đang có trong phiên. Đối chiếu từng yêu cầu trong prompt với khả năng của các tool đó. Nếu có MCP làm được → DÙNG MCP TRƯỚC. Nếu không có MCP phù hợp hoặc MCP báo lỗi → tự tìm cách khác (browser thủ công, curl, CLI...) và ghi rõ lý do fallback vào log. Trình duyệt vẫn được dùng bình thường cho các tác vụ mà MCP không cover được.
 2. BẮT BUỘC truy cập thư mục docs của workspace (ví dụ docs/, docs/features/, README.md, ARCHITECTURE.md, DESIGN.md, DB schema) để lấy: kiến trúc dự án, sơ đồ module/service, hướng dẫn run service, lệnh build/chạy service, port/API endpoint, biến môi trường và prerequirement. Ghi các lệnh run service và port đã phát hiện vào dev_plan.md để các bước sau (IMPLEMENT/TESTING) dùng lại, tránh tự suy đoán lệnh chạy.
 3. Đọc các file ngữ cảnh của task trong `{{FEATURE_DIR}}` (`expect.md`, `plan.md`, `tasks.md`, `memory.md`, `context.md` — file nào có thì đọc).
 4. BẮT BUỘC BẠN PHẢI TỰ TAY VIẾT TRỰC TIẾP LẦN LƯỢT ĐỦ CẢ 2 TỆP (TUYỆT ĐỐI KHÔNG spawn async background subagent / background task vì tiến trình headless CLI sẽ kết thúc trước khi subagent kịp ghi file):
    - **Bước 4a. Ghi tệp `{{FEATURE_DIR}}/dev_plan.md`:** Liệt kê các module/service cần chỉnh sửa, kiến trúc giải pháp, APIs, và các bước code chi tiết.
-   - **Bước 4b. Ghi tiếp tệp `{{FEATURE_DIR}}/test_plan.md`:** Mô tả cụ thể kịch bản kiểm thử (tối thiểu 100 dòng chi tiết, KHÔNG ĐƯỢC để file rỗng hoặc chỉ có 1 dòng tiêu đề).
+   - **Bước 4b. Ghi tiếp tệp `{{FEATURE_DIR}}/test_plan.md`:** Mô tả cụ thể kịch bản kiểm thử (task trung bình/phức tạp: tối thiểu 100 dòng chi tiết; task đơn giản: viết ngắn gọn nhưng BẮT BUỘC đủ mã TC-* gồm happy path + edge case + lỗi chính và nội dung sau trim đạt length>=60 ký tự để khớp kiểm tra server.js; MỌI độ khó KHÔNG ĐƯỢC để file rỗng hoặc chỉ có 1 dòng tiêu đề).
      * **ĐẶC BIỆT BẮT BUỘC: Khai báo ngay phần đầu `test_plan.md` mục: `## 0. Cấu hình Bằng Chứng Nghiệm Thu (Evidence Configuration)`:**
        - Chọn tối đa 1 đến 2 loại bằng chứng thực sự phù hợp nhất với task (tuyệt đối không chọn cả 4):
          * `UI_SCREENSHOT`: BẮT BUỘC chọn nếu task có Web UI / Frontend (nêu rõ URL service ví dụ `http://localhost:4200` và các màn hình cần chụp browser thật).
@@ -51,3 +62,4 @@ Nhiệm vụ của bạn là khảo sát codebase tại workspace và lập kế
 2. **Ví dụ Jira/Confluence nội bộ:** nếu prompt chứa link hoặc mã ticket → tự gọi tool MCP Atlassian để đọc (`mcp__company-atlassian__jira_get_issue` trên Claude Code / `jira_get_issue` trên OMP với tham số mã ticket). Trình duyệt vẫn dùng bình thường cho kiểm thử UI hoặc trang public, nhưng URL nội bộ yêu cầu SSO/login thì phải dùng MCP có xác thực.
 3. **Ví dụ trình duyệt/kiểm thử UI:** kiểm tra MCP browser automation (cloakbrowser_*) trước; nếu có thì dùng, nếu không thì dùng browser thủ công bình thường.
 4. **Ví dụ tra cứu thư viện/SDK/API:** kiểm tra MCP docs (context7_*) trước; nếu có thì dùng, nếu không thì tìm web thủ công bình thường.
+5. **MCP Jira rỗng → CẤM browser login Jira/Confluence nội bộ:** Nếu mục `🔌 DANH SÁCH MCP SERVERS` trống hoặc không có tool Jira/Atlassian (MCP lỗi/không khả dụng) thì TUYỆT ĐỐI KHÔNG mở browser đăng nhập (SSO) vào Jira/Confluence nội bộ; chỉ dùng code local và tài liệu trong workspace/`{{FEATURE_DIR}}`, ghi rõ lý do vào log.

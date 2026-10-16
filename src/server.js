@@ -729,6 +729,12 @@ app.post('/api/v1/jobs', (req, res) => {
       pipeline_config,
       pipelineConfig,
       timeout,
+      timeout_seconds,
+      timeoutSeconds,
+      timeout_minutes,
+      timeoutMinutes,
+      timeoutMs,
+      timeout_ms,
       model,
       priority
     } = req.body;
@@ -774,10 +780,19 @@ app.post('/api/v1/jobs', (req, res) => {
     if (typeof mergedPipelineConfig !== 'object' || mergedPipelineConfig === null) {
       mergedPipelineConfig = {};
     }
-    if (timeout) mergedPipelineConfig.timeout = timeout;
+    {
+      const uiTimeoutMs = config.normalizeTimeoutMs({
+        timeoutMs: timeoutMs !== undefined ? timeoutMs : timeout_ms,
+        timeout_seconds: timeout_seconds !== undefined ? timeout_seconds : timeoutSeconds,
+        timeout_minutes: timeout_minutes !== undefined ? timeout_minutes : timeoutMinutes,
+        timeout: timeout
+      }, null);
+      if (uiTimeoutMs !== null && uiTimeoutMs !== undefined) mergedPipelineConfig.timeout = uiTimeoutMs;
+      else if (mergedPipelineConfig.timeout !== undefined) mergedPipelineConfig.timeout = config.normalizeTimeoutMs(mergedPipelineConfig.timeout, config.DEFAULT_TIMEOUT_MS);
+    }
     if (model) mergedPipelineConfig.model = model;
     if (runners) mergedPipelineConfig.runners = runners;
-    const bodyMaxRetries = req.body.max_retries ?? req.body.maxRetries ?? req.body.maxretries;
+    const bodyMaxRetries = req.body.max_retries ?? req.body.maxRetries ?? req.body.maxretries ?? req.body.max_fixing_retries ?? req.body.maxFixingRetries;
     if (bodyMaxRetries !== undefined && bodyMaxRetries !== null) {
       mergedPipelineConfig.max_retries = bodyMaxRetries;
       mergedPipelineConfig.maxRetries = bodyMaxRetries;
@@ -1176,7 +1191,7 @@ app.put(['/api/v1/jobs/:id', '/api/v1/tasks/:id'], (req, res) => {
       });
     }
 
-    const { task_code, prompt, title, repo_path, repoPath, base_branch, branch, timeout, max_retries, maxRetries, pipeline_config, pipelineConfig, model } = req.body;
+    const { task_code, prompt, title, repo_path, repoPath, base_branch, branch, timeout, timeout_seconds, timeoutSeconds, timeout_minutes, timeoutMinutes, timeoutMs, timeout_ms, max_retries, maxRetries, pipeline_config, pipelineConfig, model } = req.body;
     const workspaceIdRaw = req.body.workspace_id || req.body.workspaceId;
     const updates = {};
 
@@ -1302,7 +1317,7 @@ app.put(['/api/v1/jobs/:id', '/api/v1/tasks/:id'], (req, res) => {
     if (resolvedWs && resolvedWs.id) updates.workspace_id = resolvedWs.id;
     const incomingPipeRaw = pipeline_config || pipelineConfig;
     const hasIncomingPipe = incomingPipeRaw && typeof incomingPipeRaw === 'object' && Object.keys(incomingPipeRaw).length > 0;
-    if (hasIncomingPipe || timeout !== undefined || max_retries !== undefined || maxRetries !== undefined || model !== undefined) {
+    if (hasIncomingPipe || timeout !== undefined || timeout_seconds !== undefined || timeoutSeconds !== undefined || timeout_minutes !== undefined || timeoutMinutes !== undefined || timeoutMs !== undefined || timeout_ms !== undefined || max_retries !== undefined || maxRetries !== undefined || model !== undefined) {
       let mergedPipe = {};
       if (job.pipeline_config) {
         try {
@@ -1310,9 +1325,15 @@ app.put(['/api/v1/jobs/:id', '/api/v1/tasks/:id'], (req, res) => {
         } catch (e) { mergedPipe = {}; }
       }
       if (hasIncomingPipe) mergedPipe = { ...mergedPipe, ...incomingPipeRaw };
-      if (timeout !== undefined && timeout !== null && String(timeout).trim() !== '') {
-        const n = Number(timeout);
-        mergedPipe.timeout = Number.isFinite(n) ? n : timeout;
+      {
+        const uiTimeoutMs = config.normalizeTimeoutMs({
+          timeoutMs: timeoutMs !== undefined ? timeoutMs : timeout_ms,
+          timeout_seconds: timeout_seconds !== undefined ? timeout_seconds : timeoutSeconds,
+          timeout_minutes: timeout_minutes !== undefined ? timeout_minutes : timeoutMinutes,
+          timeout: timeout
+        }, null);
+        if (uiTimeoutMs !== null && uiTimeoutMs !== undefined) mergedPipe.timeout = uiTimeoutMs;
+        else if (mergedPipe.timeout !== undefined) mergedPipe.timeout = config.normalizeTimeoutMs(mergedPipe.timeout, config.DEFAULT_TIMEOUT_MS);
       }
       const retryVal = max_retries !== undefined ? max_retries : maxRetries;
       if (retryVal !== undefined && retryVal !== null && String(retryVal).trim() !== '') {
@@ -2053,7 +2074,7 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
   return { failed: agentFailed };
 };
 
-const executeStep = async (id) => {
+const executeStep = async (id, opts) => {
   const job = db.getJobById(id);
   if (!job || job.status === 'CANCELLED') return;
   
@@ -2065,6 +2086,8 @@ const executeStep = async (id) => {
     if (ws && ws.features_dir) wsFeaturesDir = ws.features_dir;
   } catch (e) {}
   const { dir: featureDir, evidenceDir } = fileManager.ensureFeatureDirectory(workspacePath, taskCode, { allowExisting: true, featuresDir: wsFeaturesDir });
+  const jobTimeoutMs = config.resolveJobTimeoutMs(job, null)
+    ?? ((opts && opts.timeoutMs) || config.DEFAULT_TIMEOUT_MS);
   let agentMapping = { PLANNING: 'claude-code', IMPLEMENT: 'claude-code', TESTING: 'claude-code', VERIFY: 'verify-gate', FIXING: 'claude-code' };
   try {
     if (typeof db.getSetting === 'function') {
@@ -2091,12 +2114,8 @@ const executeStep = async (id) => {
         previousContext: fileManager.loadPreviousContext(workspacePath, taskCode, 'planning')
       });
       const planningGuard = await systemone.checkGuard({ taskCode, prompt: planningPrompt });
-      if (planningGuard.blocked) {
-        jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-GUARD] ⛔ Prompt PLANNING bị chặn (secret/injection, confidence ${planningGuard.decision.confidence}). Dừng spawn CLI để an toàn.\n` });
-        db.updateJob(id, { status: 'FAILED', current_step: 'PLANNING', error_message: 'SystemOne guard block: prompt chứa secret/injection.' });
-        jobEventBus.emitJobStatus(id, { status: 'FAILED' });
-        jobEventBus.emitJobError(id, { error: 'SystemOne guard block: prompt chứa secret/injection.' });
-        return;
+      if (planningGuard.blocked || planningGuard.warned || planningGuard.action === 'warn') {
+        jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-GUARD] ⚠ Prompt PLANNING cảnh báo (action ${planningGuard.action} confidence ${planningGuard.decision.confidence}). Tiếp tục bằng prompt đã scrub, không FAILED job.\n` });
       }
       jobEventBus.emitJobLog(id, { text: `\n[1/5] >>> 🤖 [PLANNING] Kích hoạt lập kế hoạch song song (Dual Planning) với Agent: ${planningAgent}\n[PLANNING] Nạp template prompt planning.md...\n[PLANNING] Agent đang phân tích mã nguồn và thiết lập Kế hoạch (Vui lòng đợi khoảng 15-30 giây)...\n` });
       const planStartTime = Date.now();
@@ -2109,18 +2128,13 @@ const executeStep = async (id) => {
         const elapsedSec = Math.floor((Date.now() - planStartTime) / 1000);
         jobEventBus.emitJobLog(id, { text: `\x1b[90m🤖 [PLANNING] ⏱️ ${elapsedSec}s - Agent đang tiếp tục xử lý phân tích và tổng hợp Kế hoạch...\x1b[0m\r\n` });
       }, 12000);
-      const pickedPlanning = await systemone.pickRunner({ runnerRegistry, preferredName: planningAgent, taskCode, step: 'planning', jobId: id });
-      const effectivePlanningAgent = pickedPlanning.name || planningAgent;
-      if (effectivePlanningAgent !== planningAgent) {
-        db.updateJob(id, { runner: effectivePlanningAgent });
-        jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-ROUTER] 🔀 Đổi runner PLANNING ${planningAgent} → ${effectivePlanningAgent} (confidence ${pickedPlanning.decision.confidence}).\n` });
-      }
-      const runner = runnerRegistry.getAvailableRunner(effectivePlanningAgent);
+      const runner = runnerRegistry.getAvailableRunner(planningAgent);
       if (runner) {
         let outBuffer = '';
         try {
           await runner.execute({
             prompt: planningGuard.promptToUse, cwd: workspacePath, jobId: id,
+            timeoutMs: jobTimeoutMs,
             onStdout: (text) => { outBuffer += text; jobEventBus.emitJobLog(id, { text }); },
             onStderr: (text) => { outBuffer += text; jobEventBus.emitJobLog(id, { text }); }
           });
@@ -2222,7 +2236,7 @@ const executeStep = async (id) => {
       db.updateJob(id, { status: 'IMPLEMENT', current_step: 'IMPLEMENT', runner: implementAgent, had_pending: (answeredQuestions.length > 0 ? 1 : (job.had_pending || 0)) });
       jobEventBus.emitJobStatus(id, { status: 'IMPLEMENT', runner: implementAgent });
       jobEventBus.emitJobLog(id, { text: `\n[PLANNING -> IMPLEMENT] Hoàn tất Kế hoạch sau khi làm rõ. Tự động chuyển tiếp sang triển khai mã nguồn (IMPLEMENT) với 🤖 Agent: ${implementAgent}...\n` });
-      setTimeout(() => executeStep(id), 100);
+      setTimeout(() => { executeStep(id).catch((__e) => { console.error('[EXECUTE-STEP-NEXT-ERR]', (__e && __e.message) || __e); }); }, 100);
       return;
     }
 
@@ -2241,7 +2255,7 @@ const executeStep = async (id) => {
         const testAgent = agentMapping.TESTING || 'test-runner';
         db.updateJob(id, { status: 'TESTING', current_step: 'TESTING', runner: testAgent });
         jobEventBus.emitJobStatus(id, { status: 'TESTING', runner: testAgent });
-        setTimeout(() => executeStep(id), 200);
+        setTimeout(() => { executeStep(id).catch((__e) => { console.error('[EXECUTE-STEP-NEXT-ERR]', (__e && __e.message) || __e); }); }, 200);
         return;
       }
 
@@ -2251,12 +2265,8 @@ const executeStep = async (id) => {
         previousContext: prevContext
       });
       const implementGuard = await systemone.checkGuard({ taskCode, prompt: implementPrompt });
-      if (implementGuard.blocked) {
-        jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-GUARD] ⛔ Prompt IMPLEMENT bị chặn (secret/injection, confidence ${implementGuard.decision.confidence}).\n` });
-        db.updateJob(id, { status: 'FAILED', current_step: 'IMPLEMENT', error_message: 'SystemOne guard block: prompt chứa secret/injection.' });
-        jobEventBus.emitJobStatus(id, { status: 'FAILED' });
-        jobEventBus.emitJobError(id, { error: 'SystemOne guard block: prompt chứa secret/injection.' });
-        return;
+      if (implementGuard.blocked || implementGuard.warned || implementGuard.action === 'warn') {
+        jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-GUARD] ⚠ Prompt IMPLEMENT cảnh báo (action ${implementGuard.action} confidence ${implementGuard.decision.confidence}). Tiếp tục bằng prompt đã scrub, không FAILED job.\n` });
       }
       db.updateJob(id, { runner: implementAgent });
       const impProgressTimer = setInterval(() => {
@@ -2267,18 +2277,13 @@ const executeStep = async (id) => {
         }
         jobEventBus.emitJobLog(id, { text: `🤖 [IMPLEMENT] Agent đang tiếp tục viết mã nguồn...\n` });
       }, 6000);
-      const pickedImplement = await systemone.pickRunner({ runnerRegistry, preferredName: implementAgent, taskCode, step: 'implement', jobId: id });
-      const effectiveImplementAgent = pickedImplement.name || implementAgent;
-      if (effectiveImplementAgent !== implementAgent) {
-        db.updateJob(id, { runner: effectiveImplementAgent });
-        jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-ROUTER] 🔀 Đổi runner IMPLEMENT ${implementAgent} → ${effectiveImplementAgent} (confidence ${pickedImplement.decision.confidence}).\n` });
-      }
-      const runner = runnerRegistry.getAvailableRunner(effectiveImplementAgent);
+      const runner = runnerRegistry.getAvailableRunner(implementAgent);
       if (runner) {
         let implementResult = null;
         try {
           implementResult = await runner.execute({
             prompt: implementGuard.promptToUse, cwd: workspacePath, jobId: id,
+            timeoutMs: jobTimeoutMs,
             onStdout: (text) => jobEventBus.emitJobLog(id, { text }),
             onStderr: (text) => jobEventBus.emitJobLog(id, { text })
           });
@@ -2287,7 +2292,7 @@ const executeStep = async (id) => {
           db.updateJob(id, { status: 'FAILED', current_step: 'IMPLEMENT', error_message: `IMPLEMENT that bai: ${execErr.message}` });
           jobEventBus.emitJobStatus(id, { status: 'FAILED' });
           jobEventBus.emitJobError(id, { error: `IMPLEMENT that bai: ${execErr.message}` });
-          return;
+          throw new Error(`IMPLEMENT that bai: ${execErr.message}`);
         } finally {
           clearInterval(impProgressTimer);
         }
@@ -2298,13 +2303,13 @@ const executeStep = async (id) => {
         // IMPLEMENT that bai (timeout hoac exit code != 0) thi DUNG pipeline, khong tu dong sang TESTING
         if (!implementResult || implementResult.timedOut || implementResult.exitCode !== 0) {
           const failReason = implementResult && implementResult.timedOut
-            ? `vuot qua gioi han thoi gian (${implementResult.timeoutMs || 900000}ms)`
+            ? `vuot qua gioi han thoi gian (${implementResult.timeoutMs || jobTimeoutMs}ms)`
             : `exit code ${implementResult ? implementResult.exitCode : 'khong xac dinh'}`;
           jobEventBus.emitJobLog(id, { text: `\n[IMPLEMENT-FAILED] Trien khai that bai (${failReason}). Pipeline DUNG tai IMPLEMENT, vui long kiem tra log va chay lai.\n` });
           db.updateJob(id, { status: 'FAILED', current_step: 'IMPLEMENT', error_message: `IMPLEMENT that bai: ${failReason}` });
           jobEventBus.emitJobStatus(id, { status: 'FAILED' });
           jobEventBus.emitJobError(id, { error: `IMPLEMENT that bai: ${failReason}` });
-          return;
+          throw new Error(`IMPLEMENT that bai: ${failReason}`);
         }
         jobEventBus.emitJobLog(id, { text: `\n[IMPLEMENT] Hoan tat trien khai ma nguon.\n` });
       } else {
@@ -2313,7 +2318,7 @@ const executeStep = async (id) => {
       }
       db.updateJob(id, { status: 'TESTING', current_step: 'TESTING' });
       jobEventBus.emitJobStatus(id, { status: 'TESTING' });
-      setTimeout(() => executeStep(id), 100);
+      setTimeout(() => { executeStep(id).catch((__e) => { console.error('[EXECUTE-STEP-NEXT-ERR]', (__e && __e.message) || __e); }); }, 100);
       return;
     }
 
@@ -2328,12 +2333,8 @@ const executeStep = async (id) => {
         errorLogs: ''
       });
       const testingGuard = await systemone.checkGuard({ taskCode, prompt: testingPrompt });
-      if (testingGuard.blocked) {
-        jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-GUARD] ⛔ Prompt TESTING bị chặn (secret/injection, confidence ${testingGuard.decision.confidence}).\n` });
-        db.updateJob(id, { status: 'FAILED', current_step: 'TESTING', error_message: 'SystemOne guard block: prompt chứa secret/injection.' });
-        jobEventBus.emitJobStatus(id, { status: 'FAILED' });
-        jobEventBus.emitJobError(id, { error: 'SystemOne guard block: prompt chứa secret/injection.' });
-        return;
+      if (testingGuard.blocked || testingGuard.warned || testingGuard.action === 'warn') {
+        jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-GUARD] ⚠ Prompt TESTING cảnh báo (action ${testingGuard.action} confidence ${testingGuard.decision.confidence}). Tiếp tục bằng prompt đã scrub, không FAILED job.\n` });
       }
       db.updateJob(id, { runner: testAgent });
       jobEventBus.emitJobLog(id, { text: `\n[3/5] >>> 🤖 [TESTING] Bắt đầu kiểm thử thật với Runner/Agent: ${testAgent}...\n` });
@@ -2347,13 +2348,7 @@ const executeStep = async (id) => {
         jobEventBus.emitJobLog(id, { text: `🤖 [TESTING] Agent đang tiếp tục kiểm thử...\n` });
       }, 6000);
 
-      const pickedTesting = await systemone.pickRunner({ runnerRegistry, preferredName: testAgent, taskCode, step: 'testing', jobId: id });
-      const effectiveTestAgent = pickedTesting.name || testAgent;
-      if (effectiveTestAgent !== testAgent) {
-        db.updateJob(id, { runner: effectiveTestAgent });
-        jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-ROUTER] 🔀 Đổi runner TESTING ${testAgent} → ${effectiveTestAgent} (confidence ${pickedTesting.decision.confidence}).\n` });
-      }
-      const runner = runnerRegistry.getAvailableRunner(effectiveTestAgent);
+      const runner = runnerRegistry.getAvailableRunner(testAgent);
       let testingResult = null;
       let agentFailed = false;
 
@@ -2361,7 +2356,7 @@ const executeStep = async (id) => {
         try {
           testingResult = await runner.execute({
             prompt: testingGuard.promptToUse, cwd: workspacePath, jobId: id,
-            timeoutMs: 900000,
+            timeoutMs: jobTimeoutMs,
             onStdout: (text) => jobEventBus.emitJobLog(id, { text }),
             onStderr: (text) => jobEventBus.emitJobLog(id, { text })
           });
@@ -2381,7 +2376,7 @@ const executeStep = async (id) => {
         if (!testingResult || testingResult.timedOut || testingResult.exitCode !== 0) {
           agentFailed = true;
           const failReason = testingResult && testingResult.timedOut
-            ? `vượt quá giới hạn thời gian (${testingResult.timeoutMs || 900000}ms)`
+            ? `vượt quá giới hạn thời gian (${testingResult.timeoutMs || jobTimeoutMs}ms)`
             : `exit code ${testingResult ? testingResult.exitCode : 'không xác định'}`;
           jobEventBus.emitJobLog(id, { text: `\n[TESTING-FAILED] Kiểm thử thất bại: ${failReason}.\n` });
         } else {
@@ -2400,12 +2395,12 @@ const executeStep = async (id) => {
       // TESTING that bai (timeout/exit!=0/thieu runner): chuyen thang sang FIXING, KHONG qua VERIFY.
       if (agentFailed) {
         const fixAgentAfterTest = agentMapping.FIXING || 'claude-code';
-        const failReasonText = !testingResult ? 'khong co ket qua kiem thu' : (testingResult.timedOut ? ('vuot qua gioi han thoi gian ('+(testingResult.timeoutMs || 900000)+'ms)') : ('exit code '+testingResult.exitCode));
+        const failReasonText = !testingResult ? 'khong co ket qua kiem thu' : (testingResult.timedOut ? ('vuot qua gioi han thoi gian ('+(testingResult.timeoutMs || jobTimeoutMs)+'ms)') : ('exit code '+testingResult.exitCode));
         const failGate = { passed: false, error: 'Kiem thu that bai ('+failReasonText+')', timeout: !!(testingResult && testingResult.timedOut), decided_at: new Date().toISOString(), mapped_from: 'TESTING', source: 'pipeline-testing-failed' };
         jobEventBus.emitJobLog(id, { text: `\n[TESTING] Agent kiem thu bao loi ('+failReasonText+'), chuyen sang [FIXING]...` });
         db.updateJob(id, { status: 'FIXING', current_step: 'FIXING', runner: fixAgentAfterTest, error_message: 'Kiem thu that bai ('+failReasonText+').', gate_result: failGate });
         jobEventBus.emitJobStatus(id, { status: 'FIXING', runner: fixAgentAfterTest });
-        setTimeout(() => executeStep(id), 100);
+        setTimeout(() => { executeStep(id).catch((__e) => { console.error('[EXECUTE-STEP-NEXT-ERR]', (__e && __e.message) || __e); }); }, 100);
         return;
       }
       jobEventBus.emitJobLog(id, { text: `\n[TESTING] Hoan tat kiem thu qua Agent, chuyen sang [VERIFY] de doi soat evidence...` });
@@ -2413,7 +2408,7 @@ const executeStep = async (id) => {
       db.updateJob(id, { status: 'VERIFY', current_step: 'VERIFY', runner: verifyAgent });
       jobEventBus.emitJobStatus(id, { status: 'VERIFY', runner: verifyAgent });
       jobEventBus.emitJobLog(id, { text: `\n[3/5] >>> 🔍 [VERIFY] Bắt đầu đối soát evidence thực tế trong ${evidenceDir}...\n` });
-      setTimeout(() => executeStep(id), 100);
+      setTimeout(() => { executeStep(id).catch((__e) => { console.error('[EXECUTE-STEP-NEXT-ERR]', (__e && __e.message) || __e); }); }, 100);
       return;
     }
 
@@ -2438,7 +2433,7 @@ const executeStep = async (id) => {
         jobEventBus.emitJobLog(id, { text: `\n[VERIFY] ❌ Đối soát evidence thất bại. Chuyển sang FIXING với 🤖 Agent: ${fixAgent}.\n` });
         db.updateJob(id, { status: 'FIXING', current_step: 'FIXING', runner: fixAgent, error_message: 'Đối soát evidence thất bại (VERIFY).', gate_result: failGate });
         jobEventBus.emitJobStatus(id, { status: 'FIXING', runner: fixAgent });
-        setTimeout(() => executeStep(id), 100);
+        setTimeout(() => { executeStep(id).catch((__e) => { console.error('[EXECUTE-STEP-NEXT-ERR]', (__e && __e.message) || __e); }); }, 100);
         return;
       }
       // Lưu path gọn nhẹ vào SQLite DB (chỉ lưu đường dẫn, KHÔNG lưu payload lớn)
@@ -2466,12 +2461,8 @@ const executeStep = async (id) => {
         errorLogs: job.error_message || ''
       });
       const fixingGuard = await systemone.checkGuard({ taskCode, prompt: fixingPrompt });
-      if (fixingGuard.blocked) {
-        jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-GUARD] ⛔ Prompt FIXING bị chặn (secret/injection, confidence ${fixingGuard.decision.confidence}).\n` });
-        db.updateJob(id, { status: 'FAILED', current_step: 'FIXING', error_message: 'SystemOne guard block: prompt chứa secret/injection.' });
-        jobEventBus.emitJobStatus(id, { status: 'FAILED' });
-        jobEventBus.emitJobError(id, { error: 'SystemOne guard block: prompt chứa secret/injection.' });
-        return;
+      if (fixingGuard.blocked || fixingGuard.warned || fixingGuard.action === 'warn') {
+        jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-GUARD] ⚠ Prompt FIXING cảnh báo (action ${fixingGuard.action} confidence ${fixingGuard.decision.confidence}). Tiếp tục bằng prompt đã scrub, không FAILED job.\n` });
       }
       const attempt = systemone.getFixAttempt(job);
       const maxRetries = Number(config.MAX_FIXING_RETRIES) || 3;
@@ -2485,16 +2476,11 @@ const executeStep = async (id) => {
       }
       db.updateJob(id, { runner: fixingAgent, pipeline_config: systemone.withFixAttempt(job, attempt + 1) });
       jobEventBus.emitJobLog(id, { text: `\n[ERROR] Phát hiện sự cố. Đang sửa lỗi với 🤖 Agent: ${fixingAgent}...\n` });
-      const pickedFixing = await systemone.pickRunner({ runnerRegistry, preferredName: fixingAgent, taskCode, step: 'fixing', jobId: id });
-      const effectiveFixingAgent = pickedFixing.name || fixingAgent;
-      if (effectiveFixingAgent !== fixingAgent) {
-        db.updateJob(id, { runner: effectiveFixingAgent });
-        jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-ROUTER] 🔀 Đổi runner FIXING ${fixingAgent} → ${effectiveFixingAgent} (confidence ${pickedFixing.decision.confidence}).\n` });
-      }
-      const runner = runnerRegistry.getAvailableRunner(effectiveFixingAgent);
+      const runner = runnerRegistry.getAvailableRunner(fixingAgent);
       if (runner) {
         await runner.execute({
           prompt: fixingGuard.promptToUse, cwd: workspacePath, jobId: id,
+            timeoutMs: jobTimeoutMs,
           onStdout: (text) => jobEventBus.emitJobLog(id, { text }),
           onStderr: (text) => jobEventBus.emitJobLog(id, { text })
         });
@@ -2510,7 +2496,7 @@ const executeStep = async (id) => {
       // Quay lại TESTING
       db.updateJob(id, { status: 'TESTING', current_step: 'TESTING' });
       jobEventBus.emitJobStatus(id, { status: 'TESTING' });
-      setTimeout(() => executeStep(id), 100);
+      setTimeout(() => { executeStep(id).catch((__e) => { console.error('[EXECUTE-STEP-NEXT-ERR]', (__e && __e.message) || __e); }); }, 100);
       return;
     }
 
@@ -2532,7 +2518,7 @@ const executeStep = async (id) => {
  */
 const TERMINAL_JOB_STATUSES = new Set(['DONE', 'TIMED_OUT', 'ARCHIVED', 'DELETED']);
 const RESTARTABLE_JOB_STATUSES = new Set(['TO DO', 'TO_DO', 'FAILED', 'CANCELLED']);
-const runJobPipeline = (jobId) => {
+const runJobPipeline = (jobId, opts) => {
   return new Promise((resolve) => {
     const jobToStart = db.getJobById(jobId);
     const tCode = (jobToStart && (jobToStart.task_code || jobToStart.id)) || jobId;
@@ -2582,7 +2568,7 @@ const runJobPipeline = (jobId) => {
     jobEventBus.on(`job:${jobId}:error`, onError);
     taskQueue.on('job:cancel', onCancel);
 
-    executeStep(jobId).catch((err) => {
+    executeStep(jobId, opts).catch((err) => {
       console.error(`[EXECUTE-STEP-ERR] Lỗi khi thực thi pipeline cho Job ${jobId}:`, err);
       db.updateJob(jobId, { status: 'FAILED', error_message: err.message });
       jobEventBus.emitJobStatus(jobId, { status: 'FAILED' });
@@ -2650,7 +2636,7 @@ const handleJobStart = async (req, res) => {
       jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-TRIAGE] Task nhẹ (S/quick) — ưu tiên enqueue, planning sẽ rút gọn.\n` });
     }
     // 3. Đưa job vào TaskQueue để quản lý Concurrency & Workspace Queue Lock
-    taskQueue.enqueue(job, () => runJobPipeline(id), (triage && triage.track === 'quick' ? (job.priority || 0) + 1 : job.priority || 0));
+    taskQueue.enqueue(job, (queuedJob, queueOpts) => runJobPipeline(id, queueOpts), (triage && triage.track === 'quick' ? (job.priority || 0) + 1 : job.priority || 0));
 
     return res.json({
       success: true,
@@ -2707,14 +2693,29 @@ const handleJobClone = async (req, res) => {
           : sourceJob.pipeline_config;
       } catch (e) {}
     }
+    delete pipeConfig.fix_attempt;
+    delete pipeConfig.fixAttempt;
 
-    const promptLines = (sourceJob.prompt || '').trim().split('\n');
-    const titleSummary = promptLines[0] ? promptLines[0].substring(0, 60) : `Task ${safeNewTaskCode}`;
+    const sourceCode = (sourceJob.task_code || '').trim();
+    const sourceTitle = (sourceJob.title || '').trim();
+    let clonedTitle = sourceTitle;
+    if (clonedTitle) {
+      if (sourceCode && clonedTitle.includes(sourceCode)) {
+        clonedTitle = clonedTitle.replace(sourceCode, safeNewTaskCode);
+      } else {
+        const titlePrefixMatch = clonedTitle.match(/^\s*\[[^\]]+\]/);
+        if (titlePrefixMatch) {
+          clonedTitle = `[${safeNewTaskCode}]` + clonedTitle.slice(titlePrefixMatch[0].length);
+        }
+      }
+    } else {
+      clonedTitle = `[${safeNewTaskCode}] Task clone tu ${sourceCode || id}`;
+    }
 
     const newJobData = {
       id: newJobId,
       task_code: safeNewTaskCode,
-      title: `[${safeNewTaskCode}] ${titleSummary}`,
+      title: clonedTitle,
       prompt: sourceJob.prompt || '',
       repo_path: sourceJob.repo_path || './',
       workspace_id: sourceJob.workspace_id || null,
@@ -2904,7 +2905,7 @@ app.post('/api/v1/jobs/:id/answer', (req, res) => {
         });
       } else {
         const freshJob = db.getJobById(id);
-        taskQueue.enqueue(freshJob || { id }, () => runJobPipeline(id), (freshJob && freshJob.priority) || 0);
+        taskQueue.enqueue(freshJob || { id }, (queuedJob, queueOpts) => runJobPipeline(id, queueOpts), (freshJob && freshJob.priority) || 0);
       }
     });
     const updatedJob = db.getJobById(id);
@@ -2939,7 +2940,7 @@ app.post(['/api/v1/jobs/:id/approve', '/api/v1/tasks/:id/approve'], (req, res) =
     setImmediate(() => {
       if (!taskQueue.isJobEnqueuedOrRunning(id)) {
         const freshJob = db.getJobById(id) || job;
-        taskQueue.enqueue(freshJob || job, () => runJobPipeline(id), (freshJob && freshJob.priority) || (job && job.priority) || 0);
+        taskQueue.enqueue(freshJob || job, (queuedJob, queueOpts) => runJobPipeline(id, queueOpts), (freshJob && freshJob.priority) || (job && job.priority) || 0);
       } else {
         executeStep(id).catch(err => {
           console.error(`[EXECUTE-STEP-ERR] Lỗi khi chạy IMPLEMENT cho Job ${id}:`, err);
@@ -3046,7 +3047,7 @@ function handleJobStatus(req, res) {
             level: 'info'
           });
         }
-        taskQueue.enqueue(probeJob, () => runJobPipeline(targetId), (probeJob && probeJob.priority) || (job && job.priority) || 0);
+        taskQueue.enqueue(probeJob, (queuedJob, queueOpts) => runJobPipeline(targetId, queueOpts), (probeJob && probeJob.priority) || (job && job.priority) || 0);
       }
     }
 

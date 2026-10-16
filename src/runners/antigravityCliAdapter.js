@@ -11,6 +11,8 @@ class AntigravityCliAdapter extends BaseAdapter {
   /**
    * Xây dựng args cho antigravity CLI
    * Format: antigravity run --headless --task "<prompt>"
+   * MCP: binary `antigravity` không tồn tại trên máy (command not found) nên không xác minh được flag;
+   * không bịa flag handshake/tool-search, giữ nguyên args headless hiện tại.
    * @param {string} prompt
    * @param {object} options
    * @returns {string[]}

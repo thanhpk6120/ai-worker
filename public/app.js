@@ -751,6 +751,8 @@
         const newStatus = payload.status;
         if (state.activeJob) {
           state.activeJob.status = newStatus;
+          if (newStatus === 'PENDING') state.activeJob.had_pending = 1;
+          if (newStatus === 'FIXING') state.activeJob.fix_attempt = 1;
           renderActiveJobDetail();
         }
         // Nếu chuyển sang PENDING, hiển thị question modal
@@ -770,6 +772,7 @@
         state.currentQuestion = questionData;
         if (state.activeJob) {
           state.activeJob.status = 'PENDING';
+          state.activeJob.had_pending = 1;
           renderActiveJobDetail();
         }
         openQuestionModal();
@@ -814,6 +817,8 @@
     } else if (payload.type === 'status' && payload.status) {
       if (state.activeJob) {
         state.activeJob.status = payload.status;
+        if (payload.status === 'PENDING') state.activeJob.had_pending = 1;
+        if (payload.status === 'FIXING') state.activeJob.fix_attempt = 1;
         renderActiveJobDetail();
       }
     } else if (payload.type === 'step' && payload.step) {
@@ -1106,6 +1111,18 @@
 
   // --- Render Pipeline Stepper với Dynamic Connecting Lines & SVG Bridges ---
   
+  // --- Helper đọc fix_attempt từ pipeline_config (backend chỉ có fix_attempt, không có fixing_retries) ---
+  function getFixAttemptFromJob(job) {
+    try {
+      let cfg = job && job.pipeline_config;
+      if (typeof cfg === 'string') cfg = JSON.parse(cfg);
+      const v = cfg && (cfg.fix_attempt ?? cfg.fixAttempt ?? job.fix_attempt ?? job.fixing_retries ?? 0);
+      return Number(v) || 0;
+    } catch (e) {
+      return Number((job && (job.fix_attempt ?? job.fixing_retries)) || 0) || 0;
+    }
+  }
+
   // --- Hàm vẽ đường nối SVG xuyên tâm và vòng lên khi bypass ---
   function drawSvgStepperPaths(job) {
     const svg = document.getElementById('stepperSvgOverlay');
@@ -1119,8 +1136,8 @@
     const hasReachedImplement = ['IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING', 'DONE'].includes(status);
     const hasReachedTesting = ['TESTING', 'VERIFY', 'FIXING', 'DONE'].includes(status);
     const hasReachedVerify = ['VERIFY', 'FIXING', 'DONE'].includes(status);
-    const hasTouchedPending = status === 'PENDING' || job.had_pending === true || (Array.isArray(job.questions) && job.questions.length > 0);
-    const hasTouchedFixing = status === 'FIXING' || (job.fixing_retries && job.fixing_retries > 0);
+    const hasTouchedPending = status === 'PENDING' || Boolean(Number(job.had_pending)) || Boolean(job.had_pending) || (Array.isArray(job.questions) && job.questions.length > 0);
+    const hasTouchedFixing = status === 'FIXING' || getFixAttemptFromJob(job) > 0;
     const isDone = status === 'DONE';
 
     // Lấy toạ độ tâm các node (y luôn là 17px - tâm của vòng tròn 34px)
@@ -1157,30 +1174,23 @@
       hasReachedPlanning ? 'stepper-svg-path active' : 'stepper-svg-path'
     );
 
-    // 2. Đường nối PLANNING -> PENDING -> IMPLEMENT
+    // 2. Đường chính PLANNING -> PENDING -> IMPLEMENT (xuyên tâm PENDING, không bypass)
     if (hasTouchedPending) {
-      // "task đã từng bị pending phải có 1 đường màu vàng nối từ PENDING về PLANNING, khi PLANNING xong thì chuyển thành màu xanh và nối tiếp từ PENDING sang IMPLEMENT."
       const isPastPending = hasReachedImplement;
-      const pendingPathClass = isPastPending
+      const pendingInClass = isPastPending
         ? 'stepper-svg-path active stroke-emerald-400'
         : 'stepper-svg-path pending stroke-amber-400';
-
-      // Đường nối PLANNING -> PENDING
+      const pendingOutClass = isPastPending
+        ? 'stepper-svg-path active stroke-emerald-400'
+        : 'stepper-svg-path';
+      // Đường chính đi xuyên qua node PENDING
       createPath(
         `M ${pPlan.x + 17} 17 L ${pPend.x - 17} 17`,
-        pendingPathClass
+        pendingInClass
       );
-
-      // Đường cong nối từ PENDING vòng ngược lại PLANNING
-      createPath(
-        `M ${pPend.x - 15} 9 Q ${(pPlan.x + pPend.x) / 2} -14 ${pPlan.x + 15} 9`,
-        pendingPathClass
-      );
-
-      // Đường nối tiếp từ PENDING sang IMPLEMENT
       createPath(
         `M ${pPend.x + 17} 17 L ${pImp.x - 17} 17`,
-        isPastPending ? 'stepper-svg-path active stroke-emerald-400' : 'stepper-svg-path'
+        pendingOutClass
       );
     } else {
       // KHÔNG chạm PENDING: ĐƯỜNG NỐI VÒNG LÊN TRÊN ĐẦU PENDING RỒI VÒNG XUỐNG IMPLEMENT!
@@ -1189,23 +1199,21 @@
         hasReachedImplement ? 'stepper-svg-path stepper-svg-bridge' : 'stepper-svg-path'
       );
     }
-
     // 3. Đường nối IMPLEMENT -> TESTING (chỉ chạm mép ngoài hình tròn)
     createPath(
       `M ${pImp.x + 17} 17 L ${pTest.x - 17} 17`,
       hasReachedTesting ? 'stepper-svg-path active' : 'stepper-svg-path'
     );
-
-    // 4. Đường nối TESTING -> VERIFY -> FIXING -> DONE
+    // 4. Đường chính TESTING -> VERIFY -> FIXING -> DONE (xuyên tâm FIXING, không bypass)
     createPath(
       `M ${pTest.x + 17} 17 L ${pVerify.x - 17} 17`,
       hasReachedVerify ? 'stepper-svg-path active' : 'stepper-svg-path'
     );
     if (hasTouchedFixing) {
-      // Chạm FIXING: đường nối mép VERIFY -> FIXING rồi sang DONE
+      // Đường chính đi xuyên qua node FIXING: vàng khi active, xanh khi xong
       createPath(
         `M ${pVerify.x + 17} 17 L ${pFix.x - 17} 17`,
-        status === 'FIXING' ? 'stepper-svg-path fixing' : 'stepper-svg-path active'
+        status === 'FIXING' ? 'stepper-svg-path pending stroke-amber-400' : 'stepper-svg-path active'
       );
       createPath(
         `M ${pFix.x + 17} 17 L ${pDone.x - 17} 17`,
@@ -1250,8 +1258,8 @@
     const hasReachedImplement = ['IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING', 'DONE'].includes(status);
     const hasReachedTesting = ['TESTING', 'VERIFY', 'FIXING', 'DONE'].includes(status);
     const hasReachedVerify = ['VERIFY', 'FIXING', 'DONE'].includes(status);
-    const hasTouchedPending = status === 'PENDING' || job.had_pending === true || (Array.isArray(job.questions) && job.questions.length > 0);
-    const hasTouchedFixing = status === 'FIXING' || (job.fixing_retries && job.fixing_retries > 0);
+    const hasTouchedPending = status === 'PENDING' || Boolean(Number(job.had_pending)) || Boolean(job.had_pending) || (Array.isArray(job.questions) && job.questions.length > 0);
+    const hasTouchedFixing = status === 'FIXING' || getFixAttemptFromJob(job) > 0;
     const isDone = status === 'DONE';
 
     if (nodeTodo) {
@@ -3374,10 +3382,10 @@
       let pipe = job.pipeline_config !== undefined ? job.pipeline_config : job.pipelineConfig;
       if (typeof pipe === 'string') { try { pipe = JSON.parse(pipe); } catch (e) { pipe = {}; } }
       if (!pipe || typeof pipe !== 'object') pipe = {};
-      let rawTimeout = pipe.timeout !== undefined ? pipe.timeout : pipe.timeout_seconds !== undefined ? pipe.timeout_seconds : job.timeout !== undefined ? job.timeout : job.timeout_seconds !== undefined ? job.timeout_seconds : 15;
+      let rawTimeout = pipe.timeout !== undefined ? pipe.timeout : pipe.timeoutMs !== undefined ? pipe.timeoutMs : pipe.timeout_ms !== undefined ? pipe.timeout_ms : pipe.timeout_seconds !== undefined ? pipe.timeout_seconds : job.timeout !== undefined ? job.timeout : job.timeout_seconds !== undefined ? job.timeout_seconds : 15;
       let tNum = Number(rawTimeout);
       if (!Number.isFinite(tNum)) tNum = 15;
-      const timeoutMinutes = tNum > 120 ? Math.round(tNum / 60) : Math.round(tNum);
+      const timeoutMinutes = tNum >= 10000 ? Math.round(tNum / 60000) : tNum > 120 ? Math.round(tNum / 60) : Math.round(tNum);
       if (timeoutInput) timeoutInput.value = String(timeoutMinutes);
       let rawRetry = pipe.max_retries !== undefined ? pipe.max_retries : pipe.maxRetries !== undefined ? pipe.maxRetries : pipe.max_fixing_retries !== undefined ? pipe.max_fixing_retries : job.max_retries !== undefined ? job.max_retries : 3;
       let rNum = Number(rawRetry);

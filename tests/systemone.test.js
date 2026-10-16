@@ -89,10 +89,10 @@ describe('SystemOne client wire helpers (gộp từ wire.js)', () => {
     assert.strictEqual(f.retry, false);
   });
 
-  it('checkGuard scrub trả prompt đã scrub', async () => {
+  it('checkGuard giữ prompt gốc trong promptToUse', async () => {
     const secret = 'password=123456';
     const g = await client.checkGuard({ taskCode: 'T', prompt: `hello ${secret}` });
     assert.strictEqual(g.action, 'scrub');
-    assert.ok(!String(g.promptToUse).includes(secret), 'promptToUse phải che secret');
+    assert.ok(String(g.promptToUse).includes(secret), 'promptToUse phải giữ nguyên secret gốc');
   });
 });
