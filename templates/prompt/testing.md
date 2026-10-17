@@ -17,6 +17,9 @@ Nhiệm vụ của bạn là kiểm thử toàn diện giải pháp của task *
 
 {{PREVIOUS_CONTEXT}}
 
+## Chỉ dẫn đặc thù theo scope task (Custom Stage Prompt — chỉ có khi task PHỨC TẠP):
+{{CUSTOM_STAGE_PROMPT}}
+
 ## ⚠️ QUY TẮC BẮT BUỘC VỀ VỊ TRÍ TỆP TIN (MANDATORY FILE STORAGE RULES):
 1. **MỌI TÀI LIỆU, DATA, ẢNH, BẰNG CHỨNG PHẢI NẰM TRONG FEATURE FOLDER:**
    - Tất cả các tệp tài liệu kiểm thử (`testcase.md`, `test_report.md`...), tệp dữ liệu test (`data/`), ảnh chụp màn hình bằng chứng (`evidence/*.png`), log kiểm thử **BẮT BUỘC PHẢI TẠO BÊN TRONG**:
@@ -36,7 +39,7 @@ Nhiệm vụ của bạn là kiểm thử toàn diện giải pháp của task *
 4. CẤM chạy lắt nhắt từng test đơn lẻ khi chưa tạo đủ loạt.
 
 ## Hướng dẫn thực thi:
-0. **BƯỚC 0 BẮT BUỘC — LOAD DANH SÁCH MCP VÀ CHỌN TOOL:** Đọc mục `🔌 DANH SÁCH MCP SERVERS` ở trên, đối chiếu yêu cầu với khả năng tool MCP. Có MCP làm được → DÙNG MCP TRƯỚC; không có hoặc MCP lỗi → dùng cách khác và ghi lý do fallback vào log.
+0. **BƯỚC 0 — KIỂM TRA MCP KHI BẮT ĐẦU (1 lần duy nhất, không lặp lại mỗi turn):** Đọc mục `🔌 DANH SÁCH MCP SERVERS` ở trên một lần ở đầu bước. Chỉ dùng MCP khi tác vụ cần tool chuyên biệt (ví dụ `cloakbrowser` cho UI testing, Jira MCP nếu cần ticket). Các thao tác đọc/tìm file mã nguồn local: BẮT BUỘC ưu tiên dùng native tool (`read`/`grep`), TUYỆT ĐỐI KHÔNG spam dòng suy nghĩ hay log "Không MCP dùng được..." trước mỗi câu lệnh kiểm tra.
 1. BẮT BUỘC đọc kỹ test_plan.md trong thư mục {{FEATURE_DIR}}, đặc biệt mục ## 0. Cấu hình Bằng Chứng Nghiệm Thu (Evidence Configuration). Đồng thời BẮT BUỘC đọc lại thư mục docs của workspace (docs/, README.md, ARCHITECTURE.md, hướng dẫn run service, lệnh build/chạy service, port/API endpoint trong dev_plan.md) để biết đúng lệnh khởi động service, port thật, thứ tự start backend/frontend và command gọi API — TUYỆT ĐỐI KHÔNG tự suy đoán lệnh chạy hay port.
 2. **AGENT PHẢI TỰ CHỤP ẢNH UI & VERIFY ẢNH (NẾU CẦN UI EVIDENCE):**
    - **Worker server KHÔNG tự chụp ảnh thay bạn!** Trách nhiệm chạy service, kiểm thử và chụp ảnh giao diện thuộc về AI Agent.

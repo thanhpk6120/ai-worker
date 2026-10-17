@@ -31,7 +31,9 @@ Thư mục Feature bắt buộc: {{FEATURE_DIR}}
 
 {{PREVIOUS_CONTEXT}}
 
-{{ERROR_LOGS}}`;
+{{ERROR_LOGS}}
+
+{{CUSTOM_STAGE_PROMPT}}`;
   }
 
   /**
@@ -181,6 +183,33 @@ Thư mục Feature bắt buộc: {{FEATURE_DIR}}
       ? this.getActiveMcpServersSection()
       : '';
 
+    // Prompt per-task do PLANNING sinh (chi khi PHUC TAP): doc va ghep vao template chuan,
+    // khong de LLM planning ghi de outputFile cua buoc sau. Thieu file => chuoi rong.
+    let customStagePrompt = '';
+    try {
+      const s = String(step || '').toLowerCase();
+      if (featureDir && (s === 'implement' || s === 'testing' || s === 'fixing')) {
+        const customPath = path.join(featureDir, 'prompts', s + '.md');
+        const resolvedCustom = path.resolve(customPath);
+        const resolvedFeature = path.resolve(featureDir);
+        if ((resolvedCustom === resolvedFeature || resolvedCustom.startsWith(resolvedFeature + path.sep)) && fs.existsSync(resolvedCustom)) {
+          let raw = fs.readFileSync(resolvedCustom, 'utf8') || '';
+          raw = raw.trim();
+          const MAX_CUSTOM = 4000;
+          if (raw.length > MAX_CUSTOM) raw = raw.substring(0, MAX_CUSTOM) + '\n... [Custom stage prompt da cat bot]';
+          if (raw) customStagePrompt = raw;
+        }
+      }
+    try {
+            const scrub = require('../execution/secretScrubber');
+            const maskFn = scrub && (scrub.maskSecrets || (scrub.SecretScrubber && scrub.SecretScrubber.maskSecrets));
+            if (typeof maskFn === 'function') customStagePrompt = maskFn(customStagePrompt);
+          } catch (e2) {}
+        } catch (e) { customStagePrompt = ''; }
+    if (!customStagePrompt) {
+      customStagePrompt = '_Khong co chi dan dac thu theo scope (task khong phuc tap)._';
+    }
+
     const filledPrompt = template
       .replace(/\{\{TASK_CODE\}\}/g, taskCode || 'TASK-UNSPECIFIED')
       .replace(/\{\{PROMPT\}\}/g, userPrompt || '')
@@ -188,7 +217,8 @@ Thư mục Feature bắt buộc: {{FEATURE_DIR}}
       .replace(/\{\{FEATURE_DIR\}\}/g, featureDir || '')
       .replace(/\{\{PREVIOUS_CONTEXT\}\}/g, contextSection)
       .replace(/\{\{ERROR_LOGS\}\}/g, errorSection)
-      .replace(/\{\{MCP_SERVERS\}\}/g, mcpSection);
+      .replace(/\{\{MCP_SERVERS\}\}/g, mcpSection)
+      .replace(/\{\{CUSTOM_STAGE_PROMPT\}\}/g, customStagePrompt);
 
     // KHÔNG ghi prompt ra workspace root. Nếu caller yêu cầu lưu file, chỉ cho phép
     // ghi vào thư mục feature của task (outputFile phải nằm trong featureDir).

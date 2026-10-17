@@ -17,6 +17,9 @@ Nhiệm vụ của bạn là hiện thực hóa toàn bộ mã nguồn của tas
 
 {{PREVIOUS_CONTEXT}}
 
+## Chỉ dẫn đặc thù theo scope task (Custom Stage Prompt — chỉ có khi task PHỨC TẠP):
+{{CUSTOM_STAGE_PROMPT}}
+
 ## ⚠️ QUY TẮC BẮT BUỘC VỀ VỊ TRÍ TỆP TIN (MANDATORY FILE STORAGE RULES):
 1. **MỌI TÀI LIỆU, DATA, ẢNH, BẰNG CHỨNG PHẢI NẰM TRONG FEATURE FOLDER:**
    - Tất cả các tệp tài liệu kỹ thuật bổ sung (`report.md`, `deploy.md`, ghi chú phát sinh...), tệp dữ liệu kiểm thử (`data/`), tệp ảnh màn hình bằng chứng (`evidence/*.png`), và log thực thi **BẮT BUỘC PHẢI TẠO BÊN TRONG**:
@@ -38,7 +41,7 @@ Nhiệm vụ của bạn là hiện thực hóa toàn bộ mã nguồn của tas
 4. CẤM sửa lắt nhắt: tuyệt đối không sửa 1 file rồi dừng, không sửa nhỏ giọt từng chỗ một khi chưa quét hết.
 
 ## Hướng dẫn thực thi:
-0. **BƯỚC 0 BẮT BUỘC — LOAD DANH SÁCH MCP VÀ CHỌN TOOL (áp dụng cho MỌI prompt, không riêng Jira):** Đọc mục `🔌 DANH SÁCH MCP SERVERS` ở trên, đối chiếu yêu cầu với khả năng tool MCP. Có MCP làm được → DÙNG MCP TRƯỚC; không có hoặc MCP lỗi → dùng cách khác (browser, curl, CLI...) và ghi lý do fallback vào log. Trình duyệt vẫn dùng bình thường cho tác vụ MCP không cover được.
+0. **BƯỚC 0 — KIỂM TRA MCP KHI BẮT ĐẦU (1 lần duy nhất, không lặp lại mỗi turn):** Đọc mục `🔌 DANH SÁCH MCP SERVERS` ở trên một lần ở đầu bước. Chỉ dùng MCP khi tác vụ cần tool chuyên biệt (Jira/Confluence ticket, browser). Khi thao tác đọc, tìm kiếm, sửa file mã nguồn local: BẮT BUỘC ưu tiên dùng native tool (`read`/`grep`/`edit`), TUYỆT ĐỐI KHÔNG lặp lại suy nghĩ hay log "Không MCP dùng được..." trước mỗi thao tác code.
 1. Đọc kỹ tài liệu `dev_plan.md` trong thư mục `{{FEATURE_DIR}}`.
 2. Xác định chính xác service/module trong `{{WORKSPACE_PATH}}` cần thực hiện sửa code.
 3. Chỉnh sửa, tạo mới các tệp mã nguồn theo đúng các bước đã vạch ra trong `dev_plan.md`.

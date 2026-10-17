@@ -189,29 +189,20 @@ class BaseAdapter {
   findLatestSessionFile(sessionDir) {
     const fs = require('node:fs');
     const path = require('node:path');
-    const exts = ['.jsonl', '.json', '.log'];
     const candidates = [];
 
-    for (const entry of fs.readdirSync(sessionDir)) {
-      const fullPath = path.join(sessionDir, entry);
-      try {
-        const stat = fs.statSync(fullPath);
-        if (stat.isFile() && exts.some(e => entry.endsWith(e))) {
-          candidates.push({ path: fullPath, mtime: stat.mtimeMs });
-        } else if (stat.isDirectory()) {
-          // OMP lồng session trong thư mục con cùng tên: quét sâu thêm 1 cấp
-          for (const sub of fs.readdirSync(fullPath)) {
-            const subPath = path.join(fullPath, sub);
-            try {
-              const subStat = fs.statSync(subPath);
-              if (subStat.isFile() && exts.some(e => sub.endsWith(e))) {
-                candidates.push({ path: subPath, mtime: subStat.mtimeMs });
-              }
-            } catch (e) {}
+    try {
+      for (const entry of fs.readdirSync(sessionDir)) {
+        const fullPath = path.join(sessionDir, entry);
+        try {
+          const stat = fs.statSync(fullPath);
+          // Chỉ lấy file session .jsonl chính ở cấp sessionDir (tránh file log/temp/advisor trong thư mục con)
+          if (stat.isFile() && entry.endsWith('.jsonl') && !entry.startsWith('__')) {
+            candidates.push({ path: fullPath, mtime: stat.mtimeMs });
           }
-        }
-      } catch (e) {}
-    }
+        } catch (e) {}
+      }
+    } catch (e) {}
 
     candidates.sort((a, b) => b.mtime - a.mtime);
     return candidates.length > 0 ? candidates[0].path : null;
@@ -364,8 +355,7 @@ class BaseAdapter {
     // Biến state cục bộ cho mỗi lần execute (tránh lỗi cache kích thước file cũ giữa các lần chạy)
     const executeStartTime = Date.now();
     const tailState = {
-      currentFile: null,
-      readOffset: 0,
+      fileOffsets: new Map(), // Lưu offset riêng theo từng file, không bao giờ reset về 0
       lineBuffer: ''
     };
 
@@ -380,23 +370,22 @@ class BaseAdapter {
             if (latestFile) {
               const stat = fs.statSync(latestFile);
 
-              // Nếu chuyển sang file session mới hoặc file bị reset: đặt lại offset đọc
-              if (tailState.currentFile !== latestFile || stat.size < tailState.readOffset) {
-                tailState.currentFile = latestFile;
-                // Tránh phát lại toàn bộ history của file cũ: Nếu file sửa đổi TRƯỚC khi execute() chạy,
-                // hoặc đây là lần đầu thấy file nhưng file đã có sẵn nội dung từ trước -> bỏ qua phần cũ.
-                tailState.readOffset = (stat.mtimeMs < executeStartTime) ? stat.size : 0;
+              // Quản lý offset riêng cho từng file để tránh replay lịch sử cũ khi đổi file
+              if (!tailState.fileOffsets.has(latestFile)) {
+                // Lần đầu gặp file: nếu file đã tồn tại trước khi execute chạy, bỏ qua phần cũ
+                const initOffset = (stat.mtimeMs < executeStartTime) ? stat.size : 0;
+                tailState.fileOffsets.set(latestFile, initOffset);
                 tailState.lineBuffer = '';
               }
 
-              if (stat.size > tailState.readOffset) {
-                const readLength = stat.size - tailState.readOffset;
+              const currentOffset = tailState.fileOffsets.get(latestFile) || 0;
+              if (stat.size > currentOffset) {
+                const readLength = stat.size - currentOffset;
                 const fd = fs.openSync(latestFile, 'r');
                 const buffer = Buffer.alloc(readLength);
-                fs.readSync(fd, buffer, 0, readLength, tailState.readOffset);
+                fs.readSync(fd, buffer, 0, readLength, currentOffset);
                 fs.closeSync(fd);
-                tailState.readOffset = stat.size;
-
+                tailState.fileOffsets.set(latestFile, stat.size);
                 const chunkText = tailState.lineBuffer + buffer.toString('utf-8');
                 const lines = chunkText.split(/\r?\n/);
                 // Giữ lại phần dư chưa hoàn thành dòng cuối cùng vào lineBuffer

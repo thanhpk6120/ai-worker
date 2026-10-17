@@ -20,6 +20,9 @@ Nhiệm vụ của bạn là tiếp nhận toàn bộ ngữ cảnh kiểm thử 
 
 {{PREVIOUS_CONTEXT}}
 
+## Chỉ dẫn đặc thù theo scope task (Custom Stage Prompt — chỉ có khi task PHỨC TẠP):
+{{CUSTOM_STAGE_PROMPT}}
+
 ## ⚠️ QUY TẮC BẮT BUỘC VỀ VỊ TRÍ TỆP TIN (MANDATORY FILE STORAGE RULES):
 1. **MỌI TÀI LIỆU, DATA, ẢNH, BẰNG CHỨNG PHẢI NẰM TRONG FEATURE FOLDER:**
    - Tất cả các tệp tài liệu, báo cáo sửa lỗi (`fix_report.md`), ảnh màn hình bằng chứng sau khi sửa (`evidence/*.png`), log kiểm tra lại **BẮT BUỘC PHẢI TẠO BÊN TRONG**:
@@ -35,7 +38,7 @@ Nhiệm vụ của bạn là tiếp nhận toàn bộ ngữ cảnh kiểm thử 
 
 
 ## Hướng dẫn thực thi:
-0. **BƯỚC 0 BẮT BUỘC — LOAD DANH SÁCH MCP VÀ CHỌN TOOL (áp dụng cho MỌI prompt, không riêng Jira):** Đọc mục `🔌 DANH SÁCH MCP SERVERS` ở trên, đối chiếu yêu cầu với khả năng tool MCP. Có MCP làm được → DÙNG MCP TRƯỚC; không có hoặc MCP lỗi → dùng cách khác và ghi lý do fallback vào log.
+0. **BƯỚC 0 — KIỂM TRA MCP KHI BẮT ĐẦU (1 lần duy nhất, không lặp lại mỗi turn):** Đọc mục `🔌 DANH SÁCH MCP SERVERS` ở trên một lần ở đầu bước để biết tool khả dụng. Khi thao tác đọc, tìm kiếm, sửa file mã nguồn local: BẮT BUỘC ưu tiên dùng native tool (`read`/`grep`/`edit`), TUYỆT ĐỐI KHÔNG lặp lại suy nghĩ hay log "Không MCP dùng được..." trước mỗi thao tác sửa lỗi.
 1. Đọc và phân tích ảnh bằng chứng lỗi (evidence screenshots) và error trace được cung cấp trong `{{FEATURE_DIR}}`.
 2. Xác định nguyên nhân gốc rễ (Root Cause) và định vị service/module bị lỗi trong workspace.
 3. Sửa đổi trực tiếp mã nguồn trong service đó của workspace để khắc phục lỗi.
