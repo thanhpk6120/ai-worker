@@ -128,6 +128,81 @@ describe('RunnerRegistry & PromptTemplateManager Test Suite', () => {
       assert.strictEqual(defaultResolved.name, 'installed-cli');
     });
 
+    it('findLatestSessionFile() chỉ trả về .jsonl cấp gốc, bỏ qua log/__advisor trong thư mục con', () => {
+      const adapter = new BaseAdapter('Probe', 'claude');
+      const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-worker-session-scan-'));
+      try {
+        const mainSession = path.join(sessionDir, 'a.jsonl');
+        fs.writeFileSync(mainSession, '{"type":"session"}\n');
+
+        const subDir = path.join(sessionDir, 'sub');
+        fs.mkdirSync(subDir, { recursive: true });
+        const decoys = [
+          path.join(subDir, '12.bash-original.log'),
+          path.join(subDir, '26.bash.log'),
+          path.join(subDir, '__advisor.jsonl')
+        ];
+        for (const decoy of decoys) {
+          fs.writeFileSync(decoy, 'noise\n');
+        }
+        // Ép mtime các file nhiễu mới hơn hẳn file session chính để chắc chắn không thắng theo mtime
+        const future = (Date.now() + 60000) / 1000;
+        for (const decoy of decoys) {
+          fs.utimesSync(decoy, future, future);
+        }
+
+        const latest = adapter.findLatestSessionFile(sessionDir);
+
+        assert.strictEqual(latest, mainSession, 'Chỉ được trả về file .jsonl cấp sessionDir');
+        assert.strictEqual(path.basename(latest), 'a.jsonl');
+        assert.ok(!latest.endsWith('.log'), 'KHÔNG bao giờ trả về file .log');
+        assert.ok(!path.basename(latest).startsWith('__'), 'KHÔNG bao giờ trả về __advisor.jsonl');
+      } finally {
+        if (fs.existsSync(sessionDir)) {
+          fs.rmSync(sessionDir, { recursive: true, force: true });
+        }
+      }
+    });
+
+    it('findLatestSessionFile() với nhiều .jsonl cấp gốc thì trả về file có mtime mới nhất', () => {
+      const adapter = new BaseAdapter('Probe', 'claude');
+      const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-worker-session-latest-'));
+      try {
+        const older = path.join(sessionDir, 'old.jsonl');
+        const newer = path.join(sessionDir, 'new.jsonl');
+        fs.writeFileSync(older, '{"n":1}\n');
+        fs.writeFileSync(newer, '{"n":2}\n');
+
+        const base = Date.now() / 1000;
+        fs.utimesSync(older, base - 3600, base - 3600);
+        fs.utimesSync(newer, base, base);
+
+        assert.strictEqual(adapter.findLatestSessionFile(sessionDir), newer);
+
+        // Đảo ngược mtime -> kết quả phải đổi theo
+        fs.utimesSync(newer, base - 7200, base - 7200);
+        assert.strictEqual(adapter.findLatestSessionFile(sessionDir), older);
+      } finally {
+        if (fs.existsSync(sessionDir)) {
+          fs.rmSync(sessionDir, { recursive: true, force: true });
+        }
+      }
+    });
+
+    it('findLatestSessionFile() trả về null khi thư mục không có file .jsonl hợp lệ', () => {
+      const adapter = new BaseAdapter('Probe', 'claude');
+      const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-worker-session-empty-'));
+      try {
+        fs.writeFileSync(path.join(sessionDir, '__advisor.jsonl'), 'x\n');
+        fs.writeFileSync(path.join(sessionDir, 'run.log'), 'x\n');
+        assert.strictEqual(adapter.findLatestSessionFile(sessionDir), null);
+      } finally {
+        if (fs.existsSync(sessionDir)) {
+          fs.rmSync(sessionDir, { recursive: true, force: true });
+        }
+      }
+    });
+
     it('enableRunner() và disableRunner() cập nhật cờ enabled', () => {
       const reg = new RunnerRegistry();
       const runner = reg.getRunner('claude-code');

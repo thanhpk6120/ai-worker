@@ -120,4 +120,45 @@ describe('Context Pruner & Step-specific Context Loading Test Suite', () => {
     assert.ok(prompt.length < 25000, `Prompt phải được bảo vệ tránh tràn bộ đệm (thực tế: ${prompt.length})`);
     assert.ok(prompt.includes('đã bị cắt bớt'), 'Phải có thông báo cắt bớt ngữ cảnh trong prompt');
   });
+
+  it('buildPrompt() merge prompt per-task từ prompts/implement.md khi file tồn tại', () => {
+    const marker = 'MARKER-PER-TASK-IMPLEMENT-42';
+    const customDir = path.join(testWorkspace, 'docs', 'features', 'TASK-CUSTOM-PROMPT');
+    fs.mkdirSync(path.join(customDir, 'prompts'), { recursive: true });
+    fs.writeFileSync(path.join(customDir, 'prompts', 'implement.md'), `# Chi dan rieng\n${marker}\n`, 'utf8');
+
+    const prompt = defaultPromptTemplateManager.buildPrompt({
+      step: 'implement',
+      taskCode: 'TASK-CUSTOM-PROMPT',
+      userPrompt: 'Thuc thi theo chi dan rieng',
+      workspacePath: testWorkspace,
+      featureDir: customDir
+    });
+
+    assert.ok(prompt.includes(marker), 'Prompt phải chứa nội dung marker từ prompts/implement.md');
+    assert.ok(!prompt.includes('{{'), 'Không được còn placeholder {{...}} chưa thay thế');
+    assert.ok(!/\{\{[A-Z_]+\}\}/.test(prompt), 'Không còn placeholder dạng {{TEN_BIEN}}');
+  });
+
+  it('buildPrompt() dùng chuỗi fallback khi thiếu prompts/testing.md, không để lại literal {{CUSTOM_STAGE_PROMPT}}', () => {
+    const missingDir = path.join(testWorkspace, 'docs', 'features', 'TASK-NO-CUSTOM-PROMPT');
+    fs.mkdirSync(missingDir, { recursive: true });
+    assert.ok(!fs.existsSync(path.join(missingDir, 'prompts', 'testing.md')));
+
+    const prompt = defaultPromptTemplateManager.buildPrompt({
+      step: 'testing',
+      taskCode: 'TASK-NO-CUSTOM-PROMPT',
+      userPrompt: 'Kiem thu theo test_plan.md',
+      workspacePath: testWorkspace,
+      featureDir: missingDir
+    });
+
+    assert.ok(
+      prompt.includes('Khong co chi dan dac thu theo scope (task khong phuc tap).'),
+      'Phải chứa đúng chuỗi fallback của CUSTOM_STAGE_PROMPT'
+    );
+    assert.ok(!prompt.includes('{{CUSTOM_STAGE_PROMPT}}'), 'KHÔNG được còn literal {{CUSTOM_STAGE_PROMPT}}');
+    assert.ok(!prompt.includes('{{'), 'Không được còn placeholder {{...}} chưa thay thế');
+    assert.ok(!/\{\{[A-Z_]+\}\}/.test(prompt), 'Không còn placeholder dạng {{TEN_BIEN}}');
+  });
 });
