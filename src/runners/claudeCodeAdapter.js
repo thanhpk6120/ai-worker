@@ -1,4 +1,5 @@
 const BaseAdapter = require('./baseAdapter');
+const config = require('../config');
 
 class ClaudeCodeAdapter extends BaseAdapter {
   constructor(options = {}) {
@@ -21,6 +22,15 @@ class ClaudeCodeAdapter extends BaseAdapter {
   buildArgs(prompt, options = {}) {
     const extraArgs = Array.isArray(options.extraArgs) ? options.extraArgs : [];
     const args = ['-p', prompt, '--dangerously-skip-permissions'];
+    // Model lay tu .env (config.CLAUDE_MODEL). Bat buoc truyen bang flag:
+    // env.ANTHROPIC_MODEL trong ~/.claude/settings.json cua CLI de len process env,
+    // nen chi co --model moi ghi de duoc lua chon do.
+    const model = options.model !== undefined && options.model !== null && String(options.model).trim()
+      ? String(options.model).trim()
+      : String(config.CLAUDE_MODEL || '').trim();
+    if (model) {
+      args.push('--model', model);
+    }
     const mcpConfigs = Array.isArray(options.mcpConfig) ? options.mcpConfig : (typeof options.mcpConfig === 'string' && options.mcpConfig ? [options.mcpConfig] : []);
     for (const cfg of mcpConfigs) {
       args.push('--mcp-config', cfg);

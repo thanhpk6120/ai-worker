@@ -98,6 +98,10 @@ const SYSTEMONE_CACHE_TTL_MS = process.env.SYSTEMONE_CACHE_TTL_MS ? parseInt(pro
 const SYSTEMONE_API_KEY = process.env.SYSTEMONE_API_KEY || '';
 const MCP_HANDSHAKE_TIMEOUT_MS = process.env.MCP_HANDSHAKE_TIMEOUT_MS ? parseInt(process.env.MCP_HANDSHAKE_TIMEOUT_MS, 10) : 60000;
 const MCP_TOOL_SEARCH_ENABLED = process.env.MCP_TOOL_SEARCH_ENABLED === 'true';
+// Model cho claude CLI: luon truyen bang flag --model de thang env.ANTHROPIC_MODEL trong
+// ~/.claude/settings.json (env do Claude Code tu apply, process env khong de duoc).
+// Rong = khong truyen flag, dung model mac dinh cua may.
+const CLAUDE_MODEL = process.env.CLAUDE_MODEL || '';
 
 // Tự động tạo thư mục nếu chưa có
 [WORKTREE_BASE_DIR, LOG_DIR, EVIDENCE_DIR].forEach((dir) => {
@@ -123,6 +127,7 @@ module.exports = {
   SYSTEMONE_API_KEY,
   MCP_HANDSHAKE_TIMEOUT_MS,
   MCP_TOOL_SEARCH_ENABLED,
+  CLAUDE_MODEL,
   DEFAULT_TIMEOUT_MS,
   normalizeTimeoutMs,
   resolveJobTimeoutMs
