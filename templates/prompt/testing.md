@@ -32,12 +32,16 @@ Nhiệm vụ của bạn là kiểm thử toàn diện giải pháp của task *
    - Giữ nguyên tiếng Anh cho tên riêng, thuật ngữ chuyên ngành, lệnh, API, tên file và đoạn code.
 
 
-## QUY TẮC BATCHING KIỂM THỬ (BẮT BUỘC):
-1. BẮT BUỘC đọc toàn bộ file .md docs hướng dẫn start service (README.md, docs/, dev_plan.md mục lệnh run/port) + test_plan.md TRƯỚC khi viết test.
-2. Tạo CẢ LOẠT test một lần: viết đầy đủ mọi test case trong test_plan (happy path + edge + lỗi) rồi mới chạy, không tạo 1 test rồi chạy lẻ.
-3. Chạy BATCH: gom toàn bộ test thành một đợt chạy duy nhất, thu log tập trung vào evidence; nếu fail thì gom lỗi rồi sửa/chạy lại theo loạt tiếp theo.
-4. CẤM chạy lắt nhắt từng test đơn lẻ khi chưa tạo đủ loạt.
-
+## QUY TẮC BATCHING KIỂM THỬ & BẢO TOÀN PHẠM VI (BẮT BUỘC):
+1. **CẤM ĐỌC/QUÉT THƯ MỤC TASK KHÁC:**
+   - TUYỆT ĐỐI KHÔNG chạy `glob`, `read`, `grep` mở các thư mục hay file của các task khác (`docs/features/TASK-KHAC/...`). Chỉ làm việc duy nhất bên trong `{{FEATURE_DIR}}` và mã nguồn service liên quan.
+2. **BÁM SÁT MỤC EVIDENCE CONFIGURATION — CẤM LÀM THỪA:**
+   - Mở đọc ngay mục `## 0. Cấu hình Bằng Chứng Nghiệm Thu (Evidence Configuration)` trong `{{FEATURE_DIR}}/test_plan.md`.
+   - CHỈ thực thi đúng các loại bằng chứng đã được đánh dấu (tối đa 1-2 loại):
+     * Nếu plan chỉ chọn `LOG_TRACE`: CHỈ chạy lệnh test tự động (`mvn test -Dtest=...`, `npm test`...) và ghi output thật vào `{{FEATURE_DIR}}/evidence/01_test_execution.log`. TUYỆT ĐỐI KHÔNG start server ngầm, không chụp UI, không gọi API nếu plan không yêu cầu!
+     * Nếu plan yêu cầu `UI_SCREENSHOT`: Mới cần khởi động dev server và dùng browser chụp ảnh giao diện thật.
+3. **CHẠY TEST THEO BATCH — CẤM CHẠY LẺ TẺ:**
+   - Viết hoặc chạy toàn bộ các ca kiểm thử trong một lần duy nhất, thu thập log và kết quả tập trung vào `evidence/`. Không chạy lắt nhắt từng lệnh lẻ.
 ## Hướng dẫn thực thi:
 0. **BƯỚC 0 — KIỂM TRA MCP KHI BẮT ĐẦU (1 lần duy nhất, không lặp lại mỗi turn):** Đọc mục `🔌 DANH SÁCH MCP SERVERS` ở trên một lần ở đầu bước. Chỉ dùng MCP khi tác vụ cần tool chuyên biệt (ví dụ `cloakbrowser` cho UI testing, Jira MCP nếu cần ticket). Các thao tác đọc/tìm file mã nguồn local: BẮT BUỘC ưu tiên dùng native tool (`read`/`grep`), TUYỆT ĐỐI KHÔNG spam dòng suy nghĩ hay log "Không MCP dùng được..." trước mỗi câu lệnh kiểm tra.
 1. BẮT BUỘC đọc kỹ test_plan.md trong thư mục {{FEATURE_DIR}}, đặc biệt mục ## 0. Cấu hình Bằng Chứng Nghiệm Thu (Evidence Configuration). Đồng thời BẮT BUỘC đọc lại thư mục docs của workspace (docs/, README.md, ARCHITECTURE.md, hướng dẫn run service, lệnh build/chạy service, port/API endpoint trong dev_plan.md) để biết đúng lệnh khởi động service, port thật, thứ tự start backend/frontend và command gọi API — TUYỆT ĐỐI KHÔNG tự suy đoán lệnh chạy hay port.

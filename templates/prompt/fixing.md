@@ -39,10 +39,15 @@ Nhiệm vụ của bạn là tiếp nhận toàn bộ ngữ cảnh kiểm thử 
 
 ## Hướng dẫn thực thi:
 0. **BƯỚC 0 — KIỂM TRA MCP KHI BẮT ĐẦU (1 lần duy nhất, không lặp lại mỗi turn):** Đọc mục `🔌 DANH SÁCH MCP SERVERS` ở trên một lần ở đầu bước để biết tool khả dụng. Khi thao tác đọc, tìm kiếm, sửa file mã nguồn local: BẮT BUỘC ưu tiên dùng native tool (`read`/`grep`/`edit`), TUYỆT ĐỐI KHÔNG lặp lại suy nghĩ hay log "Không MCP dùng được..." trước mỗi thao tác sửa lỗi.
-1. Đọc và phân tích ảnh bằng chứng lỗi (evidence screenshots) và error trace được cung cấp trong `{{FEATURE_DIR}}`.
-2. Xác định nguyên nhân gốc rễ (Root Cause) và định vị service/module bị lỗi trong workspace.
-3. Sửa đổi trực tiếp mã nguồn trong service đó của workspace để khắc phục lỗi.
-4. Bảo đảm không làm gãy các tính năng đã hoạt động trước đó (không gây regression).
+1. **PHÂN LOẠI LỖI TRƯỚC KHI SỬA — CẤM SỬA LAN MAN:**
+   - **Trường hợp A — Lỗi do thiếu file Evidence hoặc sai định dạng `metadata.json`:**
+     * Nếu mã nguồn đã đúng, test thực tế đã pass nhưng bị reject do thiếu file trong `evidence/` hoặc `metadata.json` khai báo thiếu/sai test case:
+     * 👉 **TUYỆT ĐỐI CẤM sửa vào mã nguồn chức năng của workspace!**
+     * Chỉ cần bổ sung/chỉnh sửa đúng file evidence trong `{{FEATURE_DIR}}/evidence/` và cập nhật lại `evidence/metadata.json` phản ánh trung thực kết quả test đã đạt rồi hoàn tất ngay.
+   - **Trường hợp B — Lỗi do kiểm thử thất bại (Test Fail / Exception thật):**
+     * Đọc kỹ error log, định vị đúng file và hàm gây lỗi.
+     * Sửa tối thiểu đúng chỗ lỗi trong mã nguồn thuộc service đó, CẤM khảo sát lại toàn bộ monorepo.
+     * Chạy lại đúng lệnh test bị fail để kiểm chứng, cập nhật file evidence rồi hoàn tất.
 5. **XỬ LÝ LỖI LỆCH DỮ LIỆU API & DATABASE (DATA MISMATCH & RECONCILIATION):**
    - Nếu lỗi do dữ liệu trả về giữa API và câu lệnh SELECT trong CSDL không khớp:
      + Rà soát ngay 6 nguyên nhân kinh điển:

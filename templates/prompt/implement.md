@@ -34,18 +34,19 @@ Nhiệm vụ của bạn là hiện thực hóa toàn bộ mã nguồn của tas
    - Giữ nguyên tiếng Anh cho tên riêng, thuật ngữ chuyên ngành, lệnh, API, tên file và đoạn code.
 
 
-## QUY TẮC BATCHING SỬA CODE (BẮT BUỘC):
-1. Quét hết chỗ cần sửa TRƯỚC khi sửa: đọc dev_plan.md, grep/search toàn bộ service liên quan, liệt kê đầy đủ danh sách file + hàm + dòng cần chạm.
-2. Sửa 1 LOẠT duy nhất: thực hiện toàn bộ danh sách đã quét trong cùng một đợt chỉnh sửa, không sửa từng file rời rạc.
-3. Kiểm tra lại sau loạt sửa: đối chiếu dev_plan.md, grep xác nhận không còn chỗ sót; nếu thiếu thì gom thành LOẠT TIẾP THEO rồi sửa tiếp.
-4. CẤM sửa lắt nhắt: tuyệt đối không sửa 1 file rồi dừng, không sửa nhỏ giọt từng chỗ một khi chưa quét hết.
-
-## Hướng dẫn thực thi:
-0. **BƯỚC 0 — KIỂM TRA MCP KHI BẮT ĐẦU (1 lần duy nhất, không lặp lại mỗi turn):** Đọc mục `🔌 DANH SÁCH MCP SERVERS` ở trên một lần ở đầu bước. Chỉ dùng MCP khi tác vụ cần tool chuyên biệt (Jira/Confluence ticket, browser). Khi thao tác đọc, tìm kiếm, sửa file mã nguồn local: BẮT BUỘC ưu tiên dùng native tool (`read`/`grep`/`edit`), TUYỆT ĐỐI KHÔNG lặp lại suy nghĩ hay log "Không MCP dùng được..." trước mỗi thao tác code.
-1. Đọc kỹ tài liệu `dev_plan.md` trong thư mục `{{FEATURE_DIR}}`.
-2. Xác định chính xác service/module trong `{{WORKSPACE_PATH}}` cần thực hiện sửa code.
-3. Chỉnh sửa, tạo mới các tệp mã nguồn theo đúng các bước đã vạch ra trong `dev_plan.md`.
-4. Sau khi viết code xong, xác minh mã nguồn bằng cách kiểm tra cú pháp hoặc chạy thử các lệnh build/test cục bộ.
+## QUY TẮC BATCHING SỬA CODE & CHỐNG KHẢO SÁT LẶP LẠI (BẮT BUỘC):
+1. **ĐỌC TRỰC TIẾP DEV_PLAN — CẤM KHẢO SÁT LẠI TỪ ĐẦU:**
+   - Mở đọc ngay `{{FEATURE_DIR}}/dev_plan.md`. Toàn bộ việc khảo sát kiến trúc, định vị lỗi đã hoàn thành ở phase PLANNING.
+   - **TUYỆT ĐỐI CẤM** chạy các lệnh `grep`, `find`, `glob` quét lại toàn bộ monorepo/workspace hoặc đọc các file không liên quan để khảo sát lại từ đầu.
+2. **CHỈ MỞ VÀ SỬA ĐÚNG CÁC TỆP ĐƯỢC CHỈ ĐỊNH:**
+   - Chỉ dùng `Read` mở đúng các file được liệt kê trong `dev_plan.md`. Khi đọc, đọc một lần trọn vẹn hàm/phạm vi cần sửa (tránh đọc vụn vặt 20-30 dòng nhiều lần).
+   - Thực hiện sửa đổi bằng tool `Edit` hoặc `Write` theo đúng phương án trong `dev_plan.md`. Sửa toàn bộ các file trong một lượt duy nhất.
+3. **CHỈ XÁC MINH CÚ PHÁP NHANH — CẤM CHẠY TEST SUITE LỚN:**
+   - Sau khi sửa code xong, CHỈ chạy kiểm tra cú pháp nhanh cục bộ (`mvn test-compile`, `npx tsc`, `node --check`).
+   - TUYỆT ĐỐI KHÔNG chạy toàn bộ test suite lớn hay kiểm thử E2E (việc chạy kiểm thử toàn diện thuộc về phase TESTING tiếp theo).
+4. **GHI BÁO CÁO VÀ KẾT THÚC NGAY:**
+   - Ghi tệp `{{FEATURE_DIR}}/report.md` tóm tắt ngắn gọn các file và hàm đã sửa.
+   - Hoàn tất lượt để hệ thống tự động chuyển tiếp sang phase TESTING.
 ## 🔌 QUY TẮC DÙNG TOOL (MCP-FIRST, KHÔNG CẤM BROWSER):
 1. **Nguyên tắc chung:** Trước khi làm việc gì, LUÔN kiểm tra tool MCP đang có; nếu có MCP làm được thì DÙNG MCP TRƯỚC. Trình duyệt và các công cụ khác vẫn được dùng bình thường cho các tác vụ mà MCP không cover được.
 2. **Jira/Confluence nội bộ:** ưu tiên MCP Atlassian (`mcp__company-atlassian__jira_get_issue` trên Claude / `jira_get_issue` trên OMP); trình duyệt chỉ dùng cho trang public hoặc kiểm thử UI, tránh fetch trực tiếp URL nội bộ yêu cầu SSO/login.
