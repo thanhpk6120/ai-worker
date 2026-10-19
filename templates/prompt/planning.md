@@ -22,9 +22,13 @@ Nhiệm vụ của bạn là khảo sát codebase tại workspace và lập kế
    - Tất cả các tệp tài liệu kỹ thuật (`dev_plan.md`, `test_plan.md`, `plan.md`, `tasks.md`, `testcase.md`, `impact.md`, `report.md`, `deploy.md`...), các tệp dữ liệu test/mock (`data/`), các tệp ảnh chụp màn hình bằng chứng (`evidence/*.png`, `evidence/*.jpg`), các tệp ghi chú phân tích **BẮT BUỘC PHẢI TẠO BÊN TRONG**:
      👉 `{{FEATURE_DIR}}`
    - TUYỆT ĐỐI KHÔNG tạo tệp tài liệu, ảnh hay file bằng chứng rải rác ngoài thư mục gốc workspace hoặc các thư mục khác.
-2. **QUY TẮC MÃ NGUỒN WORKSPACE:**
-   - Trong giai đoạn PLANNING, chỉ đọc và khảo sát cấu trúc dự án.
-   - CHỈ KHI sang giai đoạn triển khai sửa code thực tế mới xác định service/module cần sửa trong workspace `{{WORKSPACE_PATH}}` và chỉ sửa đổi mã nguồn tại service đó.
+2. **QUY TẮC MÃ NGUỒN WORKSPACE (NGHIÊM CẤM CODE / TEST / QUERY DB TRONG PLANNING):**
+   - Trong giai đoạn PLANNING, CHỈ đọc và khảo sát cấu trúc dự án bằng các lệnh đọc (`Read`, `Grep`, `Glob`).
+   - **TUYỆT ĐỐI CẤM** dùng `Edit` hoặc `Write` để sửa đổi bất kỳ file mã nguồn nào của workspace (chỉ được phép ghi các file tài liệu bên trong `{{FEATURE_DIR}}`). Việc sửa code hoàn toàn thuộc về phase IMPLEMENT!
+   - **TUYỆT ĐỐI CẤM** chạy các lệnh build hoặc kiểm thử nặng (`mvn test`, `mvn compile`, `mvn test-compile`, `npm test`, `npm run build`...). Việc kiểm thử thuộc về phase TESTING!
+   - **TUYỆT ĐỐI CẤM** kết nối CSDL thật (Oracle, Postgres, MySQL...), CẤM chạy script Java/Python/PowerShell truy vấn dữ liệu DB trực tiếp.
+   - Khi tìm kiếm (`grep`, `find`), BẮT BUỘC bỏ qua các thư mục nặng như `node_modules`, `.git`, `target`, `build`, `dist` để tránh làm đơ/treo tiến trình.
+   - Nhiệm vụ duy nhất của PLANNING: định vị module/file cần sửa, viết đủ 2 tệp `dev_plan.md` và `test_plan.md` (kèm `prompts/*.md` nếu phức tạp) rồi kết thúc phản hồi ngay.
 3. **QUY TẮC NGÔN NGỮ TÀI LIỆU:**
    - Mọi tài liệu tạo ra (`.md`, báo cáo, ghi chú...) BẮT BUỘC viết bằng tiếng Việt có dấu, mã hóa UTF-8.
    - Giữ nguyên tiếng Anh cho tên riêng, thuật ngữ chuyên ngành, lệnh, API, tên file và đoạn code.

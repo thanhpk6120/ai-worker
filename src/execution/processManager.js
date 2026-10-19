@@ -126,6 +126,8 @@ class ProcessManager extends EventEmitter {
       TERM: 'xterm-256color',
       COLUMNS: '250',
       LINES: '50',
+      GATEGUARD_DISABLED: '1',
+      ECC_GATEGUARD: 'off',
       ...mcpEnv,
       ...env
     };
