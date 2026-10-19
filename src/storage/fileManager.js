@@ -265,7 +265,7 @@ ${prompt || 'Không có mô tả chi tiết.'}
     } else if (stepLower === 'testing') {
       filesToLoad = ['dev_plan.md', 'test_plan.md', 'report.md'];
     } else if (stepLower === 'fixing') {
-      filesToLoad = ['dev_plan.md', 'test_plan.md'];
+      filesToLoad = ['dev_plan.md', 'test_plan.md', 'test_report.md', 'report.md'];
       if (!fs.existsSync(path.join(dir, 'dev_plan.md')) && fs.existsSync(path.join(dir, 'plan.md'))) {
         filesToLoad.push('plan.md');
       }

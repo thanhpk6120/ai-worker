@@ -44,7 +44,10 @@ Nhiệm vụ của bạn là kiểm thử toàn diện giải pháp của task *
    - Viết hoặc chạy toàn bộ các ca kiểm thử trong một lần duy nhất, thu thập log và kết quả tập trung vào `evidence/`. Không chạy lắt nhắt từng lệnh lẻ.
 ## Hướng dẫn thực thi:
 0. **BƯỚC 0 — KIỂM TRA MCP KHI BẮT ĐẦU (1 lần duy nhất, không lặp lại mỗi turn):** Đọc mục `🔌 DANH SÁCH MCP SERVERS` ở trên một lần ở đầu bước. Chỉ dùng MCP khi tác vụ cần tool chuyên biệt (ví dụ `cloakbrowser` cho UI testing, Jira MCP nếu cần ticket). Các thao tác đọc/tìm file mã nguồn local: BẮT BUỘC ưu tiên dùng native tool (`read`/`grep`), TUYỆT ĐỐI KHÔNG spam dòng suy nghĩ hay log "Không MCP dùng được..." trước mỗi câu lệnh kiểm tra.
-1. BẮT BUỘC đọc kỹ test_plan.md trong thư mục {{FEATURE_DIR}}, đặc biệt mục ## 0. Cấu hình Bằng Chứng Nghiệm Thu (Evidence Configuration). Đồng thời BẮT BUỘC đọc lại thư mục docs của workspace (docs/, README.md, ARCHITECTURE.md, hướng dẫn run service, lệnh build/chạy service, port/API endpoint trong dev_plan.md) để biết đúng lệnh khởi động service, port thật, thứ tự start backend/frontend và command gọi API — TUYỆT ĐỐI KHÔNG tự suy đoán lệnh chạy hay port.
+1. **BÁM SÁT TEST_PLAN & EVIDENCE CONFIGURATION (ĐỌC 1 LẦN DUY NHẤT):**
+   - Đọc kỹ `{{FEATURE_DIR}}/test_plan.md`, đặc biệt mục `## 0. Cấu hình Bằng Chứng Nghiệm Thu (Evidence Configuration)`.
+   - Nếu plan yêu cầu `API_TEST` hoặc `UI_SCREENSHOT`: Mới đọc hướng dẫn run service trong `dev_plan.md` để lấy đúng port và lệnh khởi động.
+   - Nếu plan CHỈ CHỌN `LOG_TRACE` (chạy test mã nguồn như `mvn test`, `npm test`): **BỎ QUA hoàn toàn việc đọc docs start service**, TUYỆT ĐỐI KHÔNG khởi động server hay dò tìm port!
 2. **AGENT PHẢI TỰ CHỤP ẢNH UI & VERIFY ẢNH (NẾU CẦN UI EVIDENCE):**
    - **Worker server KHÔNG tự chụp ảnh thay bạn!** Trách nhiệm chạy service, kiểm thử và chụp ảnh giao diện thuộc về AI Agent.
    - Nếu `test_plan.md` yêu cầu `UI_SCREENSHOT`:
@@ -57,11 +60,13 @@ Nhiệm vụ của bạn là kiểm thử toàn diện giải pháp của task *
 3. **CHẠY KIỂM THỬ THẬT & BẰNG CHỨNG XÁC THỰC:**
    - Thực thi lệnh test chuẩn của repository theo chỉ định trong `test_plan.md` (ví dụ: `npm test`, `npx tsc`, `pytest`, `mvn test`, `go test`...).
    - Lưu nhật ký chạy test thực tế vào `{{FEATURE_DIR}}/evidence/01_test_execution.log` (BUILD LOG: output lệnh build/test, KHÔNG dùng làm evidence API).
-   - BẮT BUỘC khởi động service thật, gọi API nghiệp vụ thật, lưu stdout/stderr service lúc phục vụ request vào `{{FEATURE_DIR}}/evidence/05_service_runtime.log` (RUNTIME LOG: chứa listening/started/ready + dòng request GET/POST/PUT/DELETE + status 2xx). Log chỉ có build (npm install/building/compiled/vite/tsc) mà không có runtime là THIẾU evidence.
+- **CHỈ KHI plan yêu cầu API_TEST**: Mới khởi động service thật, gọi API nghiệp vụ thật và lưu stdout/stderr lúc phục vụ request vào `{{FEATURE_DIR}}/evidence/05_service_runtime.log`. Nếu plan CHỈ CHỌN `LOG_TRACE` (chạy test bằng lệnh `mvn test`, `npm test`): **TUYỆT ĐỐI KHÔNG start server ngầm, không gọi API, không cần 05_service_runtime.log**!
 4. **QUY TẮC TINH GỌN EVIDENCE (TỐI ĐA 2 LOẠI, KHÔNG ĐƯỢC RỖNG DỮ LIỆU):**
    - **Mỗi task chỉ cần 1 đến tối đa 2 loại evidence thực tế phù hợp nhất**, tuyệt đối KHÔNG sinh cả 4 loại gây thừa thãi:
      * Task Frontend / Web UI: 1 hoặc nhiều ảnh chụp browser thật của service (`evidence/*.png`) + Log test nếu có.
-     * Task Backend / Service: Nhật ký chạy test thực tế (`evidence/01_test_execution.log` - build log) + BẮT BUỘC log runtime service (`evidence/05_service_runtime.log`) + Kết quả gọi API nghiệp vụ thực tế (`evidence/02_api_verification.json` có method+url đầy đủ http://localhost:PORT + path nghiệp vụ, responseStatus 2xx, request/response body thật, timestamp). Cấm lấy nội dung build log làm API evidence; chỉ ping GET /health là KHÔNG đủ trừ khi test_plan chỉ yêu cầu health.
+    * Task Backend / Service: Bám sát đúng mục `Evidence Configuration` trong `test_plan.md`:
+      - Nếu plan chọn `LOG_TRACE`: CHỈ CẦN nhật ký chạy test thực tế (`evidence/01_test_execution.log`).
+      - CHỈ KHI plan có chọn `API_TEST`: Mới cần thêm runtime log (`evidence/05_service_runtime.log`) và kết quả gọi API thật (`evidence/02_api_verification.json`). Cấm tự ý ép thêm runtime log/API khi plan chỉ chọn `LOG_TRACE`!
    - **TUYỆT ĐỐI KHÔNG TẠO DỮ LIỆU RỖNG:** Các tệp rỗng, log không có nội dung, hoặc json rỗng (`{}` / `[]` / `null`) KHÔNG ĐƯỢC COI LÀ EVIDENCE và sẽ bị loại bỏ hoặc đánh FAIL!
 5. **TUYỆT ĐỐI KHÔNG BYPASS:** KHÔNG ĐƯỢC sử dụng các lệnh curl, ping HTTP URL giả lập hay mock server để giả mạo trạng thái PASS. Mọi kết quả kiểm thử phải xuất phát từ việc chạy test nội tại của ứng dụng.
 6. Ghi nhận báo cáo kết quả thẩm định thực tế vào `{{FEATURE_DIR}}/test_report.md` (hoặc `testcase.md` theo plan).

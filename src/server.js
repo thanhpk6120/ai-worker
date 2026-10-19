@@ -1723,11 +1723,23 @@ const { exec } = require('child_process');
 const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) => {
   const id = jobId;
   let agentFailed = false;
-        // Tự động lưu đầy đủ các kênh bằng chứng thực tế vào thư mục evidence của task
-        try {
-          if (!fs.existsSync(evidenceDir)) {
-            fs.mkdirSync(evidenceDir, { recursive: true });
-          }
+  const reasons = [];
+  const originalEmit = jobEventBus.emitJobLog;
+  jobEventBus.emitJobLog = (targetId, payload) => {
+    if (payload && typeof payload.text === 'string') {
+      const match = payload.text.match(/\[TESTING-VERIFY\]\s*❌\s*([^\n\r]+)/);
+      if (match && match[1]) {
+        const clean = match[1].trim();
+        if (!reasons.includes(clean)) reasons.push(clean);
+      }
+    }
+    return originalEmit.call(jobEventBus, targetId, payload);
+  };
+  try {
+    try {
+      if (!fs.existsSync(evidenceDir)) {
+        fs.mkdirSync(evidenceDir, { recursive: true });
+      }
   
           // =====================================================================
           // ĐỐI SOÁT EVIDENCE THỰC TẾ DO AGENT TỰ THU THẬP & VERIFY
@@ -2071,7 +2083,10 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
         } catch (evWriteErr) {
           console.warn('Ghi bằng chứng cảnh báo:', evWriteErr.message);
         }
-  return { failed: agentFailed };
+    } finally {
+      jobEventBus.emitJobLog = originalEmit;
+    }
+    return { failed: agentFailed, reasons };
 };
 
 const executeStep = async (id, opts) => {
@@ -2423,15 +2438,18 @@ const executeStep = async (id, opts) => {
       } else if (preJudge && Array.isArray(preJudge.failedFields) && preJudge.failedFields.length > 0) {
         jobEventBus.emitJobLog(id, { text: `\n[VERIFY] SystemOne gợi ý tập trung kênh: [${preJudge.failedFields.join(',')}].\n` });
       }
-      const { failed: verifyFailed } = verifyTaskEvidence({
+      const { failed: verifyFailed, reasons: verifyReasons } = verifyTaskEvidence({
         jobId: id, evidenceDir, featureDir, taskCode,
         emit: (text) => jobEventBus.emitJobLog(id, { text })
       });
       if (verifyFailed) {
         const fixAgent = agentMapping.FIXING || 'claude-code';
-        const failGate = { passed: false, error: 'Đối soát evidence thất bại (VERIFY)', timeout: false, decided_at: new Date().toISOString(), mapped_from: 'VERIFY', source: 'pipeline-verify-evidence' };
-        jobEventBus.emitJobLog(id, { text: `\n[VERIFY] ❌ Đối soát evidence thất bại. Chuyển sang FIXING với 🤖 Agent: ${fixAgent}.\n` });
-        db.updateJob(id, { status: 'FIXING', current_step: 'FIXING', runner: fixAgent, error_message: 'Đối soát evidence thất bại (VERIFY).', gate_result: failGate });
+        const reasonText = (Array.isArray(verifyReasons) && verifyReasons.length > 0)
+          ? verifyReasons.join('; ')
+          : 'Đối soát evidence thất bại (VERIFY).';
+        const failGate = { passed: false, error: reasonText, timeout: false, decided_at: new Date().toISOString(), mapped_from: 'VERIFY', source: 'pipeline-verify-evidence' };
+        jobEventBus.emitJobLog(id, { text: `\n[VERIFY] ❌ Đối soát evidence thất bại: ${reasonText}. Chuyển sang FIXING với 🤖 Agent: ${fixAgent}.\n` });
+        db.updateJob(id, { status: 'FIXING', current_step: 'FIXING', runner: fixAgent, error_message: reasonText, gate_result: failGate });
         jobEventBus.emitJobStatus(id, { status: 'FIXING', runner: fixAgent });
         setTimeout(() => { executeStep(id).catch((__e) => { console.error('[EXECUTE-STEP-NEXT-ERR]', (__e && __e.message) || __e); }); }, 100);
         return;

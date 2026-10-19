@@ -58,10 +58,13 @@ Nhiệm vụ của bạn là tiếp nhận toàn bộ ngữ cảnh kiểm thử 
        5. Lệch múi giờ UTC (+00:00) vs Giờ địa phương (+07:00).
        6. Bộ lọc soft-delete (`DELETED = 0`).
      + Viết lại câu SQL query hoặc assertion script để phản ánh ĐÚNG logic nghiệp vụ của API trước khi chạy lại test.
-5b. **THU THẬP RUNTIME LOG SERVICE + GỌI LẠI API NGHIỆP VỤ (BẮT BUỘC SAU SỬA):**
-   - Khởi động lại service thật, lưu stdout/stderr lúc phục vụ request vào `{{FEATURE_DIR}}/evidence/05_service_runtime.log` (phải chứa listening/started/ready + dòng request GET/POST/PUT/DELETE + status 2xx).
-   - Gọi lại API nghiệp vụ thật (đủ method + URL http://localhost:PORT + path nghiệp vụ, không chỉ /health), lưu `evidence/02_api_verification.json` với responseStatus 2xx + request/response body thật. Cấm lấy build log làm API evidence.
-6. Sau khi sửa xong, chạy lại kiểm thử thật (Re-test) kèm đủ runtime log + API nghiệp vụ rồi hoàn tất để hệ thống chuyển tiếp.
+5b. **THU THẬP RUNTIME LOG SERVICE + GỌI LẠI API NGHIỆP VỤ (CHỈ KHI PLAN CÓ YÊU CẦU API_TEST):**
+   - **CHỈ ÁP DỤNG khi `test_plan.md` có yêu cầu `API_TEST` VÀ lỗi thuộc Trường hợp B (lỗi code thực tế)**:
+     * Khởi động lại service thật, lưu stdout/stderr lúc phục vụ request vào `{{FEATURE_DIR}}/evidence/05_service_runtime.log`.
+     * Gọi lại API nghiệp vụ thật, lưu `evidence/02_api_verification.json` với responseStatus 2xx + request/response body thật.
+   - **Nếu plan CHỈ YÊU CẦU `LOG_TRACE` (hoặc lỗi thuộc Trường hợp A — chỉ cần bổ sung/chỉnh sửa file evidence/metadata.json)**:
+     * 👉 **TUYỆT ĐỐI KHÔNG khởi động lại service, không gọi lại API!** Chỉ cần cập nhật đúng file evidence được yêu cầu và `metadata.json` rồi hoàn tất ngay.
+6. Sau khi sửa xong, chạy lại kiểm thử tương ứng theo đúng kế hoạch `test_plan.md` rồi hoàn tất để hệ thống chuyển tiếp.
 ## 🔌 QUY TẮC DÙNG TOOL (MCP-FIRST, KHÔNG CẤM BROWSER):
 1. **Nguyên tắc chung:** Trước khi làm việc gì, LUÔN kiểm tra tool MCP đang có; nếu có MCP làm được thì DÙNG MCP TRƯỚC. Trình duyệt và các công cụ khác vẫn được dùng bình thường cho các tác vụ mà MCP không cover được.
 2. **Jira/Confluence nội bộ:** ưu tiên MCP Atlassian; trình duyệt chỉ dùng cho trang public hoặc kiểm thử UI.
