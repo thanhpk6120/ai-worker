@@ -16,6 +16,12 @@
  *     -> `src/server.js:2586` `runnerRegistry.getAvailableRunner(planningAgent)`
  * tach thanh 2 segment, moi segment doi chieu 1 tham chieu + 1 dinh danh.
  *
+ * Mien kiem tra (SKIP_DIRS):
+ *   - docs/features/TASK-PIPELINE-FIX/ : TAI LIEU LICH SU. Cac tham chieu
+ *     tro toi code TRUOC khi commit 85cb540 sua loi - la bang chung bug tai
+ *     thoi diem lap ke hoach, khong phai tham chieu stale. KHONG sua so dong
+ *     o day: doi lai se lam cau sai nghia lich su.
+ *
  * Usage:
  *   node scripts/verify-doc-anchors.js                      # kiem tra tat ca docs/features
  *   node scripts/verify-doc-anchors.js docs/features/X.md   # kiem tra 1 file
@@ -30,6 +36,9 @@ const path = require('node:path');
 
 const ROOT = path.resolve(__dirname, '..');
 const DOCS = path.join(ROOT, 'docs', 'features');
+
+// Thu muc MIEN kiem tra (xem header). Tai lieu lich su, khong phai tham chieu stale.
+const SKIP_DIRS = new Set(['TASK-PIPELINE-FIX']);
 
 const FILE_PATH_RE = /(?:src|tests|public|scripts|docs|templates)\/[\w/.-]+\.(?:js|html|css|md|json)/g;
 // Tham chieu dang viet tat ":123" - chi chap nhan khi ky tu truoc khong phai
@@ -136,13 +145,8 @@ function checkDoc(absDocPath) {
         const cand = identifierOf(im[1]);
         if (cand && isIdentifier(cand)) { identifier = cand; break; }
       }
-      if (!identifier) continue; // tham chieu khong co "chu de" de doi chieu
-
-      // Con tro dang viet tat: "tai `:1257`" -> dung dong do de doi chieu,
-      // vi du "... 4 kenhh tai `:1257`" tro toi Promise.allSettled.
-      const ptrMatch = /`?:(\d+)(?:-(\d+))?`?/.exec(seg.text.slice(ref.end));
-      const ptrLine = ptrMatch ? Number(ptrMatch[1]) : null;
-
+      // Kiem tra file + pham vi dong TRUOC: ref hong (file khong ton tai, dong
+      // ngoai pham vi) la loi doc lap, khong phu thuoc co identifier hay khong.
       const absTarget = path.join(ROOT, ref.file);
       if (!fs.existsSync(absTarget)) {
         errors.push({
@@ -160,6 +164,13 @@ function checkDoc(absDocPath) {
         });
         continue;
       }
+
+      if (!identifier) continue; // tham chieu hop le nhung khong co "chu de" de doi chieu
+
+      // Con tro dang viet tat: "tai `:1257`" -> dung dong do de doi chieu,
+      // vi du "... 4 kenh tai `:1257`" tro toi Promise.allSettled.
+      const ptrMatch = /`?:(\d+)(?:-(\d+))?`?/.exec(seg.text.slice(ref.end));
+      const ptrLine = ptrMatch ? Number(ptrMatch[1]) : null;
 
       const rangeText = target.slice(ref.from - 1, ref.to).join('\n');
       if (matchesInRange(identifier, rangeText)) continue;
@@ -187,6 +198,7 @@ function collectDocs(targets) {
       if (!fs.existsSync(abs)) { console.log(`KHONG TON TAI: ${t}`); continue; }
       if (fs.statSync(abs).isDirectory()) {
         (function walk(dir) {
+          if (SKIP_DIRS.has(path.basename(dir))) return; // xem SKIP_DIRS
           for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
             const q = path.join(dir, entry.name);
             if (entry.isDirectory()) walk(q);
@@ -202,6 +214,7 @@ function collectDocs(targets) {
   if (!fs.existsSync(DOCS)) return [];
   const out = [];
   (function walk(dir) {
+    if (SKIP_DIRS.has(path.basename(dir))) return; // xem SKIP_DIRS
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const p = path.join(dir, entry.name);
       if (entry.isDirectory()) walk(p);
