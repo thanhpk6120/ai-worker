@@ -172,7 +172,10 @@ async function start() {
       return 0;
     }
   }
-  return 0;
+  console.log('  health : chua phan hoi sau 10s - xem logs/server-bg.log');
+  // Tra 1 => `start-worker-bg.bat` / `restart-worker.bat` bat loi bang
+  // `if errorlevel 1` thay vi in "[OK] Worker dang chay" khi worker chua len.
+  return 1;
 }
 
 function stop() {
