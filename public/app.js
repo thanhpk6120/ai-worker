@@ -1682,8 +1682,13 @@
             const serviceName = item.service_name || item.service || 'Service App';
             const level = ((item.level || (item.error || item.stack_trace ? 'ERROR' : (item.warn ? 'WARN' : 'INFO')))).toUpperCase();
             const timestamp = item.capturedAt || item.timestamp || item.time || item.created_at || '';
-            const logExcerpt = item.log_excerpt || item.excerpt || item.message || (item.stack_trace ? item.stack_trace.split('\n')[0] : '') || 'Ghi nhận log hệ thống';
             const logFilename = item.filename || (item.file_path ? String(item.file_path).split('/').pop() : '') || '';
+            // File binary (.xlsx/.pdf/...): khong co excerpt doc duoc -> hien badge
+            // "File nhi phan" thay vi rac mojibake.
+            const isBinaryFile = item.downloadable === true;
+            const logExcerpt = isBinaryFile
+              ? `File nhị phân (${escapeHtml(logFilename || 'binary')}) — tải file để xem nội dung`
+              : (item.log_excerpt || item.excerpt || item.message || (item.stack_trace ? item.stack_trace.split('\n')[0] : '') || 'Ghi nhận log hệ thống');
             const logStep = item.stepName || item.step || item.stepId || '';
             const logCase = item.caseName || item.testCase || item.testcase || (typeof item.case === 'string' ? item.case : '') || '';
             const logDesc = item.description || item.displayName || item.title || '';
@@ -2592,8 +2597,12 @@
       const level = ((item.level || (item.error || item.stack_trace ? 'ERROR' : (item.warn ? 'WARN' : 'INFO')))).toUpperCase();
       let fullLogText = item.content || item.rawLogs || item.logs || item.scrubbedLogs || item.stack_trace || item.message || item.log_excerpt || '';
 
-      // Nếu chưa có nội dung nhưng có file_path/url, fetch ngay từ server
-      if (!fullLogText && (item.url || item.file_path)) {
+      // File binary (.xlsx/.pdf/...): server khong gui noi dung de tranh rac
+      // mojibake. Khong fetch thanh text - nguoi dung tai file qua link.
+      const isDownloadable = item.downloadable === true;
+
+      // Neu chua co noi dung nhung co file_path/url, fetch ngay tu server
+      if (!fullLogText && !isDownloadable && (item.url || item.file_path)) {
         fetch(item.url || item.file_path)
           .then(res => res.text())
           .then(text => {
@@ -2606,8 +2615,21 @@
           .catch(() => {});
       }
 
+
+      // File binary: hien nut tai file (client bo qua `content`).
+      if (isDownloadable && btnOpenFile) {
+        const fileHref = item.url || item.file_path || '';
+        if (fileHref) {
+          btnOpenFile.classList.remove('hidden');
+          btnOpenFile.href = fileHref;
+          btnOpenFile.setAttribute('download', item.filename || '');
+        }
+      }
+
       if (!fullLogText) {
-        fullLogText = 'Đang tải nội dung file log từ server...';
+        fullLogText = isDownloadable
+          ? 'Đây là file nhị phân — nội dung không hiển thị được dưới dạng văn bản. Dùng nút tải file bên dưới.'
+          : 'Đang tải nội dung file log từ server...';
       }
 
       const isError = level === 'ERROR' || level === 'FATAL';
@@ -2838,6 +2860,16 @@
       </div>
     `;
   }
+
+  // Nap lai danh sach evidence sau khi xoa. Chi lay evidence -> khong reconnect
+  // SSE log stream (fetchJobDetails se mo connection moi, gay reconnect thua).
+  async function refreshEvidences(jobId) {
+    const res = await fetch(`/api/v1/jobs/${jobId}`);
+    if (!res.ok) throw new Error(`Failed to load job details (HTTP ${res.status})`);
+    const data = await res.json();
+    state.evidences = data.evidence || data.evidences || [];
+    renderEvidenceHub();
+  }
   // --- Evidence Toggle & Delete ---
   async function toggleEvidenceStatus(filename, currentStatus) {
     const jobId = state.activeJobId || (state.activeJob && state.activeJob.id);
@@ -2890,20 +2922,31 @@
     renderEvidenceHub();
 
     // 2. Call backend DELETE
+    let deleted = false;
     try {
       const res = await fetch(`/api/v1/jobs/${jobId}/evidence/files/${encodeURIComponent(filename)}`, {
         method: 'DELETE'
       });
       const data = await res.json();
       if (res.ok && data.success) {
+        deleted = true;
         showToast(`Đã xóa vĩnh viễn bằng chứng ${filename}`, 'success');
-        fetchJobEvidences(jobId);
       } else {
         showToast(data.error || 'Lỗi khi xóa bằng chứng trên server', 'error');
       }
     } catch(err) {
       console.error('Delete evidence failed:', err);
       showToast('Không thể kết nối đến server để xóa bằng chứng.', 'error');
+    }
+
+    // 3. Nap lai danh sach evidence. Loi refresh KHONG duoc bao nham "that bai xoa".
+    if (deleted) {
+      try {
+        await refreshEvidences(jobId);
+      } catch (refreshErr) {
+        console.warn('Refresh evidence sau khi xoa that bai:', refreshErr);
+        showToast('Đã xóa bằng chứng, nhưng không tải lại được danh sách. Vui lòng F5.', 'warning');
+      }
     }
   }
 
@@ -2926,20 +2969,31 @@
     renderEvidenceHub();
 
     // 2. Call backend DELETE
+    let deleted = false;
     try {
       const res = await fetch(`/api/v1/jobs/${jobId}/evidence/files/${encodeURIComponent(filename)}`, {
         method: 'DELETE'
       });
       const data = await res.json();
       if (res.ok && data.success) {
+        deleted = true;
         showToast(`Đã xóa vĩnh viễn bằng chứng ${filename}`, 'success');
-        fetchJobEvidences(jobId);
       } else {
         showToast(data.error || 'Lỗi khi xóa bằng chứng trên server', 'error');
       }
     } catch(err) {
       console.error('Delete evidence item failed:', err);
       showToast('Không thể kết nối đến server để xóa bằng chứng.', 'error');
+    }
+
+    // 3. Nap lai danh sach evidence. Loi refresh KHONG duoc bao nham "that bai xoa".
+    if (deleted) {
+      try {
+        await refreshEvidences(jobId);
+      } catch (refreshErr) {
+        console.warn('Refresh evidence sau khi xoa that bai:', refreshErr);
+        showToast('Đã xóa bằng chứng, nhưng không tải lại được danh sách. Vui lòng F5.', 'warning');
+      }
     }
   }
 

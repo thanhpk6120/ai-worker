@@ -143,7 +143,10 @@ function readMetadata(evidenceDir) {
             stepIndex: num(t.stepIndex !== undefined ? t.stepIndex : t.step_index),
             order: num(t.order !== undefined ? t.order : t.sequence),
             timestamp: str(t.timestamp) || str(t.capturedAt) || null,
-            type: str(t.type) || str(t.evidence_type) || 'UI_SCREENSHOT',
+            // Khong mac dinh 'UI_SCREENSHOT': file .xlsx/.csv/.pdf... khong phai anh,
+            // gan sai se render <img> -> "Anh chua san sang". De server suy ra theo
+            // extension (resolveEvidenceType) khi metadata khong khai type.
+            type: str(t.type) || str(t.evidence_type) || null,
             channel: str(t.channel) || null,
             currentUrl: str(t.currentUrl) || str(t.url) || null,
             status: testStatus
@@ -339,6 +342,7 @@ function listEvidence(evidenceDir, classify) {
     items.push({
       ...rec,
       fileName: file,
+      ext,
       type,
       evidence_type: rec.type || type,
       channel: rec.channel || null,

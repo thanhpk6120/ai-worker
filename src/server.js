@@ -393,6 +393,10 @@ function resolveEvidenceType({ filename = '', ext = '', meta = {}, parsedData = 
   if (name.includes('api') && hasApiRuntimeShape(parsedData)) return 'API_TEST';
   return 'LOG_TRACE';
 }
+// Chi doc noi dung (utf8) cho file text. File binary (.xlsx/.pdf/.zip/.docx...)
+// de content='' va client tai qua /evidence/files/:filename.
+const TEXT_EVIDENCE_EXTS = ['.log', '.txt', '.json', '.md', '.csv', '.xml', '.yaml', '.yml', '.html', '.htm', '.sql', '.js', '.ts', '.sh', '.ps1', '.bat', '.env', '.ini', '.conf'];
+
 function evidenceChannelOf(type) {
   if (type === 'UI_SCREENSHOT') return 'ui';
   if (type === 'API_TEST') return 'api';
@@ -1226,11 +1230,17 @@ function getTaskEvidences(job) {
       let parsedData = null;
       if (['.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg'].includes(ext)) {
         parsedData = null;
-      } else {
+      } else if (TEXT_EVIDENCE_EXTS.includes(ext)) {
+        // File text: doc noi dung de hien thi.
         try { fileContent = fs.readFileSync(fullFilePath, 'utf8'); } catch (e) { fileContent = ''; }
         if (ext === '.json' && fileContent) {
           try { parsedData = JSON.parse(fileContent); } catch (e) { parsedData = null; }
         }
+      } else {
+        // File binary (.xlsx/.pdf/.zip...): doc nhu utf8 se ra "PK\x03\x04..."
+        // (mojibake) -> de content rong, client tai qua /evidence/files/:filename.
+        fileContent = '';
+        parsedData = null;
       }
       let type = resolveEvidenceType({ filename: file, ext, meta, parsedData });
 
@@ -1280,6 +1290,9 @@ function getTaskEvidences(job) {
         rawLogs: fileContent,
         logs: fileContent,
         log_excerpt: fileContent ? fileContent.slice(0, 300) : '',
+        // File binary (.xlsx/.pdf/...): noi dung khong doc duoc -> client bo qua
+        // `content` va tai file qua /evidence/files/:filename.
+        downloadable: !TEXT_EVIDENCE_EXTS.includes(ext) && !['.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg'].includes(ext),
         size: (typeof evidenceHashes !== 'undefined' && evidenceHashes.size != null ? evidenceHashes.size : stat.size),
         sizeBytes: (typeof evidenceHashes !== 'undefined' && evidenceHashes.sizeBytes != null ? evidenceHashes.sizeBytes : stat.size),
         md5: (typeof evidenceHashes !== 'undefined' && evidenceHashes.md5) || null,
@@ -1624,154 +1637,11 @@ app.get(['/api/v1/jobs/:id/evidence', '/api/v1/jobs/:id/evidences', '/api/v1/tas
     const taskCode = job.task_code || job.id;
     const featureDir = fileManager.getFeatureDirectory(workspacePath, taskCode, wsFeaturesDir);
     const taskEvidenceDir = path.join(featureDir, 'evidence');
-    let metadata = {};
-    const metadataPath = path.join(taskEvidenceDir, 'metadata.json');
-    if (fs.existsSync(metadataPath)) {
-      try { metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8')); } catch (e) {}
-    }
-    // evidenceStore hieu ca 3 shape metadata.json (array / map / tests[]).
-    // getEvidenceFileMeta chi doc duoc shape array+map => voi shape tests[] se
-    // tra meta={} => mat ten/mo ta/testCase va moi evidence ra NOT VERIFY.
-    const storeMeta = evidenceStore.readMetadata(taskEvidenceDir);
-    const storeByFile = new Map();
-    for (const rec of storeMeta.records) {
-      storeByFile.set(String(rec.fileName || '').toLowerCase(), rec);
-    }
 
-    const realEvidenceList = [];
-    if (fs.existsSync(taskEvidenceDir)) {
-      const files = fs.readdirSync(taskEvidenceDir);
-      for (let idx = 0; idx < files.length; idx++) {
-        const file = files[idx];
-        if (file === 'metadata.json' || file.startsWith('.')) continue;
-        if (isEvidenceFileDeleted(metadata, file)) continue;
-
-        const fullFilePath = path.join(taskEvidenceDir, file);
-        let stat;
-        try { stat = fs.statSync(fullFilePath); } catch (e) { continue; }
-
-        // 1. Kiểm tra không được là dữ liệu rỗng (nếu rỗng thì KHÔNG coi là evidence)
-        if (stat.size <= 10) continue;
-
-        const ext = path.extname(file).toLowerCase();
-
-        // Kiểm tra nội dung json hoặc log xem có rỗng không
-        if (ext === '.json') {
-          try {
-            const jsonRaw = fs.readFileSync(fullFilePath, 'utf8').trim();
-            if (!jsonRaw || jsonRaw === '{}' || jsonRaw === '[]' || jsonRaw === 'null') {
-              continue; // Dữ liệu rỗng, bỏ qua
-            }
-          } catch (e) { continue; }
-        } else if (ext === '.log' || ext === '.txt') {
-          try {
-            const logRaw = fs.readFileSync(fullFilePath, 'utf8').trim();
-            if (!logRaw) continue; // Log rỗng, bỏ qua
-          } catch (e) { continue; }
-        }
-
-      const storeRec = storeByFile.get(file.toLowerCase());
-      const meta = storeRec ? storeRec : getEvidenceFileMeta(metadata, file);
-      const evidenceHashes = buildEvidenceHashes(fullFilePath, stat);
-      let fileContent = '';
-      let parsedData = null;
-      if (!['.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg'].includes(ext)) {
-        try { fileContent = fs.readFileSync(fullFilePath, 'utf8'); } catch (e) { fileContent = ''; }
-        if (ext === '.json' && fileContent) {
-          try { parsedData = JSON.parse(fileContent); } catch (e) { parsedData = null; }
-        }
-      }
-      let type = resolveEvidenceType({ filename: file, ext, meta, parsedData });
-
-        const fallbackTitle2 = file.replace(ext, '').replace(/^[0-9]+_/, '').replace(/[-_]/g, ' ');
-        const evidenceTitle2 = meta.name || meta.stepName || meta.description || meta.title || fallbackTitle2;
-        const evidenceStep2 = meta.stepName || meta.step || meta.stepId || null;
-        const evidenceCase2 = meta.caseName || meta.testCase || meta.testcase || (typeof meta.case === 'string' ? meta.case : null) || null;
-        const evidenceCapturedAt2 = meta.timestamp || meta.capturedAt || meta.captured_at || meta.created_at || meta.createdAt || meta.time || null;
-        // Vong doi trang thai 3 gia tri: NOT VERIFY (chua verify) -> PASS | FAILED.
-        // Truoc day: meta.status !== 'FAILED' => 'PASS' => evidence chua verify cung hien PASS.
-        const evStatus = evidenceStore.normalizeStatus(meta.status !== undefined ? meta.status : meta.verdict);
-        const evVerdict = evidenceStore.verdictOf(evStatus);
-        const itemObj = {
-          id: `${id}-ev-${idx}`,
-          job_id: id,
-          type,
-          evidence_type: type,
-          channel: evidenceChannelOf(type),
-          verdict: evVerdict,
-          file_path: `/api/v1/jobs/${id}/evidence/files/${encodeURIComponent(file)}`,
-          url: `/api/v1/jobs/${id}/evidence/files/${encodeURIComponent(file)}`,
-          status: evStatus,
-          name: meta.name || evidenceTitle2,
-          passCriteria: meta.passCriteria || meta.pass_criteria || meta.criteria || meta.expected || null,
-          order: (meta.order !== undefined && meta.order !== null) ? meta.order : (meta.stepIndex !== undefined && meta.stepIndex !== null ? meta.stepIndex : null),
-          stepIndex: (meta.stepIndex !== undefined && meta.stepIndex !== null) ? meta.stepIndex : null,
-          title: evidenceTitle2,
-          displayName: evidenceTitle2,
-          filename: file,
-          stepId: meta.stepId || null,
-          stepName: meta.stepName || null,
-          step: evidenceStep2,
-          evidenceId: meta.evidenceId || null,
-          timestamp: meta.timestamp || null,
-          capturedAt: evidenceCapturedAt2,
-          description: meta.description || null,
-          testCase: meta.testCase || null,
-          testcase: meta.testcase || meta.testCase || null,
-          case: meta.case != null ? meta.case : (evidenceCase2 || null),
-          caseName: evidenceCase2,
-          actionType: meta.actionType || null,
-          currentUrl: meta.currentUrl || null,
-          service_name: taskCode || 'Target Service',
-          service: taskCode || 'Target Service',
-          content: fileContent,
-          rawLogs: fileContent,
-          logs: fileContent,
-          log_excerpt: fileContent ? fileContent.slice(0, 300) : '',
-          created_at: evidenceCapturedAt2 || stat.mtime.toISOString(),
-          size: (typeof evidenceHashes !== 'undefined' && evidenceHashes.size != null ? evidenceHashes.size : stat.size),
-          sizeBytes: (typeof evidenceHashes !== 'undefined' && evidenceHashes.sizeBytes != null ? evidenceHashes.sizeBytes : stat.size),
-          md5: (typeof evidenceHashes !== 'undefined' && evidenceHashes.md5) || null,
-          contentHash: (typeof evidenceHashes !== 'undefined' && evidenceHashes.contentHash) || null
-        };
-
-        // Nếu là API Test, gán các trường chi tiết từ file json
-        if (type === 'API_TEST' && parsedData) {
-          itemObj.method = (parsedData.method || (parsedData.request && parsedData.request.method) || 'GET').toUpperCase();
-          itemObj.endpoint = parsedData.endpoint || parsedData.url || (parsedData.request && (parsedData.request.url || parsedData.request.endpoint || parsedData.request.path)) || '/api';
-          itemObj.statusCode = parsedData.statusCode || parsedData.status_code || parsedData.status || (parsedData.response && parsedData.response.status) || 200;
-          itemObj.durationMs = parsedData.durationMs || parsedData.duration_ms || parsedData.latency_ms || parsedData.latency || 0;
-          itemObj.request = parsedData.request || { method: itemObj.method, endpoint: itemObj.endpoint, headers: parsedData.headers, body: parsedData.body || parsedData.payload };
-          itemObj.response = parsedData.response || { status: itemObj.statusCode, headers: parsedData.responseHeaders, body: parsedData.responseBody || parsedData.data };
-        }
-
-        // Nếu là DB Query, gán các trường chi tiết từ file
-        if (type === 'DB_QUERY' && parsedData) {
-          itemObj.table = parsedData.table || parsedData.tableName || parsedData.target || 'Database Table';
-          itemObj.query = parsedData.query || parsedData.sql || fileContent;
-          itemObj.expected = parsedData.expected || parsedData.expectedValues;
-          itemObj.actual = parsedData.actual || parsedData.actualRows || parsedData.rows;
-          itemObj.matched = parsedData.matched !== undefined ? parsedData.matched : (parsedData.passed !== undefined ? parsedData.passed : (itemObj.verdict === 'PASS'));
-        }
-
-        realEvidenceList.push(itemObj);
-      }
-    }
-
-    // Sap xep theo thu tu step test: order -> stepIndex -> timestamp -> ten file.
-    realEvidenceList.sort((a, b) => {
-      const ao = (a.order === null || a.order === undefined) ? null : Number(a.order);
-      const bo = (b.order === null || b.order === undefined) ? null : Number(b.order);
-      if (ao !== null && bo !== null && ao !== bo) return ao - bo;
-      if (ao !== null && bo === null) return -1;
-      if (ao === null && bo !== null) return 1;
-      const at = Date.parse(a.timestamp || '') || 0;
-      const bt = Date.parse(b.timestamp || '') || 0;
-      if (at !== bt) return at - bt;
-      return String(a.filename || '').localeCompare(String(b.filename || ''));
-    });
-    // Cap nhat id sau khi sap xep de id phai dung thu tu hien thi.
-    realEvidenceList.forEach((e, idx) => { e.id = `${id}-ev-${idx}`; });
+    // Dung chung ham getTaskEvidences voi endpoint /api/v1/jobs/:id.
+    // Truoc day endpoint nay copy lai logic doc file => 2 noi lech nhau
+    // (vd file binary doc nhu utf8 -> "PK\x03\x04..." rac mojibake).
+    const realEvidenceList = getTaskEvidences(job);
 
     // Giữ toàn bộ evidence (không cắt 2 loại) để tab API/Log không mất mục cũ.
     const filteredEvidenceList = realEvidenceList;
@@ -1833,10 +1703,16 @@ app.delete(['/api/v1/jobs/:id/evidence/files/:filename', '/api/v1/tasks/:id/evid
     // 2. Xoá cứng file vật lý trong folder lưu evidence
     const targetFilePath = path.join(taskEvidenceDir, safeFilename);
     if (fs.existsSync(targetFilePath)) {
-      try {
-        fs.unlinkSync(targetFilePath);
-      } catch (unlinkErr) {
-        console.warn(`[Evidence Delete] Không thể xoá file vật lý ${targetFilePath}:`, unlinkErr.message);
+      // AGENTS.md §11.2: KHONG xoá vĩnh viễn - chuyển vào thùng rác.
+      if (safeMoveToTrash(targetFilePath)) {
+        console.log(`[Evidence Delete] Đã chuyển vào thùng rác: ${targetFilePath}`);
+      } else {
+        try {
+          fs.unlinkSync(targetFilePath);
+          console.warn(`[Evidence Delete] Không chuyển được vào thùng rác, đã xoá: ${targetFilePath}`);
+        } catch (unlinkErr) {
+          console.warn(`[Evidence Delete] Không thể xoá file vật lý ${targetFilePath}:`, unlinkErr.message);
+        }
       }
     }
 
@@ -2395,6 +2271,7 @@ function buildEvidenceSnapshot(jobId, evidenceDir) {
     }
   }).map((item) => {
     const type = item.type || 'UI_SCREENSHOT';
+    const itemExt = item.ext || path.extname(String(item.fileName || '')).toLowerCase();
     return {
       ...item,
       id: `${jobId}-ev-${item.fileName}`,
@@ -2402,6 +2279,9 @@ function buildEvidenceSnapshot(jobId, evidenceDir) {
       type,
       evidence_type: type,
       channel: evidenceChannelOf(type),
+      // File binary (.xlsx/.pdf/...): client phai bo qua `content` va tai file
+      // qua /evidence/files/:filename (neu khong -> doc .xlsx thanh text => rac).
+      downloadable: !TEXT_EVIDENCE_EXTS.includes(itemExt) && !['.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg'].includes(itemExt),
       file_path: `/api/v1/jobs/${jobId}/evidence/files/${encodeURIComponent(item.fileName)}`,
       url: `/api/v1/jobs/${jobId}/evidence/files/${encodeURIComponent(item.fileName)}`,
       title: item.name || item.stepName || item.description || item.fileName,
