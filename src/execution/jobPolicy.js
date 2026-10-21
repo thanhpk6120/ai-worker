@@ -73,11 +73,18 @@ function resolveMaxRetries(job, envValue) {
  *   max_retries=10 × step timeout 1h = tối đa ~10h cho 1 job treo.
  *   Job RSGATE-44 đã chạy 7h/8 step chỉ vì không có tổng ngân sách.
  *
- * Default = 4 giờ: đủ cho task thật (RSGATE-44 cần ~30-60 phút/step) và
- * vẫn chặn được job treo. Có thể ghi đè bằng `job_deadline_ms|_minutes|_hours`.
+ * DEFAULT suy từ STEP TIMEOUT (không cố định 4h):
+ *   - 4 × stepTimeout: đủ cho 5 step + vòng retry mà không cắt ngang job hợp lệ.
+ *     Job RSGATE-44: PLANNING 31m + IMPLEMENT 32m + TESTING 60m + FIXING ≈ 2-3h.
+ *   - Sàn 2h (task nhanh vẫn có trần), trần 8h (job treo vẫn bị chặn).
+ * Có thể ghi đè bằng `job_deadline_ms|_minutes|_hours`.
  */
-const DEFAULT_JOB_DEADLINE_MS = 4 * 60 * 60 * 1000; // 4 gio
-function resolveJobDeadlineMs(job) {
+const DEFAULT_DEADLINE_STEP_MULTIPLIER = 4;
+const DEFAULT_DEADLINE_MIN_MS = 2 * 60 * 60 * 1000;   // 2 gio
+const DEFAULT_DEADLINE_MAX_MS = 8 * 60 * 60 * 1000;   // 8 gio
+// Fallback khi khong biet step timeout: 4 gio.
+const DEFAULT_JOB_DEADLINE_MS = 4 * 60 * 60 * 1000;
+function resolveJobDeadlineMs(job, stepTimeoutMs) {
   const pipe = parsePipelineConfig(job);
   const direct = toFiniteNumber(pipe.job_deadline_ms !== undefined ? pipe.job_deadline_ms : pipe.jobDeadlineMs);
   if (direct !== null && direct > 0) return direct;
@@ -85,6 +92,12 @@ function resolveJobDeadlineMs(job) {
   if (minutes !== null && minutes > 0) return minutes * 60 * 1000;
   const hours = toFiniteNumber(pipe.job_deadline_hours !== undefined ? pipe.job_deadline_hours : pipe.jobDeadlineHours);
   if (hours !== null && hours > 0) return hours * 60 * 60 * 1000;
+  // Default suy tu step timeout.
+  const step = toFiniteNumber(stepTimeoutMs);
+  if (step !== null && step > 0) {
+    const derived = step * DEFAULT_DEADLINE_STEP_MULTIPLIER;
+    return Math.min(Math.max(derived, DEFAULT_DEADLINE_MIN_MS), DEFAULT_DEADLINE_MAX_MS);
+  }
   return DEFAULT_JOB_DEADLINE_MS;
 }
 
@@ -100,16 +113,54 @@ function resolveJobDeadlineMs(job) {
  *
  * @returns {{ deadlineAt: number|null, isNew: boolean }}
  */
-function resolveDeadlineAt(job, now) {
+function resolveDeadlineAt(job, now, stepTimeoutMs) {
   const pipe = parsePipelineConfig(job);
   const stored = toFiniteNumber(pipe.deadline_at !== undefined ? pipe.deadline_at : pipe.deadlineAt);
   if (stored !== null && stored > 0) {
     return { deadlineAt: stored, isNew: false };
   }
-  const deadlineMs = resolveJobDeadlineMs(job);
+  const deadlineMs = resolveJobDeadlineMs(job, stepTimeoutMs);
   if (!deadlineMs) return { deadlineAt: null, isNew: false };
   const t = now || Date.now();
   return { deadlineAt: t + deadlineMs, isNew: true };
+}
+
+/**
+ * Tạm DỪNG deadline khi job chờ user (PENDING).
+ *
+ * Deadline là để chặn job TREO, không phải để phạt user ngủ. Job RSGATE-44
+ * chờ duyệt kế hoạch qua đêm => resume là dính [DEADLINE] => TIMED_OUT dù
+ * job không hề treo. Ghi `pending_started_at` để biết đã chờ bao lâu.
+ *
+ * @param {object} job
+ * @returns {object} pipeline_config mới
+ */
+function pauseDeadlineForPending(job) {
+  const pipe = parsePipelineConfig(job);
+  const stored = toFiniteNumber(pipe.deadline_at !== undefined ? pipe.deadline_at : pipe.deadlineAt);
+  if (stored === null || stored <= 0) return pipe;
+  pipe.pending_started_at = Date.now();
+  return pipe;
+}
+
+/**
+ * TIẾP TỤC deadline sau khi job thoát trạng thái PENDING.
+ * Cộng thêm đúng khoảng thời gian đã chờ user vào deadline_at.
+ *
+ * @param {object} job
+ * @returns {object} pipeline_config mới
+ */
+function resumeDeadlineAfterPending(job) {
+  const pipe = parsePipelineConfig(job);
+  const pendingAt = toFiniteNumber(pipe.pending_started_at);
+  if (pendingAt === null || pendingAt <= 0) return pipe;
+  delete pipe.pending_started_at;
+  const stored = toFiniteNumber(pipe.deadline_at !== undefined ? pipe.deadline_at : pipe.deadlineAt);
+  if (stored !== null && stored > 0) {
+    const waited = Math.max(0, Date.now() - pendingAt);
+    pipe.deadline_at = stored + waited;
+  }
+  return pipe;
 }
 
 /**
@@ -308,6 +359,8 @@ module.exports = {
   findRepeatedFailure,
   appendFailureHistory,
   clearFailureHistory,
+  pauseDeadlineForPending,
+  resumeDeadlineAfterPending,
   collectAgentOutput,
   QUICK_STEP_DEFAULT_MS,
   QUICK_STEP_MIN_MS,

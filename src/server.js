@@ -2642,11 +2642,14 @@ const executeStep = async (id, opts) => {
   // Timeout PER STEP khong phai ngan sach cho job: 5 step x N retry x 1h => nhieu gio.
   // Deadline phai TUYET DOI: lan dau tinh roi giu vao pipeline_config.deadline_at,
   // cac lan sau (executeStep chay lai moi lan chuyen step) doc lai gia tri da luu.
-  const deadlineInfo = jobPolicy.resolveDeadlineAt(job);
+  const deadlineInfo = jobPolicy.resolveDeadlineAt(job, undefined, jobTimeoutMs);
   const jobDeadlineAt = deadlineInfo.deadlineAt;
   if (deadlineInfo.isNew && jobDeadlineAt) {
     try {
-      const pipe = jobPolicy.parsePipelineConfig(job);
+      // Lay config FRESH tu DB (khong dung snapshot `job` dau executeStep) -
+      // ghi bang snapshot cu se XOA `failure_history` vua ghi o vong trước.
+      const freshForDeadline = db.getJobById(id) || job;
+      const pipe = jobPolicy.parsePipelineConfig(freshForDeadline);
       pipe.deadline_at = jobDeadlineAt;
       db.updateJob(id, { pipeline_config: pipe });
       job.pipeline_config = pipe;
@@ -2866,7 +2869,9 @@ const executeStep = async (id, opts) => {
       const pendingQuestions = (db.getQuestionsByJobId(id) || []).filter(q => q.status === 'PENDING');
       if (pendingQuestions.length > 0) {
         // Còn câu hỏi cần làm rõ -> Chuyển PENDING để chờ người dùng phản hồi
-        db.updateJob(id, { status: 'PENDING', current_step: 'PENDING', had_pending: 1 });
+        // Pause deadline: job cho user tra loi khong phai job treo => khong
+        // duoc tru thoi gian cho user vao ngan sach chay.
+        db.updateJob(id, { status: 'PENDING', current_step: 'PENDING', had_pending: 1, pipeline_config: jobPolicy.pauseDeadlineForPending(db.getJobById(id) || job) });
         jobEventBus.emitJobStatus(id, { status: 'PENDING' });
         jobEventBus.emitJobLog(id, { text: `\n[PLANNING] Agent đã tạo câu hỏi làm rõ. Chuyển sang PENDING chờ người dùng phản hồi...\n` });
         return;
@@ -2875,7 +2880,9 @@ const executeStep = async (id, opts) => {
       // Nếu không còn câu hỏi PENDING (hoặc các câu hỏi đã được giải đáp xong):
       // Tự động hoàn thành Kế hoạch và chuyển tiếp sang bước IMPLEMENT để chạy tiếp
       const implementAgent = agentMapping.IMPLEMENT || 'claude-code';
-      db.updateJob(id, { status: 'IMPLEMENT', current_step: 'IMPLEMENT', runner: implementAgent, had_pending: (answeredQuestions.length > 0 ? 1 : (job.had_pending || 0)) });
+      // Resume deadline: cong lai thoi gian da cho user tra loi vao ngan sach.
+      const resumedPipe = jobPolicy.resumeDeadlineAfterPending(db.getJobById(id) || job);
+      db.updateJob(id, { status: 'IMPLEMENT', current_step: 'IMPLEMENT', runner: implementAgent, had_pending: (answeredQuestions.length > 0 ? 1 : (job.had_pending || 0)), pipeline_config: resumedPipe });
       jobEventBus.emitJobStatus(id, { status: 'IMPLEMENT', runner: implementAgent });
       jobEventBus.emitJobLog(id, { text: `\n[PLANNING -> IMPLEMENT] Hoàn tất Kế hoạch sau khi làm rõ. Tự động chuyển tiếp sang triển khai mã nguồn (IMPLEMENT) với 🤖 Agent: ${implementAgent}...\n` });
       setTimeout(() => { executeStep(id).catch((__e) => { console.error('[EXECUTE-STEP-NEXT-ERR]', (__e && __e.message) || __e); }); }, 100);
@@ -3391,9 +3398,10 @@ const runJobPipeline = (jobId, opts) => {
     const jobToStart = db.getJobById(jobId);
     const tCode = (jobToStart && (jobToStart.task_code || jobToStart.id)) || jobId;
     const currentStatus = ((jobToStart && jobToStart.status) || '').toString().trim().toUpperCase();
-    // Job đã ở trạng thái kết thúc (DONE/TIMED_OUT/ARCHIVED/DELETED): không có nhánh
+    // Job đã ở trạng thái kết thúc (DONE/ARCHIVED/DELETED): không có nhánh
     // executeStep nào xử lý nên resolve ngay, tránh treo Promise và khóa chết workspace.
-    if (TERMINAL_JOB_STATUSES.has(currentStatus)) {
+    // `TIMED_OUT` duoc chay lai: deadline_at da duoc xoa o duoi day (ngan sach moi).
+    if (TERMINAL_JOB_STATUSES.has(currentStatus) && currentStatus !== 'TIMED_OUT') {
       console.log(`[PIPELINE-SKIP] Task ${tCode} (${jobId}) đã ở trạng thái kết thúc ${currentStatus}, không chạy lại pipeline.`);
       resolve({ status: jobToStart.status, skipped: true });
       return;
@@ -3584,7 +3592,10 @@ const handleJobStart = async (req, res) => {
         error: `Task '${taskCode}' đang chờ phản hồi (PENDING). Hãy trả lời câu hỏi hoặc duyệt kế hoạch thay vì Start lại!`
       });
     }
-    if (TERMINAL_JOB_STATUSES.has(startStatusNorm)) {
+    // `TIMED_OUT` duoc Start lai: deadline_at da duoc xoa o runJobPipeline
+    // (restart => ngan sach thoi gian moi). Truoc day job het deadline thi
+    // chi con duoc Clone - nghen user "chay lai tren chinh job do".
+    if (TERMINAL_JOB_STATUSES.has(startStatusNorm) && startStatusNorm !== 'TIMED_OUT') {
       return res.status(400).json({
         success: false,
         error: `Task '${taskCode}' đã ở trạng thái kết thúc ${job.status}, không thể Start lại. Hãy Clone sang mã mới để chạy lại!`

@@ -82,13 +82,19 @@ test('backoff tang dan theo attempt (vong 1 khong wait)', () => {
 
 // --- Tong ngan sach thoi gian cho job (chong job treo vo han) ---------------
 
-test('job KHONG khai deadline => van co tong ngan sach (mac dinh 4 gio)', () => {
+test('job KHONG khai deadline => default suy tu STEP TIMEOUT (4 lan, tran 8h)', () => {
   // Khong co deadline => max_retries=10 x step timeout 1h = ~10h treo.
   // Job RSGATE-44 chay 7h/8 step chi vi khong co tong ngan sach thoi gian.
   const job = { pipeline_config: { timeout: 3600000, max_retries: 10 } };
-  const ms = jobPolicy.resolveJobDeadlineMs(job);
-  assert.equal(ms, jobPolicy.DEFAULT_JOB_DEADLINE_MS);
-  assert.ok(Number.isFinite(ms) && ms > 0);
+  // step timeout 1h => 4 x 1h = 4h
+  assert.equal(jobPolicy.resolveJobDeadlineMs(job, 3600000), 4 * 3600000);
+  // step timeout 30p => 4 x 30p = 2h (san)
+  assert.equal(jobPolicy.resolveJobDeadlineMs(job, 30 * 60 * 1000), 2 * 3600000);
+  // step timeout 5h => 4 x 5h = 20h => cat con 8h (tran)
+  assert.equal(jobPolicy.resolveJobDeadlineMs(job, 5 * 3600000), 8 * 3600000);
+  // khong biet step timeout => fallback 4h
+  assert.equal(jobPolicy.resolveJobDeadlineMs(job), jobPolicy.DEFAULT_JOB_DEADLINE_MS);
+  assert.ok(Number.isFinite(jobPolicy.resolveJobDeadlineMs(job)));
 });
 
 test('job khai deadline => gia tri khai duoc dung', () => {
@@ -110,4 +116,21 @@ test('deadline het han => resolveEffectiveTimeout expired=true', () => {
   const r = jobPolicy.resolveEffectiveTimeout({ stepTimeoutMs: 3600000, deadlineAt: 1000, now: 2000 });
   assert.equal(r.expired, true);
   assert.equal(r.timeoutMs, 0);
+});
+
+test('PENDING: thoi gian cho user KHONG bi tru vao ngan sach chay', () => {
+  // Job cho user duyet ke hoach qua dem => resume khong duoc dinh TIMED_OUT.
+  const deadlineAt = Date.now() + 60 * 60 * 1000;
+  const job = { pipeline_config: { deadline_at: deadlineAt } };
+  const paused = jobPolicy.pauseDeadlineForPending(job);
+  assert.equal(paused.pending_started_at > 0, true, 'phai ghi thoi diem bat dau cho');
+  assert.equal(paused.deadline_at, deadlineAt, 'deadline goc khong doi khi pause');
+  const resumed = jobPolicy.resumeDeadlineAfterPending({ pipeline_config: paused });
+  assert.equal(resumed.pending_started_at, undefined, 'phai xoa pending_started_at');
+  assert.ok(resumed.deadline_at >= deadlineAt, 'deadline phai duoc day len bang thoi gian da cho');
+});
+
+test('resumeDeadlineAfterPending khi khong co pause => khong doi gi', () => {
+  const r = jobPolicy.resumeDeadlineAfterPending({ pipeline_config: { deadline_at: 12345 } });
+  assert.equal(r.deadline_at, 12345);
 });

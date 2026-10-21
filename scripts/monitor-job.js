@@ -25,11 +25,10 @@ const KEY_PATTERNS = [
   /\[SYSTEMONE-FIXGATE\]/,
   /\[REPEAT-CHECK\]/,
   /\[TIMEOUT\]/,
-  /\[IMPLEMENT\]\s+(Hoan tat|Hoàn tất|FAILED)/,
-  /\[IMPLEMENT-FAILED\]/,
+  /\[IMPLEMENT-FAILED\]|\[IMPLEMENT\]\s+(Hoan tat|Hoàn tất)/,
   /\[FIXING-FAILED\]/,
   /\[FIXING-RETRY\]/,
-  /\[IMPLEMENT\]/,
+  /\[DEADLINE\]/,
   /\[RATE-LIMIT\]/,
   /\[PIPELINE-START\]/,
   /\[PIPELINE-SKIP\]/

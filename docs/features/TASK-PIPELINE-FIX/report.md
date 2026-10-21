@@ -395,8 +395,8 @@ Không có thay đổi DB schema, không có dependency mới.
 | `AI_TRIAGE_CACHE_TTL_MS` | `3600000` | TTL cache kết quả triage trong RAM. |
 
 **Biến trong `pipeline_config` của job:**
-- `job_deadline_ms` / `job_deadline_minutes` / `job_deadline_hours` — tổng ngân sách thời gian cho job. Không khai ⇒ không đặt deadline (giữ hành vi cũ).
-- `quick_track` (`true` / `false` / không khai) + `quick_timeout_ms` — chế độ NHANH. Không khai `quick_track` ⇒ hệ thống tự quyết định theo AI triage.
+- `job_deadline_ms` / `job_deadline_minutes` / `job_deadline_hours` — tổng ngân sách thời gian cho job. **Không khai ⇒ dùng mặc định suy từ step timeout** (`4 × stepTimeout`, sàn 2h, trần 8h) — không còn trả `null` (thiếu tổng ngân sách ⇒ `max_retries=10 × 1h = ~10h` treo). Ghi đè bằng 3 key trên nếu cần.
+- `quick_track` (`true` / `false` / không khai) — chế độ NHANH (chỉ đổi template, **không** cắt timeout). `quick_timeout_ms` **không còn được dùng** để cắt timeout (timeout là chỉ số chống treo, không đánh giá độ phức tạp) — giữ lại để tương thích.
 
 **Lệnh kiểm tra sau khi deploy:**
 ```bash
@@ -417,3 +417,67 @@ npm run test:verify-fix
 | `02_modal_api_not_verify.webp` | Modal evidence API: badge `NOT VERIFY` (slate), `STATUS CODE 200`, `KẾT QUẢ ĐỐI SOÁT: NOT VERIFY (chưa verify)` — nhất quán 3 trạng thái. |
 
 `metadata.json` mô tả 2 ảnh trên (tên, mô tả, tiêu chí PASS, `order`/`stepIndex`, `status: PASS`).
+
+---
+
+## 10. Vòng sửa sau (phân tích job RSGATE-44 `bd88ae0a`) — commit `acd6af8` → `9f1f8e1`
+
+### 10.1. Phân tích job thật
+
+Job `bd88ae0a` (RSGATE-44) chạy **7 giờ / 8 step** rồi `FAILED`. Timeline:
+
+| # | Step | Thời lượng | Kết quả |
+|---|---|---|---|
+| 1 | PLANNING | 5.0 phút | COMPLETED |
+| 2 | IMPLEMENT | 1.1 phút | CANCELLED (user hủy) |
+| 3 | PLANNING | 5.0 phút | COMPLETED |
+| 4 | IMPLEMENT | 5.0 phút | **TIMED_OUT (300000ms)** |
+| 5 | PLANNING | 31.7 phút | COMPLETED |
+| 6 | IMPLEMENT | 31.8 phút | COMPLETED |
+| 7 | TESTING | 60.0 phút | COMPLETED (gate timeout) |
+| 8 | FIXING | 0.0 phút | FAILED (`fixGate dừng retry (attempt 3/10, p_success 0.17)`) |
+
+### 10.2. 6 nguyên nhân gốc và cách sửa
+
+| # | Nguyên nhân | Bằng chứng | Sửa | Commit |
+|---|---|---|---|---|
+| 1 | Quick cap cắt timeout user 3600s→300s | log: 3 event `300000ms` | `server.js` — bỏ hẳn quick cap. Timeout **chỉ** chống treo, không đánh giá độ phức tạp | `acd6af8` |
+| 2 | Triage sai → `S/quick` → template cấm chạy test suite | log: `complexity=S track=quick confidence=0.9` | `policy.js` `heavySignal` + `client.js` ép `full` khi `quick`+`large` cùng cao | `acd6af8` |
+| 3 | fixGate ghi đè `retry=true`→`false` | `p_success 0.17, scope full` → dừng ở 3/10 | `client.js` — fixGate chỉ thông báo, không chặn | `acd6af8` |
+| 4 | FIXING timeout ⇒ FAILED ngay, bỏ hết lượt retry còn lại | không có vòng retry | `server.js` — vòng lặp có backoff | `acd6af8` |
+| 5 | VERIFY bỏ sót file khai mà thiếu trên đĩa | metadata khai 17 file, `evidence/` chỉ có `metadata.json` | `server.js` — check chiều ngược, giữ đường dẫn lồng nhau | `058782b`, `9f1f8e1` |
+| 6 | VERIFY fail-open | `t.evidence` là object ⇒ `.forEach` throw ⇒ outer catch ⇒ `failed:false` | `server.js` — `Array.isArray` + outer catch fail-closed | `9f1f8e1` |
+
+### 10.3. Cơ chế mới: so trùng nguyên nhân (chống vòng lặp)
+
+- `jobPolicy.buildFailureSignature(reason + output)` — chuẩn hóa bỏ timestamp/uuid/số dòng/đường dẫn.
+- `jobPolicy.getFailureHistory` / `appendFailureHistory` / `findRepeatedFailure` — lưu trong `pipeline_config.failure_history` (không cần migration DB).
+- `systemone.checkRepeatedCause` — model thật quyết định "nguyên nhân có trùng lần trước không"; fallback offline so chuỗi chữ ký.
+- `server.evaluateRepeatedCause` — trùng ⇒ **dừng vòng lặp**, `FAILED`, `error_message` ghi rõ *"SystemOne dừng vòng lặp: `<lý do>`; nguyên nhân đã gặp N lần trước"*.
+
+**Bẫy đã sửa (2 lần)**: (a) vòng FIXING ghi `pipeline_config` bằng snapshot đầu `executeStep` ⇒ xoá `failure_history` ⇒ cơ chế không bao giờ chạy; (b) `reason` chỉ là `"exit code 1"` cho mọi lần fail ⇒ vòng 2 bị coi là trùng ⇒ dừng job sau 1 retry. Fix: lấy config **fresh** từ DB + ghép **output agent** vào chữ ký.
+
+### 10.4. Tổng ngân sách thời gian cho job
+
+- `DEFAULT_JOB_DEADLINE_MS` không còn trả `null`: mặc định **suy từ step timeout** (`4 × stepTimeout`, sàn 2h, trần 8h). Không có deadline ⇒ `max_retries=10 × 1h ≈ 10h` treo.
+- `deadline_at` được **xoá** khi restart job (`runJobPipeline`) và khi clone (`handleJobClone`) ⇒ job mới có ngân sách riêng.
+- `pauseDeadlineForPending` / `resumeDeadlineAfterPending` — thời gian chờ user ở trạng thái `PENDING` **không** bị trừ vào ngân sách (job chờ duyệt qua đêm không phải job treo).
+- `TIMED_OUT` **được Start lại** (trước đây chỉ Clone được) — `deadline_at` đã xoá nên chạy lại an toàn.
+
+### 10.5. Kiểm chứng
+
+| Kiểm chứng | Kết quả |
+|---|---|
+| `npm test` | **293/293 PASS** |
+| Mutation test (bypass `missingOnDisk.length > 0`) | 3/7 test FAIL ⇒ test thật sự bắt gate |
+| `node scripts/verify-evidence-once.js <featureDir>` trên evidence RSGATE-44 (bản sao, không mutate job) | **FAIL** — liệt kê đủ 17 file khai nhưng thiếu trên đĩa ⇒ gate mới bắt đúng, không PASS sai |
+| Re-run job `bd88ae0a` | Triage ra `M/full/needBrowser/confidence 0.7` — không quick mode, không cắt timeout. PLANNING 19:30 → IMPLEMENT (agent báo 79/79 test SUCCESS) |
+
+### 10.6. Script mới
+
+| Script | Công dụng |
+|---|---|
+| `scripts/monitor-job.js` | Theo dõi job realtime (triage, timeout, repeat-check, fixgate, retry). Không replay log cũ. |
+| `scripts/job-status.js` | In trạng thái + timeline step gần nhất. |
+| `scripts/check-evidence.js` | Đối chiếu file evidence khai trong `metadata.json` với file thật trên đĩa. |
+| `scripts/verify-evidence-once.js` | Chạy `verifyTaskEvidence` thật trên **bản sao** evidence dir (không mutate job đang chạy). |
