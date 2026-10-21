@@ -109,3 +109,29 @@ test('PLANNING: co marker plan_ok => bo qua agent PLANNING, sang IMPLEMENT', asy
   assert.equal(steps.filter((s) => s.step_type === 'PLANNING').length, 0,
     'KHONG duoc tao step PLANNING (da bo qua agent)');
 });
+
+test('PLANNING: plan bi SUA sau khi xac nhan => marker het hieu luc, chay lai PLANNING', async () => {
+  const taskCode = 'T-SKIP-PLAN-2';
+  const { root, featureDir } = makeWorkspace(taskCode, '# Dev Plan\n\nv1\n');
+  stepGate.writePlanOkMarker(featureDir, { taskCode });
+  // Agent sua plan o buoc sau => van tay plan khac => marker phai het hieu luc.
+  fs.writeFileSync(path.join(featureDir, 'dev_plan.md'), '# Dev Plan\n\nv2 - da sua\n', 'utf8');
+
+  const jobId = 'skip-plan-2';
+  db.createJob({
+    id: jobId, title: 'T', prompt: 'p', status: 'PLANNING',
+    repo_path: root, task_code: taskCode
+  });
+
+  await executeStep(jobId, { maxHops: 2 });
+
+  const steps = db.getStepsByJobId(jobId) || [];
+  assert.equal(steps.filter((s) => s.step_type === 'PLANNING').length, 1,
+    'plan da doi => phai chay lai PLANNING (khong bo qua buoc dua tren ket qua cu)');
+  // Marker CU da bi xoa; sau khi PLANNING chay lai, marker MOI duoc ghi
+  // (van tay plan moi) - hop le vi plan da duoc verify lai.
+  const fresh = stepGate.readPlanOkMarker(featureDir);
+  assert.ok(fresh, 'phai co marker moi sau khi verify lai');
+  assert.equal(stepGate.isPlanMarkerValid(featureDir, fresh).valid, true,
+    'marker moi phai con hieu luc voi plan hien tai');
+});

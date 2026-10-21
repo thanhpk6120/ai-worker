@@ -2719,15 +2719,27 @@ const executeStep = async (id, opts) => {
       // Kế hoạch đã được verify ở lượt trước (marker tồn tại) => KHÔNG chạy
       // lại agent PLANNING. PLANNING chỉ làm việc PLANNING rồi chuyển bước -
       // không có lý do chạy lại 20 phút để viết lại plan đã đúng.
+      // ĐIỀU KIỆN: marker còn hiệu lực (2 file plan KHÔNG đổi sau khi xác nhận).
+      // Plan bị sửa ở bước sau => marker hết hiệu lực => chạy lại PLANNING để
+      // verify lại (không bỏ qua bước dựa trên kết quả cũ).
       const planMarker = stepGate.readPlanOkMarker(featureDir);
-      if (planMarker) {
+      const markerCheck = stepGate.isPlanMarkerValid(featureDir, planMarker);
+      if (markerCheck.valid) {
         const markerPipe = jobPolicy.parsePipelineConfig(db.getJobById(id) || job);
         delete markerPipe.pending_started_at;
         db.updateJob(id, { status: 'IMPLEMENT', current_step: 'IMPLEMENT', runner: (agentMapping.IMPLEMENT || 'claude-code'), pipeline_config: markerPipe });
         jobEventBus.emitJobStatus(id, { status: 'IMPLEMENT', runner: (agentMapping.IMPLEMENT || 'claude-code') });
-        jobEventBus.emitJobLog(id, { text: `\n[PLANNING] Kế hoạch đã được verify lúc ${planMarker.at} và còn hiệu lực → BỎ QUA agent PLANNING, chuyển thẳng sang IMPLEMENT.\n` });
+        jobEventBus.emitJobLog(id, { text: `\n[PLANNING] Kế hoạch đã được verify lúc ${planMarker.at} và không thay đổi từ đó → BỎ QUA agent PLANNING, chuyển thẳng sang IMPLEMENT.\n` });
         scheduleNextStep(id, opts, 100);
         return;
+      }
+      if (planMarker) {
+        // Marker hết hiệu lực => xoá + xoá implement_status cũ, chạy lại PLANNING.
+        stepGate.clearPlanOkMarker(featureDir);
+        const stalePipe = jobPolicy.parsePipelineConfig(db.getJobById(id) || job);
+        delete stalePipe.implement_status;
+        db.updateJob(id, { pipeline_config: stalePipe });
+        jobEventBus.emitJobLog(id, { text: `\n[PLANNING] Marker kế hoạch cũ không còn hiệu lực (${markerCheck.reason}) → chạy lại PLANNING để verify lại.\n` });
       }
       const planningAgent = agentMapping.PLANNING || 'claude-code';
       beginStepTimeline(id, 'PLANNING', planningAgent);
@@ -3128,6 +3140,23 @@ const executeStep = async (id, opts) => {
           return;
         }
         jobEventBus.emitJobLog(id, { text: `\n[IMPLEMENT] Hoan tat trien khai ma nguon.\n` });
+        // Ghi marker `IMPLEMENT_STATUS: DONE` vao dev_plan.md + lam moi marker
+        // ke hoach (ke ca van tay plan) => lan chay sau BO QUA ca PLANNING va
+        // IMPLEMENT, chuyen thang sang TESTING.
+        // Khong co buoc nay thi moi job phai chay lai PLANNING + IMPLEMENT du
+        // ma nguon da xong (dung thu user phan nan).
+        try {
+          const devPath = path.join(featureDir, 'dev_plan.md');
+          if (fs.existsSync(devPath)) {
+            const cur = fs.readFileSync(devPath, 'utf8');
+            const next = stepGate.writeImplementStatus(cur, 'DONE');
+            if (next !== cur) fs.writeFileSync(devPath, next, 'utf8');
+            stepGate.writePlanOkMarker(featureDir, { taskCode, implementStatus: 'DONE' });
+            jobEventBus.emitJobLog(id, { text: `\n[IMPLEMENT] Đã ghi marker IMPLEMENT_STATUS: DONE vào dev_plan.md — lần chạy sau sẽ bỏ qua PLANNING + IMPLEMENT.\n` });
+          }
+        } catch (e) {
+          console.warn('[IMPLEMENT] Khong ghi duoc marker implement status:', e.message);
+        }
       } else {
         jobEventBus.emitJobLog(id, { text: `\n[IMPLEMENT-WARN] Khong tim thay runner hop le cho ${implementAgent}\n` });
       }

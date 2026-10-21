@@ -42,6 +42,48 @@ test('plan marker: xoa duoc (plan bi sua => verify lai)', () => {
   assert.equal(stepGate.readPlanOkMarker(dir), null);
 });
 
+
+test('plan marker: gan van tay plan (hash) de kiem tra hieu luc', () => {
+  const dir = tmpDir();
+  fs.writeFileSync(path.join(dir, 'dev_plan.md'), '# Dev\n\nv1\n', 'utf8');
+  fs.writeFileSync(path.join(dir, 'test_plan.md'), '# Test\n\nv1\n', 'utf8');
+  stepGate.writePlanOkMarker(dir, { taskCode: 'T-1' });
+  const m = stepGate.readPlanOkMarker(dir);
+  assert.ok(m.planFingerprint, 'marker phai co van tay plan');
+  assert.ok(m.planFingerprint.hash, 'phai co hash');
+  assert.equal(stepGate.isPlanMarkerValid(dir, m).valid, true, 'plan khong doi => marker con hieu luc');
+});
+
+test('plan marker: plan bi SUA sau khi xac nhan => marker HET HIEU LUC', () => {
+  const dir = tmpDir();
+  fs.writeFileSync(path.join(dir, 'dev_plan.md'), '# Dev\n\nv1\n', 'utf8');
+  fs.writeFileSync(path.join(dir, 'test_plan.md'), '# Test\n\nv1\n', 'utf8');
+  stepGate.writePlanOkMarker(dir, { taskCode: 'T-1' });
+  const m = stepGate.readPlanOkMarker(dir);
+  assert.equal(stepGate.isPlanMarkerValid(dir, m).valid, true);
+
+  // Agent sua plan o buoc sau => phai chay lai PLANNING de verify lai.
+  fs.writeFileSync(path.join(dir, 'dev_plan.md'), '# Dev\n\nv2 - da sua\n', 'utf8');
+  const check = stepGate.isPlanMarkerValid(dir, m);
+  assert.equal(check.valid, false, 'plan da doi => marker phai het hieu luc');
+  assert.match(check.reason, /thay doi/i);
+});
+
+test('plan marker: khong co fingerprint (marker cu) => HET HIEU LUC (an toan)', () => {
+  const dir = tmpDir();
+  fs.writeFileSync(path.join(dir, 'dev_plan.md'), '# Dev\n', 'utf8');
+  fs.writeFileSync(path.join(dir, 'plan_ok.json'), JSON.stringify({ at: 'x' }), 'utf8');
+  const old = { at: 'x' };
+  const check = stepGate.isPlanMarkerValid(dir, old);
+  assert.equal(check.valid, false, 'marker khong co van tay plan => phai chay lai');
+});
+
+test('plan marker: khong co marker => het hieu luc', () => {
+  const dir = tmpDir();
+  const check = stepGate.isPlanMarkerValid(dir, null);
+  assert.equal(check.valid, false);
+  assert.match(check.reason, /khong co marker/i);
+});
 // --- Marker trang thai implement ---------------------------------------------
 
 test('implement status: doc duoc DONE / NEEDED tu dev_plan.md', () => {
