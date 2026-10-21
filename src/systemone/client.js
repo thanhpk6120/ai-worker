@@ -203,7 +203,24 @@ async function decideTriage({ taskCode = '', prompt = '', jobId = '' } = {}) {
     const l = noulOf(answers, 'is_large');
     if (![q, l].every(Number.isFinite)) { stats.fallbacks += 1; return policy.triageHeuristic({ prompt }); }
     // Regex chi dung cho need_browser, KHONG con quyet dinh quick/large.
-    const needBrowser = policy.triageSignals({ prompt }).needBrowser;
+    const sig = policy.triageSignals({ prompt });
+    const needBrowser = sig.needBrowser;
+    // Model tra ca `is_quick` va `is_large` cao => mau thuan.
+    // Chon `full`: template quick CAM chay test suite => sai do chinh xac,
+    // chay lau hon thi VERIFY gate bat duoc. (Job RSGATE-44 bi phan loai S/quick
+    // => 3 vong chet timeout 300s.)
+    if (q >= THRESHOLD && l >= THRESHOLD) {
+      const out = { complexity: 'L', track: 'full', needBrowser, confidence: Math.max(q, l), cached: false, source: 'jev' };
+      setCache(route, payload, out);
+      return { ...out };
+    }
+    // Prompt co dau hieu task LON (doc truy xuat ticket/story nhieu tai lieu)
+    // => KHONG duoc bat che do nhanh du model nghi la nhe.
+    if (sig.heavySignal) {
+      const out = { complexity: 'L', track: 'full', needBrowser, confidence: Math.max(q, l, 0.8), cached: false, source: 'jev' };
+      setCache(route, payload, out);
+      return { ...out };
+    }
     const out = q >= THRESHOLD
       ? { complexity: 'S', track: 'quick', needBrowser, confidence: q, cached: false, source: 'jev' }
       : (l >= THRESHOLD
@@ -255,6 +272,44 @@ async function decideFixGate({ jobId = '', attempt = 0, maxRetries = 3, failures
     return policy.fixGateHeuristic({ attempt, maxRetries });
   }
 }
+
+/**
+ * So trung nguyen nhan loi giua vong hien tai va cac vong truoc.
+ * Dung de CHAN vong lap: neu loi moi y het nguyen nhan loi da gap o vong truoc
+ * thi retry se ra cung ket qua - SystemOne phai noi ro dung khong.
+ * @param {object} args
+ * @returns {Promise<{repeated: boolean, confidence: number, reason: string, cached: boolean, fallback: boolean}>}
+ */
+async function decideRepeatedCause({ jobId = '', step = '', attempt = 0, maxRetries = 3, reason = '', signature = '', history = [] } = {}) {
+  const route = 'repeatedcause';
+  const payload = { jobId, step, attempt, maxRetries, signature, reason: String(reason || '').slice(0, 1200) };
+  if (!isEnabled() || !Array.isArray(history) || history.length === 0) {
+    stats.fallbacks += 1;
+    return policy.repeatedCauseHeuristic({ history, signature });
+  }
+  const cached = getCache(route, payload);
+  if (cached) return cached;
+  const questions = {
+    is_repeated: { type: 'noul', question: 'Is this the same root cause as a previous failure?', instructions: 'High if the underlying problem is identical to an earlier attempt, even if wording differs' },
+    same_impact: { type: 'noul', question: 'Will retrying produce the same outcome?', instructions: 'High if retrying without a new approach cannot change the result' }
+  };
+  try {
+    const prev = history.slice(-5).map((h) => `- [${h.step || '?'}] ${String(h.signature || '').slice(0, 400)}`).join('\n');
+    const state = `Job ${jobId} step ${step} attempt ${attempt}/${maxRetries}. Current failure: ${String(reason || '').slice(0, 1200)}\nPrevious failures in this job:\n${prev}\nIs the current failure the SAME root cause as one of the previous ones?`;
+    const data = await postJev({ state, questions });
+    const answers = (data && data.answers) || {};
+    const r = noulOf(answers, 'is_repeated');
+    const s = noulOf(answers, 'same_impact');
+    if (![r, s].every(Number.isFinite)) { stats.fallbacks += 1; return policy.repeatedCauseHeuristic({ history, signature }); }
+    const out = { repeated: r >= THRESHOLD, will_repeat: s >= THRESHOLD, confidence: Math.max(r, s), reason: '', cached: false, fallback: false };
+    setCache(route, payload, out);
+    return { ...out };
+  } catch (e) {
+    stats.fallbacks += 1;
+    return policy.repeatedCauseHeuristic({ history, signature });
+  }
+}
+
 
 async function decidePreJudge({ jobId = '', taskCode = '', summary = '' } = {}) {
   const route = 'prejudge';
@@ -513,10 +568,12 @@ async function checkFixGate({ jobId, attempt, maxRetries, failures, files, fileC
     if (decision.fallback === true) {
       return { ...decision, retry: true, source: 'heuristic' };
     }
-    if (decision.retry && Number(decision.p_success) < 0.3 && decision.fixScope === 'full') {
-      addCliSaved(1);
-      return { ...decision, retry: false };
-    }
+    // KHONG duoc ghi de `retry` khi model da tra `should_retry` cao.
+    // Truoc day: `p_success < 0.3 && fixScope === 'full'` => retry=false => job
+    // bd88ae0a dung o attempt 3/10 du user khai 10 luot.
+    // QUY TAC MOI: chi dung retry khi (a) het so lan retry, hoac (b) nguyen nhan
+    // loi bi TRUNG voi lan truoc (do server kiem bang systemone.checkRepeatedCause).
+    // => fixGate chi thong bao, KHONG tu quyet dinh chan retry.
     if (decision.retry === false) addCliSaved(1);
     return decision;
   } catch (e) {
@@ -525,6 +582,24 @@ async function checkFixGate({ jobId, attempt, maxRetries, failures, files, fileC
     return d;
   }
 }
+
+/**
+ * Wrapper cho quyet dinh "nguyen nhan loi co trung lan truoc khong".
+ * @param {object} args
+ * @returns {Promise<{repeated: boolean, will_repeat: boolean, confidence: number, reason: string, cached: boolean, fallback: boolean}>}
+ */
+async function checkRepeatedCause({ jobId, step, attempt, maxRetries, reason, signature, history }) {
+  try {
+    if (!isEnabled()) return policy.repeatedCauseHeuristic({ history, signature });
+    const decision = await decideRepeatedCause({ jobId, step, attempt, maxRetries, reason, signature, history });
+    if (!decision) return policy.repeatedCauseHeuristic({ history, signature });
+    trackJobDecision(jobId, decision, 'repeatedcause');
+    return decision;
+  } catch (e) {
+    return policy.repeatedCauseHeuristic({ history, signature });
+  }
+}
+
 async function checkPreJudge({ jobId, taskCode, summary }) {
   try {
     if (!isEnabled()) {
@@ -640,6 +715,8 @@ module.exports = {
   checkGuard,
   checkTriage,
   checkFixGate,
+  decideRepeatedCause,
+  checkRepeatedCause,
   checkPreJudge,
   checkDedup,
   getFixAttempt,

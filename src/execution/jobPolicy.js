@@ -199,6 +199,93 @@ function resolveQuickStepTimeoutMs(job, fallbackMs) {
   return cap;
 }
 
+// --- So trung nguyen nhan loi (chong lap lai cung 1 loi) ------------------
+
+// Chuan hoa 1 mo ta loi thanh "chu ky" de so sanh giua cac vong retry.
+// Bo cac phan thay doi theo lan chay (so, duong dan, timestamp, hex id)
+// de 2 lan fail KHAC NHAU van cung chu ky khi thuc chat la cung 1 nguyen nhan.
+const _NOISE_PATTERNS = [
+  [/\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?/gi, '<ts>'],
+  [/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, '<uuid>'],
+  [/\b\d+(?:\.\d+)?\s*ms\b/gi, '<ms>'],
+  [/\bexit code\s+-?\d+\b/gi, 'exit code <n>'],
+  [/\b(?:line|column|at)\s+\d+(?::\d+)?/gi, 'at <n>'],
+  [/\b[0-9a-f]{32,}\b/gi, '<hash>'],
+  [/[A-Za-z]:\\[^\s'"]+/g, '<path>'],
+  [/\/(?:[\w.-]+\/)+[\w.-]+/g, '<path>'],
+  [/\b\d+\b/g, '<n>']
+];
+
+/**
+ * Tao chu ky chuan hoa cho 1 mo ta loi.
+ * @param {string} reason
+ * @returns {string} chu ky rong neu khong co noi dung
+ */
+function buildFailureSignature(reason) {
+  let text = typeof reason === 'string' ? reason : (reason == null ? '' : String(reason));
+  text = text.toLowerCase().replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  for (const [re, rep] of _NOISE_PATTERNS) text = text.replace(re, rep);
+  // Cat con 600 ky tu dau - loi thuong nam o dau (stack trace / message).
+  return text.slice(0, 600).trim();
+}
+
+/**
+ * Lay lich su chu ky loi da ghi nhan cho 1 job.
+ * Luu trong `pipeline_config.failure_history` (object) de khong can migration DB.
+ * @param {object} job
+ * @returns {Array<{step: string, signature: string, at: string, attempt: number}>}
+ */
+function getFailureHistory(job) {
+  let pipe = {};
+  try { pipe = parsePipelineConfig(job); } catch (e) { pipe = {}; }
+  const h = pipe && pipe.failure_history;
+  return Array.isArray(h) ? h.filter((x) => x && typeof x === 'object' && x.signature) : [];
+}
+
+/**
+ * Kiem tra 1 chu ky loi da xuat hien trong lich su cua job chua.
+ * @param {object} job
+ * @param {string} signature
+ * @param {string} step
+ * @returns {{ repeated: boolean, previous: object|null, occurrences: number }}
+ */
+function findRepeatedFailure(job, signature, step) {
+  const history = getFailureHistory(job);
+  if (!signature) return { repeated: false, previous: null, occurrences: 0 };
+  const same = history.filter((h) => h.signature === signature && (!step || h.step === step));
+  return { repeated: same.length > 0, previous: same.length ? same[same.length - 1] : null, occurrences: same.length };
+}
+
+/**
+ * Ghi them 1 chu ky loi vao lich su cua job.
+ * @param {object} job
+ * @param {string} signature
+ * @param {string} step
+ * @param {number} attempt
+ * @returns {object} pipeline_config moi (de ghi vao DB)
+ */
+function appendFailureHistory(job, signature, step, attempt) {
+  const pipe = parsePipelineConfig(job);
+  const history = getFailureHistory(job);
+  history.push({ step: step || null, signature, at: new Date().toISOString(), attempt: Number(attempt) || 0 });
+  // Gioi han 50 muc - chi can so voi cac vong gan nhat.
+  pipe.failure_history = history.slice(-50);
+  return pipe;
+}
+
+/**
+ * Xoa lich su loi (dung khi job bat dau lai / clone).
+ * @param {object} pipe
+ * @returns {object} pipeline_config moi
+ */
+function clearFailureHistory(pipe) {
+  const next = { ...(pipe && typeof pipe === 'object' ? pipe : {}) };
+  delete next.failure_history;
+  return next;
+}
+
+
 module.exports = {
   parsePipelineConfig,
   resolveMaxRetries,
@@ -208,6 +295,11 @@ module.exports = {
   resolveRetryBackoffMs,
   resolveQuickStepTimeoutMs,
   detectRateLimit,
+  buildFailureSignature,
+  getFailureHistory,
+  findRepeatedFailure,
+  appendFailureHistory,
+  clearFailureHistory,
   collectAgentOutput,
   QUICK_STEP_DEFAULT_MS,
   QUICK_STEP_MIN_MS,

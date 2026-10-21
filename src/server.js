@@ -656,6 +656,62 @@ function recordSystemOne(jobId, result, route) {
   try { db.updateJob(jobId, { systemone_state: state }); } catch (e) {}
   try { jobEventBus.emitJobSystemOne(jobId, state); } catch (e) {}
 }
+
+/**
+ * Kiem tra nguyen nhan loi cua vong hien tai co TRUNG voi lan truoc khong.
+ *
+ * Muc tieu: chong vong lap vô han. Neu loi moi y het loi da gap o vong truoc
+ * thi retry se ra cung ket qua - ton that gian va thoi gian. SystemOne quyet
+ * dinh co lap hay khong (model that + heuristic offline so chu ky loi).
+ *
+ * Luu chu ky loi vao `pipeline_config.failure_history` de cac vong sau so sanh.
+ *
+ * @param {string} args.reason    mo ta loi cua vong hien tai (vd "exit code 1")
+ * @param {string} args.output   output cua agent (stdout+stderr) - phai co trong
+ *                                chu ky loi, vi `reason` chi la "exit code 1"
+ *                                cho MOI lan fail => moi vong se bi coi la trung.
+ * @returns {Promise<{repeated: boolean, reason: string, signature: string, occurrences: number, stoppedBySystemOne: boolean}|null>}
+ */
+async function evaluateRepeatedCause({ id, step, attempt, maxRetries, reason, output }) {
+  try {
+    const job = db.getJobById(id);
+    if (!job) return null;
+    // Chu ky loi = mo ta loi + phan cuoi output agent (stack trace / loi that).
+    // Output la phan phan biet cac lan fail khac nhau - khong co no thi moi
+    // vong 2 se trung ngay va dung job sau 1 lan retry (dung max_retries=10).
+    const outTail = String(output || '').slice(-1200);
+    const signature = jobPolicy.buildFailureSignature(`${reason || ''}\n${outTail}`);
+    if (!signature) return null;
+    const history = jobPolicy.getFailureHistory(job);
+    // Luu chu ky loi vua xay ra VAO lich su (truoc khi hoi so sanh).
+    const pipe = jobPolicy.appendFailureHistory(job, signature, step, attempt);
+    try { db.updateJob(id, { pipeline_config: pipe }); } catch (e) {}
+    const prior = history.filter((h) => h.signature === signature && h.step === step);
+    if (prior.length === 0) {
+      // Chua co lan nao trung => he thong tu chay tiep, khong can hoi model.
+      jobEventBus.emitJobLog(id, { text: `[REPEAT-CHECK] ${step} vong ${attempt}: chu ky loi moi (chua tung gap) - cho phep retry.\n` });
+      return { repeated: false, reason: 'chu ky loi moi', signature, occurrences: 0, stoppedBySystemOne: false };
+    }
+    const decision = await systemone.checkRepeatedCause({
+      jobId: id, step, attempt, maxRetries,
+      reason: String(reason || '').slice(0, 1200),
+      signature,
+      history
+    });
+    const repeated = decision && decision.repeated === true;
+    jobEventBus.emitJobLog(id, { text: `[REPEAT-CHECK] ${step} vong ${attempt}/${maxRetries}: chu ky loi da gap ${prior.length} lan truoc. SystemOne noi "${decision && decision.reason ? decision.reason : (repeated ? 'trung nguyen nhan' : 'khac nguyen nhan')}" => ${repeated ? 'DUNG vong lap' : 'cho phep retry'}.\n` });
+    return {
+      repeated,
+      reason: (decision && decision.reason) || (repeated ? 'nguyen nhan loi trung voi lan truoc' : 'nguyen nhan moi'),
+      signature,
+      occurrences: prior.length,
+      stoppedBySystemOne: repeated
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
 app.get('/api/v1/runners', (req, res) => {
   try {
     const runners = runnerRegistry.detectAll();
@@ -2560,27 +2616,16 @@ const executeStep = async (id, opts) => {
     return;
   }
 
-  // Che do NHANH (task nhe): dung ngan sach thoi gian ngan hon cho tung step.
-  // Task de khong nen chay 15-60 phut/step - uu tien lam nhanh, VERIFY se kiem tra lai.
-  // QUAN TRONG: timeout user khai TUONG MINH luon THANG - quick cap chi ap khi
-  // user KHONG khai timeout (khong cat timeout 1 gio cua user xuong 5 phut).
+  // TIMEOUT = chi so CHONG TREO, KHONG phai tham so danh gia do phuc tap.
+  // Truoc day "che do NHANH" cat timeout cua user tu 1 gio xuong 5 phut -> job
+  // RSGATE-44 (task lon) bi chet 3 lan dung 300s, mat ~7 gio moi giai quyet.
+  // QUY TAC MOI: timeout luon la timeout user/DEFAULT, khong bao gio bi bien doi
+  // vi tri do phuc tap. Quick mode chi doi TEMPLATE (plan rut gon), khong doi hanh vi.
   let stepTimeoutMs = effective.timeoutMs;
-  // Che do NHANH hieu luc: dung chung cho cap timeout VA chon template
-  // (neu chi cap timeout ma van chon template "sua IT NHAT" thi task phuc tap
-  // van bi lam sai noi dung - job RSGATE-44).
   const effectiveQuickTrack = resolveEffectiveQuickTrack(job);
-  if (effectiveQuickTrack) {
-    const quickCap = jobPolicy.resolveQuickStepTimeoutMs(job, effective.timeoutMs);
-    // Cap khong duoc lon hon timeout hien co, va khong cat qua muc 1 phut.
-    const floorMs = Math.min(jobPolicy.QUICK_STEP_MIN_MS, effective.timeoutMs);
-    const cap = Math.max(Math.min(quickCap, effective.timeoutMs), floorMs);
-    if (cap && cap < stepTimeoutMs) {
-      jobEventBus.emitJobLog(id, { text: `\n[TIMEOUT] Chế độ NHANH: giới hạn step ${Math.round(stepTimeoutMs / 1000)}s → ${Math.round(cap / 1000)}s (task nhẹ, ưu tiên tốc độ).\n` });
-      stepTimeoutMs = cap;
-    }
-  } else if (isQuickTrack(job)) {
+  if (isQuickTrack(job) && !effectiveQuickTrack) {
     // Job co quick_track=true nhung khong hieu luc: user da tat, hoac user da
-    // khai timeout tường minh (timeout user luon thang quick cap).
+    // khai timeout tuong minh.
     const reason = isQuickTrackDisabledByUser(job)
       ? 'user da tat che do nhanh cho task nay'
       : `user da khai timeout ${resolveExplicitTimeoutMs(job)}ms`;
@@ -2832,6 +2877,7 @@ const executeStep = async (id, opts) => {
         let implementFailed = false;
         let implementFailReason = '';
         let implementIsTimeout = false;
+        let implementRepeatedStop = null;
 
         while (implementAttempt < implementMaxRetries) {
           implementAttempt += 1;
@@ -2910,6 +2956,21 @@ const executeStep = async (id, opts) => {
             break;
           }
 
+          // CHAN VONG LAP: neu nguyen nhan loi giong het lan truoc thi retry se
+          // cho cung ket qua. SystemOne quyet dinh co lap hay khong.
+          if (implementAttempt < implementMaxRetries) {
+            const dup = await evaluateRepeatedCause({
+              id, step: 'IMPLEMENT', attempt: implementAttempt,
+              maxRetries: implementMaxRetries, reason: implementFailReason,
+              output: jobPolicy.collectAgentOutput(implementResult)
+            });
+            if (dup && dup.repeated) {
+              implementFailed = true;
+              implementRepeatedStop = dup;
+              break;
+            }
+          }
+
           // Con vong retry => thu lai, cho backoff roi thu tiep.
           if (implementAttempt < implementMaxRetries) {
             const backoffMs = jobPolicy.resolveRetryBackoffMs(implementAttempt + 1, {});
@@ -2931,8 +2992,15 @@ const executeStep = async (id, opts) => {
         if (implementFailed) {
           // Timeout la trang thai rieng (TIMED_OUT), khong gop voi loi thuoc.
           const failStatus = implementIsTimeout ? 'TIMED_OUT' : 'FAILED';
-          const failMsg = `IMPLEMENT that bai: ${implementFailReason}`;
-          jobEventBus.emitJobLog(id, { text: `\n[IMPLEMENT-FAILED] Trien khai that bai (${implementFailReason}). Pipeline DUNG tai IMPLEMENT, vui long kiem tra log va chay lai.\n` });
+          // Dung do SystemOne (nguyen nhan trung) => phai ghi ro trong error_message.
+          const repeatedNote = implementRepeatedStop
+            ? ` (SystemOne dung vong lap: ${implementRepeatedStop.reason}; nguyen nhan da gap ${implementRepeatedStop.occurrences} lan truoc)`
+            : '';
+          const failMsg = `IMPLEMENT that bai: ${implementFailReason}${repeatedNote}`;
+          const stopNote = implementRepeatedStop
+            ? `\n[IMPLEMENT-FAILED] SystemOne da DUNG vong lap: nguyen nhan loi giong hop ${implementRepeatedStop.occurrences} lan truoc (${implementRepeatedStop.reason}). Pipeline DUNG tai IMPLEMENT.\n`
+            : `\n[IMPLEMENT-FAILED] Trien khai that bai (${implementFailReason}). Pipeline DUNG tai IMPLEMENT, vui long kiem tra log va chay lai.\n`;
+          jobEventBus.emitJobLog(id, { text: stopNote });
           db.updateJob(id, { status: failStatus, current_step: 'IMPLEMENT', error_message: failMsg });
           jobEventBus.emitJobStatus(id, { status: failStatus });
           jobEventBus.emitJobError(id, { error: failMsg });
@@ -3135,67 +3203,101 @@ const executeStep = async (id, opts) => {
       recordSystemOne(id, fixGate, 'fixgate');
       logSystemOneFallback(id, 'fixgate', fixGate);
       jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-FIXGATE] attempt=${attempt}/${maxRetries} (source=${retryPolicy.source}) retry=${fixGate.retry} p_success=${fixGate.p_success} scope=${fixGate.fixScope}${fixGate.fallback ? ' [FALLBACK-HEURISTIC]' : ''}. File context: ${fileCtx.files.length} file, ~${fileCtx.tokens} tokens${fileCtx.truncatedFiles.length ? ` (cat: ${fileCtx.truncatedFiles.join(', ')})` : ''}.\n` });
+      // QUY TAC MOI: fixGate KHONG duoc chan retry cung (chi thong bao).
+      // Chi dung khi (a) het so lan retry, hoac (b) nguyen nhan loi bi TRUNG
+      // voi lan truoc (kiem bang systemone.checkRepeatedCause o vong retry).
       if (fixGate && fixGate.retry === false) {
-        const gateReason = fixGate.fallback
-          ? `SystemOne fixGate dừng retry (heuristic offline, attempt ${attempt}/${maxRetries}).`
-          : `SystemOne fixGate dừng retry (attempt ${attempt}/${maxRetries}, p_success ${fixGate.p_success}).`;
-        db.updateJob(id, { status: 'FAILED', current_step: 'FIXING', error_message: gateReason });
-        jobEventBus.emitJobStatus(id, { status: 'FAILED' });
-        jobEventBus.emitJobError(id, { error: gateReason });
-        return;
+        const gateHint = fixGate.fallback
+          ? `heuristic offline`
+          : `p_success ${fixGate.p_success}`;
+        jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-FIXGATE] Model khong nghi retry (${gateHint}) - van cho phep retry, se kiem tra trung nguyen nhan o vong loi.\n` });
       }
-      db.updateJob(id, { runner: fixingAgent, pipeline_config: systemone.withFixAttempt(job, attempt + 1) });
-      jobEventBus.emitJobLog(id, { text: `\n[ERROR] Phát hiện sự cố. Đang sửa lỗi với 🤖 Agent: ${fixingAgent}...\n` });
-      // Backoff giữa các vòng retry: tránh 3 vòng FIXING dính nhau mỗi vòng ~1h.
-      const backoffMs = jobPolicy.resolveRetryBackoffMs(attempt + 1);
-      if (backoffMs > 0) {
-        jobEventBus.emitJobLog(id, { text: `[RETRY-BACKOFF] Chờ ${backoffMs}ms trước vòng sửa thứ ${attempt + 1}/${maxRetries}.\n` });
-        await new Promise((resolve) => setTimeout(resolve, backoffMs));
-      }
+      // Vong FIXING co retry: timeout/exit!=0 khong dung pipeline ngay,
+      // ma thu lai cho het so lan retry (chi dung khe khi nguyen nhan TRUNG).
       const runner = runnerRegistry.getAvailableRunner(fixingAgent);
-      if (runner) {
-        let fixingResult = null;
-        try {
-          fixingResult = await runner.execute({
-            prompt: fixingGuard.promptToUse, cwd: workspacePath, jobId: id,
-            timeoutMs: stepTimeoutMs,
-            onStdout: (text) => jobEventBus.emitJobLog(id, { text }),
-            onStderr: (text) => jobEventBus.emitJobLog(id, { text })
-          });
-        } catch (fixExecErr) {
-          jobEventBus.emitJobLog(id, { text: `[FIXING] Lỗi thực thi Agent: ${fixExecErr.message}\n` });
-          fixingResult = { output: fixExecErr.message, exitCode: 1 };
-        }
-        // Rate-limit của provider: retry-after có thể hàng giờ/ngày => mọi vòng retry đều vô nghĩa.
-        const rl = jobPolicy.detectRateLimit(jobPolicy.collectAgentOutput(fixingResult));
-        if (rl.limited) {
-          const retryAfter = rl.retryAfterMs ? ` (retry-after ${Math.round(rl.retryAfterMs / 1000)}s)` : '';
-          const msg = `Provider rate-limit${retryAfter}. Dừng pipeline, không retry lại.`;
-          jobEventBus.emitJobLog(id, { text: `\n[RATE-LIMIT] ${msg}\n` });
-          db.updateJob(id, { status: 'FAILED', current_step: 'FIXING', error_message: msg });
-          jobEventBus.emitJobStatus(id, { status: 'FAILED' });
-          jobEventBus.emitJobError(id, { error: msg });
-          return;
-        }
-        // FIXING timeout/exit!=0 KHÔNG được coi là "Hoàn tất sửa lỗi" rồi chạy tiếp TESTING.
-        if (!fixingResult || fixingResult.timedOut || fixingResult.exitCode !== 0) {
-          const failReason = fixingResult && fixingResult.timedOut
+      if (!runner) {
+        jobEventBus.emitJobLog(id, { text: `\n[FIXING-WARN] Không tìm thấy runner hợp lệ.\n` });
+      } else {
+        let fixAttempt = attempt;
+        let fixingOk = false;
+        let fixFailReason = '';
+        let fixRepeatedStop = null;
+        while (fixAttempt < maxRetries) {
+          // Lay config MOI NHAT tu DB (khong dung snapshot `job` dau executeStep) -
+          // `withFixAttempt` ghi de ca pipeline_config, dung ban cu se XOA
+          // `failure_history` vua ghi => co che so trung nguyen nhan vo hieu.
+          const freshJob = db.getJobById(id) || job;
+          db.updateJob(id, { runner: fixingAgent, pipeline_config: systemone.withFixAttempt(freshJob, fixAttempt) });
+          jobEventBus.emitJobLog(id, { text: `\n[ERROR] Phát hiện sự cố. Đang sửa lỗi với 🤖 Agent: ${fixingAgent} (vòng ${fixAttempt}/${maxRetries})...\n` });
+          const backoffMs = jobPolicy.resolveRetryBackoffMs(fixAttempt);
+          if (backoffMs > 0) {
+            jobEventBus.emitJobLog(id, { text: `[RETRY-BACKOFF] Chờ ${backoffMs}ms trước vòng sửa thứ ${fixAttempt}/${maxRetries}.\n` });
+            await new Promise((resolve) => setTimeout(resolve, backoffMs));
+          }
+          const fixCheckCancelled = db.getJobById(id);
+          if (fixCheckCancelled && fixCheckCancelled.status === 'CANCELLED') return;
+          let fixingResult = null;
+          try {
+            fixingResult = await runner.execute({
+              prompt: fixingGuard.promptToUse, cwd: workspacePath, jobId: id,
+              timeoutMs: stepTimeoutMs,
+              onStdout: (text) => jobEventBus.emitJobLog(id, { text }),
+              onStderr: (text) => jobEventBus.emitJobLog(id, { text })
+            });
+          } catch (fixExecErr) {
+            jobEventBus.emitJobLog(id, { text: `[FIXING] Lỗi thực thi Agent: ${fixExecErr.message}\n` });
+            fixingResult = { output: fixExecErr.message, exitCode: 1 };
+          }
+          // Rate-limit cua provider: retry-after co the hang gio/ngay => moi vong retry deu vo nghia.
+          const rl = jobPolicy.detectRateLimit(jobPolicy.collectAgentOutput(fixingResult));
+          if (rl.limited) {
+            const retryAfter = rl.retryAfterMs ? ` (retry-after ${Math.round(rl.retryAfterMs / 1000)}s)` : '';
+            const msg = `Provider rate-limit${retryAfter}. Dừng pipeline, không retry lại.`;
+            jobEventBus.emitJobLog(id, { text: `\n[RATE-LIMIT] ${msg}\n` });
+            db.updateJob(id, { status: 'FAILED', current_step: 'FIXING', error_message: msg });
+            jobEventBus.emitJobStatus(id, { status: 'FAILED' });
+            jobEventBus.emitJobError(id, { error: msg });
+            return;
+          }
+          if (fixingResult && !fixingResult.timedOut && fixingResult.exitCode === 0) {
+            fixingOk = true;
+            break;
+          }
+          fixFailReason = fixingResult && fixingResult.timedOut
             ? `vượt quá giới hạn thời gian (${fixingResult.timeoutMs || stepTimeoutMs}ms)`
             : `exit code ${fixingResult ? fixingResult.exitCode : 'không xác định'}`;
-          const msg = `FIXING thất bại: ${failReason}. Dừng pipeline.`;
-          jobEventBus.emitJobLog(id, { text: `\n[FIXING-FAILED] ${msg}\n` });
+          // Het so lan retry => dung luon.
+          if (fixAttempt >= maxRetries) break;
+          // Nguyên nhân lỗi có TRÙNG lần trước không? => SystemOne quyết định.
+          const dup = await evaluateRepeatedCause({
+            id, step: 'FIXING', attempt: fixAttempt, maxRetries, reason: fixFailReason,
+            output: jobPolicy.collectAgentOutput(fixingResult)
+          });
+          if (dup && dup.repeated) {
+            fixRepeatedStop = dup;
+            break;
+          }
+          jobEventBus.emitJobLog(id, { text: `\n[FIXING-RETRY] Vòng sửa ${fixAttempt}/${maxRetries} thất bại (${fixFailReason}) - thử lại vòng ${fixAttempt + 1}.\n` });
+        }
+        if (!fixingOk) {
+          const repeatedNote = fixRepeatedStop
+            ? ` (SystemOne dừng vòng lặp: ${fixRepeatedStop.reason}; nguyên nhân đã gặp ${fixRepeatedStop.occurrences} lần trước)`
+            : '';
+          const msg = `FIXING thất bại sau ${fixAttempt}/${maxRetries} vòng: ${fixFailReason}${repeatedNote}. Dừng pipeline.`;
+          const stopNote = fixRepeatedStop
+            ? `\n[FIXING-FAILED] SystemOne đã DỪNG vòng lặp: nguyên nhân lỗi giống hệt ${fixRepeatedStop.occurrences} lần trước (${fixRepeatedStop.reason}). Không retry thêm.\n`
+            : `\n[FIXING-FAILED] ${msg}\n`;
+          jobEventBus.emitJobLog(id, { text: stopNote });
           db.updateJob(id, { status: 'FAILED', current_step: 'FIXING', error_message: msg });
           jobEventBus.emitJobStatus(id, { status: 'FAILED' });
           jobEventBus.emitJobError(id, { error: msg });
           return;
         }
-        jobEventBus.emitJobLog(id, { text: `\n[FIXING] Hoàn tất sửa lỗi.\n` });
+        jobEventBus.emitJobLog(id, { text: `\n[FIXING] Hoàn tất sửa lỗi (vòng ${fixAttempt}/${maxRetries}).\n` });
         const checkAfterFix = db.getJobById(id);
         if (checkAfterFix && checkAfterFix.status === 'CANCELLED') {
           return;
         }
-      } else {
-        jobEventBus.emitJobLog(id, { text: `\n[FIXING-WARN] Không tìm thấy runner hợp lệ.\n` });
       }
 
       // Quay lại TESTING
@@ -3245,9 +3347,18 @@ const runJobPipeline = (jobId, opts) => {
     }
     console.log(`[PIPELINE-START] Bắt đầu thực thi pipeline cho Task ${tCode} (${jobId})...`);
 
-    // Nếu đang TO DO, FAILED, CANCELLED hoặc rỗng thì bắt đầu chuyển PLANNING
+    // Nếu đang TO DO, FAILED, CANCELLED hoặc rỗng thì bắt đầu chuyển PLANNING.
+    // RESET trạng thái lần chạy trước: lich su loi + so vong fix cu + loi cu.
+    // Khong reset => co che so trung nguyen nhan so loi cu cua luan chay truoc
+    // (sai), va `fix_attempt` cu lam FIXING nhay o vong da het han muc.
     if (!jobToStart.status || RESTARTABLE_JOB_STATUSES.has(currentStatus)) {
-      db.updateJob(jobId, { status: 'PLANNING', current_step: 'PLANNING', error_message: null });
+      const freshPipe = jobPolicy.clearFailureHistory(jobPolicy.parsePipelineConfig(jobToStart));
+      delete freshPipe.fix_attempt;
+      delete freshPipe.fixAttempt;
+      db.updateJob(jobId, {
+        status: 'PLANNING', current_step: 'PLANNING', error_message: null,
+        pipeline_config: freshPipe, gate_result: null
+      });
       jobEventBus.emitJobStatus(jobId, { status: 'PLANNING' });
     }
     let settled = false;
@@ -3518,6 +3629,9 @@ const handleJobClone = async (req, res) => {
       } catch (e) {}
     }
     delete pipeConfig.fix_attempt;
+    // Xoa lich su loi: job moi khong duoc mang loi cua job goc (co che so trung
+    // nguyen nhan se so sanh sai ngay tu vong 1).
+    pipeConfig = jobPolicy.clearFailureHistory(pipeConfig);
     delete pipeConfig.fixAttempt;
 
     const sourceCode = (sourceJob.task_code || '').trim();
@@ -4147,6 +4261,7 @@ module.exports = {
   stopAllEvidenceWatchers,
   buildEvidenceSnapshot,
   getTaskEvidences,
+  evaluateRepeatedCause,
   // Runtime accounting (thoi gian worker thuc su chay task) - export de test.
   computeJobRuntimeMs,
   beginStepTimeline,
