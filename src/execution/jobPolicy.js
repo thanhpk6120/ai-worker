@@ -175,19 +175,28 @@ function collectAgentOutput(result) {
  * sau, nen cap thoi gian o day la an toan.
  *
  * Uu tien: pipeline_config.quick_timeout_ms -> cap mac dinh (5 phut).
+ * QUAN TRONG: quick cap KHONG BAO GIO lon hon `fallbackMs` (timeout hien co) -
+ * cap chi duoc cat ngan hon, khong bao gio ngan loi them.
  * @param {object} job
  * @param {number} fallbackMs Timeout step hien tai
- * @returns {number} timeout ms
+ * @returns {number} timeout ms (luon > 0)
  */
 const QUICK_STEP_DEFAULT_MS = 5 * 60 * 1000; // 5 phut
+const QUICK_STEP_MIN_MS = 60 * 1000; // 1 phut - san chan duoi cho cap nhanh
 function resolveQuickStepTimeoutMs(job, fallbackMs) {
   let pipe = null;
   try { pipe = parsePipelineConfig(job); } catch (e) { pipe = null; }
+  let declared = null;
   if (pipe && typeof pipe === 'object') {
-    const declared = toFiniteNumber(pipe.quick_timeout_ms);
-    if (declared !== null && declared > 0) return declared;
+    const raw = toFiniteNumber(pipe.quick_timeout_ms);
+    if (raw !== null && raw > 0) declared = raw;
   }
-  return QUICK_STEP_DEFAULT_MS;
+  let cap = declared !== null ? declared : QUICK_STEP_DEFAULT_MS;
+  // fallbackMs hop le => quick cap KHONG duoc lon hon timeout hien co.
+  const fb = toFiniteNumber(fallbackMs);
+  if (fb !== null && fb > 0) cap = Math.min(cap, fb);
+  if (!Number.isFinite(cap) || cap <= 0) cap = QUICK_STEP_DEFAULT_MS;
+  return cap;
 }
 
 module.exports = {
@@ -201,5 +210,6 @@ module.exports = {
   detectRateLimit,
   collectAgentOutput,
   QUICK_STEP_DEFAULT_MS,
+  QUICK_STEP_MIN_MS,
   RATE_LIMIT_PATTERNS
 };

@@ -102,6 +102,15 @@ const MCP_TOOL_SEARCH_ENABLED = process.env.MCP_TOOL_SEARCH_ENABLED === 'true';
 // ~/.claude/settings.json (env do Claude Code tu apply, process env khong de duoc).
 // Rong = khong truyen flag, dung model mac dinh cua may.
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || '';
+// Timeout cho 1 luot goi AI headless de phan loai task (ms). Mac dinh 30s.
+// Doc lap cho tung luot goi: KHONG dung chung voi timeout cua job (user khai).
+const AI_TRIAGE_TIMEOUT_MS = process.env.AI_TRIAGE_TIMEOUT_MS ? parseInt(process.env.AI_TRIAGE_TIMEOUT_MS, 10) : 30000;
+// Kill-switch cho nhanh AI headless triage. Doc lap voi SYSTEMONE_ENABLED
+// (kill-switch cua gateway Jev) de tat rieng nhanh CLI ma van giu Jev.
+// Tat => triage quay ve heuristic offline (confidence <= 0.4 => KHONG bat quick track).
+const AI_TRIAGE_ENABLED = process.env.AI_TRIAGE_ENABLED !== 'false';
+// TTL cache RAM cho ket qua triage (ms). Mac dinh 1 gio.
+const AI_TRIAGE_CACHE_TTL_MS = process.env.AI_TRIAGE_CACHE_TTL_MS ? parseInt(process.env.AI_TRIAGE_CACHE_TTL_MS, 10) : 3600000;
 
 // Tự động tạo thư mục nếu chưa có
 [WORKTREE_BASE_DIR, LOG_DIR, EVIDENCE_DIR].forEach((dir) => {
@@ -128,6 +137,9 @@ module.exports = {
   MCP_HANDSHAKE_TIMEOUT_MS,
   MCP_TOOL_SEARCH_ENABLED,
   CLAUDE_MODEL,
+  AI_TRIAGE_TIMEOUT_MS,
+  AI_TRIAGE_ENABLED,
+  AI_TRIAGE_CACHE_TTL_MS,
   DEFAULT_TIMEOUT_MS,
   normalizeTimeoutMs,
   resolveJobTimeoutMs

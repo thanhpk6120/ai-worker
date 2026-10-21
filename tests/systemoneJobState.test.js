@@ -92,17 +92,32 @@ describe('SystemOne - trang thai per-job', () => {
     }
   });
 
-  it('triage heuristic-fast KHONG duoc ghi vao badge (khong phai quyet dinh tu model)', async () => {
+  it('triage KHONG goi model => phai danh dau FALLBACK (khong phai badge "songs")', async () => {
+    const cfg = require('../src/config');
+    const prevSys = cfg.SYSTEMONE_ENABLED;
+    const prevAi = cfg.AI_TRIAGE_ENABLED;
+    cfg.SYSTEMONE_ENABLED = false;
+    cfg.AI_TRIAGE_ENABLED = false;
     const restore = stubFetch(async () => ({ ok: true, status: 200, json: async () => ({}) }));
     try {
       await client.checkTriage({ taskCode: 'T', prompt: 'ping', jobId: 'job-hf-1' });
       const st = client.getJobStatus('job-hf-1');
-      assert.strictEqual(st.calls, 0, 'quyet dinh tuc thi khong phai goi model => khong dem calls');
-      assert.strictEqual(st.live, null, 'badge phai van la CHUA GOI');
-    } finally { restore(); }
+      // KHONG goi model => phai fallback, khong bao gio bao "songs" (live=true).
+      assert.strictEqual(st.live, false, 'quyet dinh khong tu model => live phai false');
+      assert.strictEqual(st.fallbacks, 1, 'phai ghi nhan 1 lan fallback');
+    } finally {
+      cfg.SYSTEMONE_ENABLED = prevSys;
+      cfg.AI_TRIAGE_ENABLED = prevAi;
+      restore();
+    }
   });
 
   it('triage: task de => heuristic nhanh, KHONG goi mang', async () => {
+    const cfg = require('../src/config');
+    const prevSys = cfg.SYSTEMONE_ENABLED;
+    const prevAi = cfg.AI_TRIAGE_ENABLED;
+    cfg.SYSTEMONE_ENABLED = false;
+    cfg.AI_TRIAGE_ENABLED = false;
     let called = 0;
     const restore = stubFetch(async () => { called += 1; return { ok: true, status: 200, json: async () => ({}) }; });
     try {
@@ -110,10 +125,21 @@ describe('SystemOne - trang thai per-job', () => {
       assert.strictEqual(called, 0, 'task de phai quyet dinh bang heuristic, khong goi model');
       assert.strictEqual(t.track, 'quick');
       assert.strictEqual(t.complexity, 'S');
-    } finally { restore(); }
+      // Heuristic offline KHONG duoc tu bat quick track (confidence <= 0.4).
+      assert.ok(t.confidence <= 0.4, `heuristic phai confidence <= 0.4, got ${t.confidence}`);
+    } finally {
+      cfg.SYSTEMONE_ENABLED = prevSys;
+      cfg.AI_TRIAGE_ENABLED = prevAi;
+      restore();
+    }
   });
 
   it('triage: task migrate => heuristic nhanh, KHONG goi mang', async () => {
+    const cfg = require('../src/config');
+    const prevSys = cfg.SYSTEMONE_ENABLED;
+    const prevAi = cfg.AI_TRIAGE_ENABLED;
+    cfg.SYSTEMONE_ENABLED = false;
+    cfg.AI_TRIAGE_ENABLED = false;
     let called = 0;
     const restore = stubFetch(async () => { called += 1; return { ok: true, status: 200, json: async () => ({}) }; });
     try {
@@ -121,10 +147,19 @@ describe('SystemOne - trang thai per-job', () => {
       assert.strictEqual(called, 0, 'task phuc tap ro rang phai heuristic, khong goi model');
       assert.strictEqual(t.track, 'full');
       assert.strictEqual(t.complexity, 'L');
-    } finally { restore(); }
+      assert.ok(t.confidence <= 0.4, `heuristic phai confidence <= 0.4, got ${t.confidence}`);
+    } finally {
+      cfg.SYSTEMONE_ENABLED = prevSys;
+      cfg.AI_TRIAGE_ENABLED = prevAi;
+      restore();
+    }
   });
 
   it('triage: prompt mo ho => goi model, chi 2 cau hoi (khong need_browser)', async () => {
+    // Tat nhanh AI headless de test rieng duong Jev (model gateway).
+    const cfg = require('../src/config');
+    const prevAi = cfg.AI_TRIAGE_ENABLED;
+    cfg.AI_TRIAGE_ENABLED = false;
     let body = null;
     const restore = stubFetch(async (url, opts) => {
       body = JSON.parse(opts.body);
@@ -139,7 +174,10 @@ describe('SystemOne - trang thai per-job', () => {
       assert.deepStrictEqual(Object.keys(body.questions).sort(), ['is_large', 'is_quick'],
         'chi hoi 2 cau, bo need_browser (ket qua chi ghi log, khong quyet dinh gi)');
       assert.strictEqual(t.track, 'full');
-    } finally { restore(); }
+    } finally {
+      cfg.AI_TRIAGE_ENABLED = prevAi;
+      restore();
+    }
   });
 
   it('checkGuard boc decision => tracker van nhan fallback dung', async () => {

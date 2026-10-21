@@ -8,6 +8,7 @@
 const crypto = require('node:crypto');
 const config = require('../config');
 const { maskSecrets } = require('../execution/secretScrubber');
+const aiTriage = require('../execution/aiTriage');
 const policy = require('./policy');
 const { mergeStateWithFiles } = require('./fileContext');
 
@@ -139,21 +140,49 @@ async function decideRouter({ taskCode = '', step = '', candidates = [], preferr
 async function decideTriage({ taskCode = '', prompt = '', jobId = '' } = {}) {
   const route = 'triage';
   const payload = { taskCode, prompt: String(prompt || '').slice(0, 2000), jobId };
-  // Heuristic regex TUC THI (0 network call) khi prompt RO RANG:
-  // - task de (ngan, khong phai sua bug)  -> quick
-  // - task phuc tap (migrate/refactor)   -> full
-  // Chi goi model khi heuristic MO HO (prompt trung binh) - do lon,
-  // noi dung nho, can phan loai chinh xac hon regex.
-  const sig = policy.triageSignals({ prompt });
-  if (sig.quick) {
-    return { complexity: 'S', track: 'quick', needBrowser: sig.needBrowser, confidence: 0.9, cached: false, source: 'heuristic-fast' };
-  }
-  if (sig.large) {
-    return { complexity: 'L', track: 'full', needBrowser: sig.needBrowser, confidence: 0.9, cached: false, source: 'heuristic-fast' };
-  }
+  // QUYET DINH TRIAGE (thu tu uu tien):
+  // 1) AI headless (1 luot goi claude CLI) -> source 'ai-headless'.
+  // 2) Jev network (model gateway) -> source 'jev'.
+  // 3) Heuristic offline -> source 'heuristic' (confidence <= 0.4 => KHONG bat quick track).
+  //
+  // DA BO heuristic regex `sig.quick` / `sig.large` (confidence gia 0.9): no tu bat
+  // `quick_track` -> cat ngan sach thoi gian cua user (job bd88ae0a / RSGATE-44 that bai).
   if (!isEnabled()) { stats.fallbacks += 1; return policy.triageHeuristic({ prompt }); }
   const cached = getCache(route, payload);
   if (cached) return cached;
+
+  // 1) AI headless: quyet dinh THAT tu model, dung de bat che do nhanh.
+  // Kill-switch AI_TRIAGE_ENABLED: tat rieng nhanh CLI nay (van giu duong Jev).
+  const aiEnabled = config.AI_TRIAGE_ENABLED !== false;
+  if (aiEnabled) {
+    try {
+      const ai = await aiTriage.classifyTask({
+        prompt: String(prompt || ''),
+        title: String(taskCode || ''),
+        taskCode: String(taskCode || ''),
+        timeoutMs: config.AI_TRIAGE_TIMEOUT_MS
+      });
+      if (ai && ai.source === 'ai-headless') {
+        const out = {
+          complexity: ai.complexity,
+          track: ai.track,
+          needBrowser: ai.needBrowser,
+          confidence: ai.confidence,
+          cached: ai.cached === true,
+          source: 'ai-headless',
+          reason: ai.reason
+        };
+        setCache(route, payload, out);
+        return { ...out };
+      }
+      // source='fallback': AI loi/timeout/parse hong -> tiep tuc duong Jev.
+      stats.fallbacks += 1;
+    } catch (e) {
+      stats.fallbacks += 1;
+    }
+  }
+
+  // 2) Jev network: model gateway manh hon, giu nguyen de dung khi can.
   // Chi 2 cau hoi: is_quick + is_large. `need_browser` da bi bo - ket qua chi
   // duoc ghi vao log, khong quyet dinh gi => hoi model la ton call thua.
   const questions = {
@@ -166,11 +195,13 @@ async function decideTriage({ taskCode = '', prompt = '', jobId = '' } = {}) {
     const q = noulOf(answers, 'is_quick');
     const l = noulOf(answers, 'is_large');
     if (![q, l].every(Number.isFinite)) { stats.fallbacks += 1; return policy.triageHeuristic({ prompt }); }
+    // Regex chi dung cho need_browser, KHONG con quyet dinh quick/large.
+    const needBrowser = policy.triageSignals({ prompt }).needBrowser;
     const out = q >= THRESHOLD
-      ? { complexity: 'S', track: 'quick', needBrowser: sig.needBrowser, confidence: q, cached: false }
+      ? { complexity: 'S', track: 'quick', needBrowser, confidence: q, cached: false, source: 'jev' }
       : (l >= THRESHOLD
-        ? { complexity: 'L', track: 'full', needBrowser: sig.needBrowser, confidence: l, cached: false }
-        : { complexity: 'M', track: 'full', needBrowser: sig.needBrowser, confidence: Math.max(q, l), cached: false });
+        ? { complexity: 'L', track: 'full', needBrowser, confidence: l, cached: false, source: 'jev' }
+        : { complexity: 'M', track: 'full', needBrowser, confidence: Math.max(q, l), cached: false, source: 'jev' });
     setCache(route, payload, out);
     return { ...out };
   } catch (e) {
@@ -317,9 +348,8 @@ const jobTrackers = new Map(); // jobId -> { calls, fallbacks, live, lastError, 
  */
 function trackJobDecision(jobId, decision, route) {
   if (!jobId) return;
-  // `heuristic-fast` = quyet dinh TUC THI bang regex, KHONG goi model.
-  // => khong phai quyet dinh tu model thật => khong dem vao calls, khong doi badge.
-  if (decision && decision.source === 'heuristic-fast') return;
+  // `fallback: true` = quyet dinh offline (khong goi model that) => dem fallback,
+  // khong bao gio bao "songs" (live=true).
   const prev = jobTrackers.get(jobId) || { calls: 0, fallbacks: 0, live: null, lastError: null, updatedAt: null, routes: {} };
   const fallback = !!(decision && decision.fallback === true);
   prev.calls += 1;

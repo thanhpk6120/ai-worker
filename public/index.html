@@ -1014,6 +1014,17 @@
             <input type="number" id="editTaskMaxRetries" min="0" max="10" value="3" class="w-full bg-surface-800 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
           </div>
         </div>
+        <!-- Che do NHANH: 3 trang thái - Tu dong (he thong tu quyet dinh) / Bat / Tat.
+             "Tat" = quyet dinh tường minh => triage KHONG tu bat lai o lan Start sau. -->
+        <div class="space-y-1">
+          <label class="block text-xs font-semibold text-slate-300">Chế độ NHANH (task nhẹ)</label>
+          <select id="editTaskQuickTrack" class="w-full bg-surface-800 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
+            <option value="auto">Tự động — hệ thống quyết định theo độ phức tạp</option>
+            <option value="on">Bật — luôn dùng template rút gọn</option>
+            <option value="off">Tắt — không dùng chế độ nhanh (kể cả khi triage nói task nhẹ)</option>
+          </select>
+          <p class="text-[11px] text-slate-500 leading-snug">Timeout bạn đặt luôn được giữ nguyên. Chế độ nhanh chỉ rút gọn kế hoạch + tối ưu tốc độ triển khai.</p>
+        </div>
         <div class="flex justify-end gap-2 pt-2 border-t border-slate-800">
           <button type="button" id="btnCancelEditModal" class="px-3.5 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-300 text-xs font-medium transition">Hủy</button>
           <button type="submit" id="btnSubmitEditTask" class="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition flex items-center gap-1.5">

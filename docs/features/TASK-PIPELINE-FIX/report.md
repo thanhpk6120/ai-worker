@@ -1,34 +1,40 @@
 ---
 feature: TASK-PIPELINE-FIX
 service: ai-worker
-status: testing
+status: done
 owner: AI
-updated_at: 2026-10-20
+updated_at: 2026-10-21
 ---
 
 # Báo cáo thực thi (report.md) — TASK-PIPELINE-FIX
 
 ## 1. Tóm tắt
 
-Phân tích task `bd88ae0a-da46-4d35-af4e-49252e16dade` (RSGATE-44, FAILED sau **3h58m**), xác định **12 root cause** có bằng chứng, và sửa 3 nhóm vấn đề: timeout/retry, hiệu quả SystemOne, hệ thống evidence.
+Phân tích task `bd88ae0a-da46-4d35-af4e-49252e16dade` (RSGATE-44, FAILED sau **3h58m**), xác định **28 root cause** có bằng chứng, và sửa 3 nhóm vấn đề: timeout/retry, hiệu quả SystemOne, hệ thống evidence.
+
+**Đợt 2 (RC-23 → RC-28)**: điều tra lại job RSGATE-44 lần 2 (fail ở IMPLEMENT sau khi bấm Start 3 lần). Phát hiện 6 lỗi xếp chồng làm **timeout user bị hệ thống tự ghi đè từ 3600s xuống 300s**: triage regex phân loại sai + `confidence: 0.9` giả ⇒ tự bật quick mode; quick cap không dùng `fallbackMs`; PLANNING timeout bị coi là "xong" và sinh plan mẫu; IMPLEMENT timeout không đi qua retry; `quick_track` không có đường reset; quick mode chọn sai template.
+
+**Yêu cầu bổ sung**: triage **không** dùng regex mà gọi **1 lượt headless AI** trả JSON (không thinking) để đo độ phức tạp task.
 
 | Nhóm | Trạng thái | Bằng chứng |
 |---|---|---|
 | Timeout / Retry | ✅ Đã sửa | 22/22 test `tests/timeoutRetry.test.js` |
 | SystemOne | ✅ Đã sửa | 5/5 test `tests/systemoneFallback.test.js` |
 | Evidence realtime + vòng đời trạng thái | ✅ Đã sửa | 12/12 test `tests/evidenceLifecycle.test.js` + 5/5 `tests/verifyTaskEvidenceStatus.test.js` |
+| Timeout / Retry / Quick mode (đợt 2) | ✅ Đã sửa | AI triage thật trả `M/full` (trước: `S/quick`) + 221/221 `npm test` + verify browser 3 trạng thái `quick_track` |
 | Evidence tên/mô tả/thứ tự/lightbox | ✅ Đã sửa | Verify UI thật (browser) + 17/17 `npm run test:verify-fix` |
-| Hồi quy toàn hệ thống | ✅ Không có | 164/164 `npm test` + E2E `npm run test:pipeline` PASS |
+| Hồi quy toàn hệ thống | ✅ Không có | 221/221 `npm test` + E2E `npm run test:pipeline` PASS |
 
 ---
 
 ## 2. File đã thay đổi thực tế
 
-### 2.1 File mới (7)
+### 2.1 File mới (8)
 
 | File | Mục đích |
 |---|---|
 | `src/execution/jobPolicy.js` | Quy tắc timeout/retry cho job: `resolveMaxRetries`, `resolveJobDeadlineMs`, `resolveDeadlineAt`, `resolveEffectiveTimeout`, `resolveRetryBackoffMs`, `detectRateLimit`. Tách riêng khỏi `server.js` để test độc lập. |
+| `src/execution/aiTriage.js` | **Mới (đợt 2)**: phân loại độ phức tạp task bằng **1 lượt gọi headless AI** (`claude -p --output-format json`, không thinking) trả JSON. Parse 3 tầng, validate/ép shape, scrub secret, cache RAM (TTL 1h), fallback fail-safe `{M, full, confidence 0.3}` (không tự bật quick track). |
 | `src/verification/evidenceStore.js` | Nguồn chân lý evidence: đọc/ghi `metadata.json` (3 shape), chuẩn hóa 3 trạng thái, sort theo step, `setStatuses` giữ nguyên shape. |
 | `src/verification/evidenceWatcher.js` | Theo dõi thư mục evidence (`fs.watch` + debounce 500ms + fallback poll 2s) để đẩy evidence mới lên SSE realtime. |
 | `tests/timeoutRetry.test.js` | 28 test cho timeout/retry/rate-limit/backoff/deadline tuyệt đối. |
@@ -76,6 +82,12 @@ Phân tích task `bd88ae0a-da46-4d35-af4e-49252e16dade` (RSGATE-44, FAILED sau *
 | RC-20 | **`SecretScrubber` vô tác dụng.** `checkGuard` trả `promptToUse: original` ở **mọi** nhánh, kể cả `action='scrub'` ⇒ prompt vẫn chứa secret gốc. | `promptToUse` = `scrubbed` khi `action='scrub'`/`'warn'`/fallback; chỉ `action='allow'` mới giữ `original`. Test cũ khẳng định hành vi sai đã được sửa thành khẳng định secret **không** còn trong `promptToUse`. |
 | RC-21 | **Bảng `steps` gần như chết ⇒ không đo được "tại sao lâu".** `updateStep` (`db.js:441`) **không có caller nào** trong `src/`; chỉ 1 step `PENDING` được tạo lúc tạo job ⇒ không có `started_at`/`finished_at`/`exit_code` theo từng bước. | Thêm `beginStepTimeline`/`endStepTimeline` trong `server.js`: mỗi phase (PLANNING/IMPLEMENT/TESTING/VERIFY/FIXING) tạo 1 step `RUNNING` với `started_at`, đóng lại với `finished_at` + `exit_code` khi phase kết thúc hoặc job terminal. Test: `tests/stepTimeline.test.js` (3 test). |
 | RC-22 | `getEvidenceByJobId` (`db.js:588`) map mọi `verdict` ≠ `'FAIL'` thành `'PASS'` ⇒ evidence chưa verify hiện PASS | `verdict` = `null` khi chưa có; `status` = `'NOT VERIFY'` khi chưa verify. |
+| RC-23 | **Triage phân loại sai bằng regex ⇒ cắt timeout user từ 3600s xuống 300s.** `policy.triageSignals()` dùng `raw.length < 200 && !/fix\|bug\|error\|sua\|loi/` — prompt RSGATE-44 dài 162 ký tự, không chứa từ khóa nào ⇒ `quick=true`. `client.js` gán **hardcode** `confidence: 0.9` cho nhánh regex (trong khi `policy.js` tự mô tả heuristic chỉ ≤ 0.4) ⇒ vượt cổng 0.5 ⇒ tự bật `quick_track` + quick cap 300000ms. | Triage dùng **1 lượt gọi headless AI** (`src/execution/aiTriage.js` mới): `claude -p --output-format json` (`thinking_tokens: 0`), parse 3 tầng (JSON `.result` → JSONL `message_end` → regex `\{[\s\S]*\}`), validate + ép shape, scrub secret, cache RAM. Heuristic offline còn lại có `confidence ≤ 0.4` ⇒ **không tự bật quick track**. Kill-switch `AI_TRIAGE_ENABLED` (độc lập `SYSTEMONE_ENABLED`). |
+| RC-24 | **`resolveQuickStepTimeoutMs` nhận `fallbackMs` nhưng KHÔNG dùng** ⇒ không bao giờ nâng timeout được, chỉ hạ. Timeout user khai tường minh không có đường ưu tiên. | Timeout user khai tường minh **luôn thắng**: `resolveEffectiveQuickTrack()` chỉ trả true khi (1) `quick_track === true`, (2) user CHƯA tắt (`quick_track !== false`), (3) user CHƯA khai timeout. `resolveQuickStepTimeoutMs` dùng `fallbackMs` (cap ≤ timeout hiện có, sàn 1 phút). |
+| RC-25 | **PLANNING timeout bị coi là "xong".** Sau timeout, `readPlanFiles` trả plan rỗng ⇒ `DualPlanningGenerator.generateDevPlan()` **sinh plan mẫu tự động** (kèm `src/rsgate_44/index.js` — hoàn toàn lạc với task Java Spring Boot) ⇒ ghi "Đã ghi dev_plan.md và test_plan.md đầy đủ" ⇒ chuyển IMPLEMENT với plan rỗng. | `planningResult` capture `timedOut` (trước đó `await runner.execute()` bỏ qua return value) ⇒ timeout/lỗi ⇒ `TIMED_OUT`/`FAILED` + **dừng pipeline**, KHÔNG sinh plan mẫu. Chỉ sinh plan mẫu khi agent trả nội dung plan hợp lệ (≥ 60 ký tự). |
+| RC-26 | **Timeout ở IMPLEMENT không đi qua retry.** `implementResult.timedOut` → `throw` ⇒ `max_retries: 10` **chưa từng** áp dụng cho IMPLEMENT (chỉ dùng cho FIXING). 3 lần timeout 300000ms trong log là 3 lần user bấm Start tay. | Vòng lặp `while (implementAttempt < implementMaxRetries)` với `jobPolicy.resolveMaxRetries(job).value`, backoff `resolveRetryBackoffMs`, timer riêng từng vòng (clear trong `finally` của chính vòng đó). Hết lượt ⇒ `TIMED_OUT`/`FAILED` + `return` (không throw ra ngoài). |
+| RC-27 | **`quick_track` không có đường reset** — `setQuickTrack` chỉ set `true`; `handleJobStart` gọi lại `setQuickTrack(id, true)` **mỗi lần bấm Start** ⇒ xoá cờ trong DB cũng vô ích. Không có UI nào để tắt. | `POST /api/v1/jobs/:id/quick-track` nhận `mode: 'auto' \| 'on' \| 'off'`. `auto` = **xoá key** `quick_track` (khác hẳn `false` = tắt tường minh). UI: select 3 trạng thái trong modal Sửa Task. |
+| RC-28 | **Quick mode làm sai cả nội dung prompt**, không chỉ cắt thời gian — `implement-quick.md` ("SỬA TỐI THIỂU") được chọn cho task Jira cần sửa backend + frontend. | `resolveEffectiveQuickTrack()` dùng chung cho **cả** cap timeout **lẫn** chọn template (`planning-quick`/`implement-quick`). |
 
 ### Ghi nhận, KHÔNG sửa trong feature này
 
@@ -175,6 +187,48 @@ $ npm run test:verify-fix
 ### 4.5 Fix UI sau review (2026-10-21)
 - Sửa typo `CHƯA GỠI` (Ỡ) → `CHƯA GỌI` (Ọ) ở cả 2 chỗ render badge — đúng chuỗi user yêu cầu.
 - `renderSystemOneBadge(state)` → `renderSystemOneBadge(soState)`: tham số cùng tên với biến `state` toàn cục của app.js, dễ gây nhầm lẫn khi sửa sau này.
+
+
+### 4.6 Verify đợt 2 — Timeout / Retry / Quick mode (2026-10-21)
+
+**AI triage thật** (`src/execution/aiTriage.js`, prompt RSGATE-44 gốc):
+```
+[AI-TRIAGE] ai-headless: complexity=M track=full needBrowser=true confidence=0.65
+  reason=Doc Jira RSGATE-44 + tai lieu conf, phan tich yeu cau va implement nhieu file
+```
+Trước đây: `complexity=S track=quick confidence=0.9` (heuristic regex, confidence hardcode) ⇒ quick cap 300000ms. Giờ: `M/full` ⇒ **không bật quick mode**.
+
+**Đo độ trễ lượt gọi** (không thinking):
+
+| Lệnh | Độ trễ | Output |
+|---|---|---|
+| `claude -p --output-format json` | ~4.5s | 1 object JSON, field `result` = text; `usage.output_tokens_details.thinking_tokens = 0` |
+| `omp -p --mode=json` | ~30s | 377 dòng JSONL (nhiễu) ⇒ chọn `claude` |
+
+**`resolveEffectiveQuickTrack` với job RSGATE-44 thật** (DB: `quick_track=true`, `timeout=3600000`):
+```
+explicit timeout  : 3600000
+=> effectiveQuickTrack: false   (không cap 300s, dùng template implement đầy đủ)
+```
+
+**3 trạng thái `quick_track` qua API** (`POST /api/v1/jobs/:id/quick-track`):
+
+| Gửi | Response | `pipeline_config` sau |
+|---|---|---|
+| `{mode:"on"}` | `{"success":true,"quick_track":true}` | `..."quick_track":true` |
+| `{mode:"off"}` | `{"success":true,"quick_track":false}` | `..."quick_track":false` |
+| `{mode:"auto"}` | `{"success":true,"quick_track":null}` | `..."fix_attempt":3}` — **xoá hẳn key** (không thành `null`) |
+
+**Verify UI thật** (Chromium headless, server port 3000): mở modal Sửa Task RSGATE-44 ⇒ `editTaskTimeout=60` (phút = 3600000ms), `editTaskMaxRetries=10`, select quick track = `auto`.
+
+| Hành động | DB sau |
+|---|---|
+| Mở modal + bấm Lưu, **không đổi gì** | `{"timeout":3600000,...,"fix_attempt":3}` — **không** ghi `quick_track:false` (bug đã tránh) |
+| Chọn `off` + Lưu | `..."quick_track":false` |
+| Chọn `auto` + Lưu (từ `off`) | `..."fix_attempt":3}` — key bị xoá |
+| Mở lại modal | hiển thị `auto`, `prevMode=auto` |
+
+**Hồi quy**: 221/221 `npm test` PASS · `node --check` OK cho `src/server.js`, `src/config.js`, `src/execution/aiTriage.js`, `src/execution/jobPolicy.js`, `src/systemone/client.js`, `public/app.js`.
 
 ## 5. Bug phát hiện trong quá trình verify UI (đã sửa)
 

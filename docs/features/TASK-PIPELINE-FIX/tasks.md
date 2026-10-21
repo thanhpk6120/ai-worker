@@ -1,7 +1,7 @@
 ---
 feature: TASK-PIPELINE-FIX
 service: ai-worker
-status: testing
+status: done
 owner: AI
 updated_at: 2026-10-21
 ---
@@ -83,6 +83,15 @@ updated_at: 2026-10-21
 | G-2 | Test SystemOne fallback không chặn retry + `getStatus` | ai-worker | `tests/systemone.test.js` | ✅ |
 | G-3 | Test vòng đời evidence + sort | ai-worker | `tests/evidenceLifecycle.test.js` | ✅ |
 | G-4 | `npm test` xanh, `node --check` frontend/backend | ai-worker | — | ✅ |
+| **Phase K — Timeout / Retry / Quick mode (job bd88ae0a / RSGATE-44)** ||||
+| K-1 | Triage dùng **1 lượt gọi headless AI** (`claude -p --output-format json`, không thinking) trả JSON thay cho regex heuristic | ai-worker | `src/execution/aiTriage.js` (mới), `src/systemone/client.js` | ✅ |
+| K-2 | Heuristic offline **không tự bật** quick track (confidence ≤ 0.4 < ngưỡng 0.5); bỏ nhánh `confidence: 0.9` giả | ai-worker | `src/systemone/client.js` | ✅ |
+| K-3 | **Timeout user khai tường minh luôn thắng** quick cap (chỉ cap khi user KHÔNG khai timeout) | ai-worker | `src/server.js`, `src/execution/jobPolicy.js` | ✅ |
+| K-4 | PLANNING timeout/lỗi ⇒ **dừng pipeline**, KHÔNG sinh plan mẫu `DualPlanningGenerator` rồi coi là "đã xong" | ai-worker | `src/server.js` | ✅ |
+| K-5 | IMPLEMENT timeout ⇒ **vòng retry** theo `pipeline_config.max_retries` + backoff, thay vì `throw` | ai-worker | `src/server.js` | ✅ |
+| K-6 | `quick_track` có **đường reset**: `POST /api/v1/jobs/:id/quick-track` (`auto`/`on`/`off`) + select 3 trạng thái trong UI | ai-worker | `src/server.js`, `public/app.js`, `public/index.html` | ✅ |
+| K-7 | Quick mode hiệu lực dùng chung cho **cả cap timeout lẫn template** (`planning-quick`/`implement-quick`) | ai-worker | `src/server.js` (`resolveEffectiveQuickTrack`) | ✅ |
+| K-8 | Kill-switch `AI_TRIAGE_ENABLED` (độc lập `SYSTEMONE_ENABLED`) + test triage không gọi CLI thật | ai-worker | `src/config.js`, `tests/systemoneJobState.test.js` | ✅ |
 
 ## Ghi chú
 

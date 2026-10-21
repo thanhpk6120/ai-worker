@@ -3649,6 +3649,7 @@
     const branchInput = document.getElementById('editTaskBranch');
     const timeoutInput = document.getElementById('editTaskTimeout');
     const retryInput = document.getElementById('editTaskMaxRetries');
+    const quickTrackInput = document.getElementById('editTaskQuickTrack');
     if (codeInput) codeInput.value = job.task_code || ('TASK-' + job.id.substring(0, 8).toUpperCase());
     if (titleInput) titleInput.value = job.title || '';
     if (promptInput) promptInput.value = job.prompt || '';
@@ -3687,6 +3688,12 @@
       let rNum = Number(rawRetry);
       if (!Number.isFinite(rNum)) rNum = 3;
       if (retryInput) retryInput.value = String(rNum);
+      // Che do NHANH: 3 trang thai - auto (chua quyet dinh) / true / false.
+      if (quickTrackInput) {
+        quickTrackInput.value = pipe.quick_track === true ? 'on' : (pipe.quick_track === false ? 'off' : 'auto');
+        // Luu trang thai hien tai de biet user co THAY DOI gi khi submit hay khong.
+        quickTrackInput.dataset.prevMode = quickTrackInput.value;
+      }
     } catch (e) { console.warn('Lỗi điền timeout/retry Sửa:', e); }
     if (modal) modal.classList.remove('hidden');
     try {
@@ -3799,6 +3806,31 @@
         }
         throw new Error(errMsg);
       }
+
+      // Luu che do NHANH (quick_track) qua endpoint chuyen biet.
+      // 'auto' => xoa co (he thong tu quyet dinh) | 'on' => true | 'off' => false.
+      // Chi gui khi trang thai THAT su doi => mo modal Edit roi bam Luu khong
+      // lam job bi ghi quick_track=false tuong minh (khong mong doi).
+      try {
+        const quickSel = document.getElementById('editTaskQuickTrack');
+        if (quickSel) {
+          const mode = quickSel.value;
+          const prevMode = quickSel.dataset.prevMode || 'auto';
+          if (mode !== prevMode) {
+            const qr = await fetch(`/api/v1/jobs/${editingTaskId}/quick-track`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ mode })
+            });
+            if (!qr.ok) {
+              const qd = await qr.json().catch(() => ({}));
+              showToast('Cập nhật chế độ NHANH thất bại: ' + (qd.error || 'lỗi không xác định'), 'warning');
+            } else {
+              quickSel.dataset.prevMode = mode;
+            }
+          }
+        }
+      } catch (e) { console.warn('Lỗi lưu chế độ NHANH:', e); }
 
       showToast('Đã cập nhật thông tin Task thành công!', 'success');
       closeEditTaskModal();

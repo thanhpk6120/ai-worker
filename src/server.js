@@ -622,10 +622,9 @@ function recordSystemOne(jobId, result, route) {
   if (!jobId) return;
   const d = (result && result.decision) || result || {};
   if (!d || typeof d !== 'object') return;
-  // Khong goi model that (ket qua tu cache, chua het so lan retry, hoac quyet dinh
-  // TUC THI bang regex `heuristic-fast`) => bo qua. Badge phai phan anh
-  // "model thật đã quyết định" chứ không phải "co quyet dinh nao".
-  if (d.cached === true || d.source === 'attempt-limit' || d.source === 'heuristic-fast') return;
+  // Khong goi model that (ket qua tu cache, hoac chua het so lan retry) => bo qua.
+  // Badge phai phan anh "model that da quyet dinh" chu khong phai "co quyet dinh nao".
+  if (d.cached === true || d.source === 'attempt-limit') return;
 
   let prev = null;
   try {
@@ -1578,6 +1577,55 @@ app.put(['/api/v1/jobs/:id', '/api/v1/tasks/:id'], (req, res) => {
     return res.status(500).json({ success: false, error: err.message });
   }
 });
+/**
+ * POST /api/v1/jobs/:id/quick-track
+ * Bat/TAT che do nhanh (quick track) cho 1 task.
+ *
+ * Body (1 trong 2):
+ * - { mode: 'auto' | 'on' | 'off' }  (UI dung dang nay)
+ * - { enabled: boolean }             (backward compat)
+ *
+ * - 'on'  -> pipeline_config.quick_track = true
+ * - 'off' -> pipeline_config.quick_track = false (TAT TUONG MINH: triage KHONG tu bat lai)
+ * - 'auto'-> XOA key quick_track (he thong tu quyet dinh theo do phuc tap)
+ */
+app.post('/api/v1/jobs/:id/quick-track', (req, res) => {
+  try {
+    const { id } = req.params;
+    const job = db.getJobById(id);
+    if (!job) {
+      return res.status(404).json({ success: false, error: `Job with ID '${id}' not found` });
+    }
+    const body = req.body || {};
+    let enabled;
+    if (body.mode !== undefined && body.mode !== null) {
+      const mode = String(body.mode).trim().toLowerCase();
+      if (mode === 'auto') enabled = null;
+      else if (mode === 'on' || mode === 'true') enabled = true;
+      else if (mode === 'off' || mode === 'false') enabled = false;
+      else {
+        return res.status(400).json({ success: false, error: 'Tham so "mode" phai la "auto" | "on" | "off"' });
+      }
+    } else {
+      const raw = body.enabled !== undefined ? body.enabled : body.quick_track;
+      if (raw === undefined || raw === null) {
+        return res.status(400).json({ success: false, error: 'Thieu tham so "mode" hoac "enabled"' });
+      }
+      const rawStr = String(raw).trim().toLowerCase();
+      if (raw !== true && raw !== false && rawStr !== 'true' && rawStr !== 'false') {
+        return res.status(400).json({ success: false, error: 'Tham so "enabled" phai la boolean' });
+      }
+      enabled = raw === true || rawStr === 'true';
+    }
+    setQuickTrack(id, enabled);
+    const label = enabled === null ? 'Tu dong (he thong tu quyet dinh)' : (enabled ? 'Bat' : 'Tat');
+    jobEventBus.emitJobLog(id, { text: `\n[QUICK-TRACK] Che do NHANH: ${label} cho task ${job.task_code || id}.\n` });
+    return res.json({ success: true, quick_track: enabled });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 
 
 /**
@@ -2406,13 +2454,29 @@ const executeStep = async (id, opts) => {
 
   // Che do NHANH (task nhe): dung ngan sach thoi gian ngan hon cho tung step.
   // Task de khong nen chay 15-60 phut/step - uu tien lam nhanh, VERIFY se kiem tra lai.
+  // QUAN TRONG: timeout user khai TUONG MINH luon THANG - quick cap chi ap khi
+  // user KHONG khai timeout (khong cat timeout 1 gio cua user xuong 5 phut).
   let stepTimeoutMs = effective.timeoutMs;
-  if (isQuickTrack(job)) {
+  // Che do NHANH hieu luc: dung chung cho cap timeout VA chon template
+  // (neu chi cap timeout ma van chon template "sua IT NHAT" thi task phuc tap
+  // van bi lam sai noi dung - job RSGATE-44).
+  const effectiveQuickTrack = resolveEffectiveQuickTrack(job);
+  if (effectiveQuickTrack) {
     const quickCap = jobPolicy.resolveQuickStepTimeoutMs(job, effective.timeoutMs);
-    if (quickCap && quickCap < stepTimeoutMs) {
-      jobEventBus.emitJobLog(id, { text: `\n[TIMEOUT] Chế độ NHANH: giới hạn step ${Math.round(stepTimeoutMs / 1000)}s → ${Math.round(quickCap / 1000)}s (task nhẹ, ưu tiên tốc độ).\n` });
-      stepTimeoutMs = quickCap;
+    // Cap khong duoc lon hon timeout hien co, va khong cat qua muc 1 phut.
+    const floorMs = Math.min(jobPolicy.QUICK_STEP_MIN_MS, effective.timeoutMs);
+    const cap = Math.max(Math.min(quickCap, effective.timeoutMs), floorMs);
+    if (cap && cap < stepTimeoutMs) {
+      jobEventBus.emitJobLog(id, { text: `\n[TIMEOUT] Chế độ NHANH: giới hạn step ${Math.round(stepTimeoutMs / 1000)}s → ${Math.round(cap / 1000)}s (task nhẹ, ưu tiên tốc độ).\n` });
+      stepTimeoutMs = cap;
     }
+  } else if (isQuickTrack(job)) {
+    // Job co quick_track=true nhung khong hieu luc: user da tat, hoac user da
+    // khai timeout tường minh (timeout user luon thang quick cap).
+    const reason = isQuickTrackDisabledByUser(job)
+      ? 'user da tat che do nhanh cho task nay'
+      : `user da khai timeout ${resolveExplicitTimeoutMs(job)}ms`;
+    jobEventBus.emitJobLog(id, { text: `\n[TIMEOUT] Bo qua che do NHANH: ${reason}.\n` });
   }
   let agentMapping = { PLANNING: 'claude-code', IMPLEMENT: 'claude-code', TESTING: 'claude-code', VERIFY: 'verify-gate', FIXING: 'claude-code' };
   try {
@@ -2437,7 +2501,7 @@ const executeStep = async (id, opts) => {
           answeredQuestions.map((q, idx) => `Câu hỏi ${idx+1}: ${q.question}\nCâu trả lời của người dùng: ${q.answer}\n`).join('\n');
       }
       // Task nhe -> dung template planning-quick.md (plan ngan, it khao sat).
-      const quickTrack = isQuickTrack(job);
+      const quickTrack = effectiveQuickTrack;
       const planningStep = quickTrack ? 'planning-quick' : 'planning';
       const planningPrompt = promptTemplateManager.buildPrompt({
         step: planningStep, taskCode, userPrompt: (job.prompt || '') + clarificationContext, workspacePath, featureDir,
@@ -2466,14 +2530,18 @@ const executeStep = async (id, opts) => {
       const runner = runnerRegistry.getAvailableRunner(planningAgent);
       if (runner) {
         let outBuffer = '';
+        let planningResult = null;
+        let planningRunnerError = null;
         try {
-          await runner.execute({
+          planningResult = await runner.execute({
             prompt: planningGuard.promptToUse, cwd: workspacePath, jobId: id,
             timeoutMs: stepTimeoutMs,
             onStdout: (text) => { outBuffer += text; jobEventBus.emitJobLog(id, { text }); },
             onStderr: (text) => { outBuffer += text; jobEventBus.emitJobLog(id, { text }); }
           });
         } catch (runnerErr) {
+          planningRunnerError = runnerErr;
+          planningResult = { exitCode: 1, timedOut: false, stdout: outBuffer, stderr: '' };
           jobEventBus.emitJobLog(id, { text: `[PLANNING] Thông báo runner: ${runnerErr.message}\n` });
         }
         clearInterval(planProgressTimer);
@@ -2485,39 +2553,77 @@ const executeStep = async (id, opts) => {
         let planFiles = fileManager.readPlanFiles(workspacePath, taskCode);
         let effectiveDevPlan = planFiles.devPlan || planFiles.dev_plan || '';
         let effectiveTestPlan = planFiles.testPlan || planFiles.test_plan || '';
+        // LỖI 4 (job bd88ae0a): Agent PLANNING timeout / lỗi KHÔNG được coi là "đã xong".
+        // - Timeout => KHÔNG sinh plan mẫu, dừng pipeline tại PLANNING (không sang IMPLEMENT).
+        // - Exit code != 0 mà không tạo được plan hợp lệ => dừng pipeline, KHÔNG sinh plan mẫu để che lỗi.
+        const devMatch = outBuffer.match(/# (Dev Plan|Kế hoạch triển khai)[\s\S]*?(?=# (Test Plan|Kế hoạch kiểm thử)|$)/i);
+        const testMatch = outBuffer.match(/# (Test Plan|Kế hoạch kiểm thử)[\s\S]*?(?=$)/i);
+        const planningTimedOut = !!(planningResult && planningResult.timedOut);
+        const planningExitCode = planningResult ? planningResult.exitCode : null;
+        // exitCode null = tiến trình bị kill (signal) => coi như lỗi, giống check exitCode !== 0 gốc.
+        const planningFailed = !!planningRunnerError || !planningResult || planningExitCode !== 0;
+        // "Plan hợp lệ" = có trên ổ cứng HOẶC trích được từ stdout, dài >= 60 ký tự.
+        const hasValidDevPlan = (!!effectiveDevPlan && effectiveDevPlan.trim().length >= 60) || !!(devMatch && devMatch[0].trim().length >= 60);
+        const hasValidTestPlan = (!!effectiveTestPlan && effectiveTestPlan.trim().length >= 60) || !!(testMatch && testMatch[0].trim().length >= 60);
+        const hasAnyValidPlan = hasValidDevPlan || hasValidTestPlan;
+
+        if (planningTimedOut) {
+          const timeoutMsUsed = (planningResult && planningResult.timeoutMs) || stepTimeoutMs;
+          const msg = `PLANNING bi timeout (${timeoutMsUsed}ms). KHONG ghi plan mau. Pipeline dung tai PLANNING.`;
+          jobEventBus.emitJobLog(id, { text: `\n[PLANNING] Agent bi timeout - KHONG ghi plan mau. Pipeline dung tai PLANNING.\n` });
+          db.updateJob(id, { status: 'TIMED_OUT', current_step: 'PLANNING', error_message: msg });
+          jobEventBus.emitJobStatus(id, { status: 'TIMED_OUT' });
+          jobEventBus.emitJobError(id, { error: msg });
+          return;
+        }
+
+        if (planningFailed && !hasAnyValidPlan) {
+          const failReason = planningRunnerError
+            ? `loi thuc thi: ${planningRunnerError.message}`
+            : `exit code ${planningExitCode}`;
+          const msg = `PLANNING that bai (${failReason}) va khong tao duoc ke hoach hop le. KHONG ghi plan mau. Pipeline dung tai PLANNING.`;
+          jobEventBus.emitJobLog(id, { text: `\n[PLANNING] Agent that bai (${failReason}) - KHONG ghi plan mau. Pipeline dung tai PLANNING.\n` });
+          db.updateJob(id, { status: 'FAILED', current_step: 'PLANNING', error_message: msg });
+          jobEventBus.emitJobStatus(id, { status: 'FAILED' });
+          jobEventBus.emitJobError(id, { error: msg });
+          return;
+        }
+
+        // Chi sinh plan mau khi agent thuc su tra ve noi dung plan hop le (>= 60 ky tu),
+        // HOAC khi khong co timeout lan loi.
+        const allowSamplePlan = !planningFailed || hasAnyValidPlan;
 
         // Nếu một trong 2 plan bị thiếu hoặc rỗng (chỉ có dòng tiêu đề < 60 ký tự)
         if (!effectiveDevPlan || effectiveDevPlan.trim().length < 60 || !effectiveTestPlan || effectiveTestPlan.trim().length < 60) {
-          const devMatch = outBuffer.match(/# (Dev Plan|Kế hoạch triển khai)[\s\S]*?(?=# (Test Plan|Kế hoạch kiểm thử)|$)/i);
-          const testMatch = outBuffer.match(/# (Test Plan|Kế hoạch kiểm thử)[\s\S]*?(?=$)/i);
+          if (allowSamplePlan) {
+            const { DualPlanningGenerator } = require('./pipeline/dualPlanning');
+            const gen = new DualPlanningGenerator({ baseOutputDir: featureDir });
 
-          const { DualPlanningGenerator } = require('./pipeline/dualPlanning');
-          const gen = new DualPlanningGenerator({ baseOutputDir: featureDir });
-
-          // Nếu chưa có devPlan tử tế, thử lấy từ stdout hoặc sinh mẫu
-          if (!effectiveDevPlan || effectiveDevPlan.trim().length < 60) {
-            if (devMatch) {
-              effectiveDevPlan = devMatch[0];
-            } else {
-              const generatedDev = gen.generateDevPlan({ featureName: taskCode, prompt: job.prompt || taskCode });
-              effectiveDevPlan = generatedDev.content;
+            // Nếu chưa có devPlan tử tế, thử lấy từ stdout hoặc sinh mẫu
+            if (!effectiveDevPlan || effectiveDevPlan.trim().length < 60) {
+              if (devMatch) {
+                effectiveDevPlan = devMatch[0];
+              } else {
+                const generatedDev = gen.generateDevPlan({ featureName: taskCode, prompt: job.prompt || taskCode });
+                effectiveDevPlan = generatedDev.content;
+              }
+              fs.writeFileSync(path.join(featureDir, 'dev_plan.md'), effectiveDevPlan, 'utf8');
             }
-            fs.writeFileSync(path.join(featureDir, 'dev_plan.md'), effectiveDevPlan, 'utf8');
-          }
 
-          // Nếu chưa có testPlan tử tế (như trường hợp agent chỉ ghi 1 dòng tiêu đề), tự động sinh đầy đủ
-          if (!effectiveTestPlan || effectiveTestPlan.trim().length < 60) {
-            if (testMatch && testMatch[0].trim().length >= 60) {
-              effectiveTestPlan = testMatch[0];
-            } else {
-              const generatedTest = gen.generateTestPlan({
-                featureName: taskCode,
-                prompt: job.prompt || taskCode,
-                devPlan: effectiveDevPlan
-              });
-              effectiveTestPlan = generatedTest.content;
+            // Nếu chưa có testPlan tử tế (như trường hợp agent chỉ ghi 1 dòng tiêu đề), tự động sinh đầy đủ
+            if (!effectiveTestPlan || effectiveTestPlan.trim().length < 60) {
+              if (testMatch && testMatch[0].trim().length >= 60) {
+                effectiveTestPlan = testMatch[0];
+              } else {
+                const generatedTest = gen.generateTestPlan({
+                  featureName: taskCode,
+                  prompt: job.prompt || taskCode,
+                  devPlan: effectiveDevPlan
+                });
+                effectiveTestPlan = generatedTest.content;
+              }
+              fs.writeFileSync(path.join(featureDir, 'test_plan.md'), effectiveTestPlan, 'utf8');
             }
-            fs.writeFileSync(path.join(featureDir, 'test_plan.md'), effectiveTestPlan, 'utf8');
           }
           planFiles = fileManager.readPlanFiles(workspacePath, taskCode);
         }
@@ -2598,7 +2704,7 @@ const executeStep = async (id, opts) => {
       const implementAgent = agentMapping.IMPLEMENT || 'claude-code';
       // Task nhe -> dung template implement-quick.md (sua toi thieu, khong khao sat lai).
       const implementPrompt = promptTemplateManager.buildPrompt({
-        step: isQuickTrack(job) ? 'implement-quick' : 'implement', taskCode, userPrompt: job.prompt || '', workspacePath, featureDir,
+        step: effectiveQuickTrack ? 'implement-quick' : 'implement', taskCode, userPrompt: job.prompt || '', workspacePath, featureDir,
         previousContext: prevContext
       });
       const implementGuard = guardPrompt(implementPrompt);
@@ -2606,54 +2712,127 @@ const executeStep = async (id, opts) => {
         jobEventBus.emitJobLog(id, { text: `\n[GUARD] ⚠ Prompt IMPLEMENT: secret=${implementGuard.hasSecret ? 'có' : 'không'} injection=${implementGuard.injection ? 'có' : 'không'}. Tiếp tục bằng prompt đã scrub, không FAILED job.\n` });
       }
       db.updateJob(id, { runner: implementAgent });
-      const impProgressTimer = setInterval(() => {
-        const cur = db.getJobById(id);
-        if (!cur || cur.status === 'CANCELLED') {
-          clearInterval(impProgressTimer);
-          return;
-        }
-        jobEventBus.emitJobLog(id, { text: `🤖 [IMPLEMENT] Agent đang tiếp tục viết mã nguồn...\n` });
-      }, 6000);
       const runner = runnerRegistry.getAvailableRunner(implementAgent);
       if (runner) {
+        // LOI 5 (job bd88ae0a): IMPLEMENT timeout / exit code != 0 PHAI di qua vong retry,
+        // khong throw thang. So vong retry lay tu `pipeline_config.max_retries`
+        // (jobPolicy.resolveMaxRetries) - giong vong FIXING.
+        const implementRetryPolicy = jobPolicy.resolveMaxRetries(job);
+        const implementMaxRetries = implementRetryPolicy.value;
+        let implementAttempt = 0;
         let implementResult = null;
-        try {
-          implementResult = await runner.execute({
-            prompt: implementGuard.promptToUse, cwd: workspacePath, jobId: id,
-            timeoutMs: stepTimeoutMs,
-            onStdout: (text) => jobEventBus.emitJobLog(id, { text }),
-            onStderr: (text) => jobEventBus.emitJobLog(id, { text })
-          });
-        } catch (execErr) {
-          jobEventBus.emitJobLog(id, { text: `[IMPLEMENT] Loi thuc thi: ${execErr.message}\n` });
-          db.updateJob(id, { status: 'FAILED', current_step: 'IMPLEMENT', error_message: `IMPLEMENT that bai: ${execErr.message}` });
-          jobEventBus.emitJobStatus(id, { status: 'FAILED' });
-          jobEventBus.emitJobError(id, { error: `IMPLEMENT that bai: ${execErr.message}` });
-          throw new Error(`IMPLEMENT that bai: ${execErr.message}`);
-        } finally {
-          clearInterval(impProgressTimer);
+        let implementFailed = false;
+        let implementFailReason = '';
+        let implementIsTimeout = false;
+
+        while (implementAttempt < implementMaxRetries) {
+          implementAttempt += 1;
+          // Moi vong retry tao interval rieng, luon clear trong finally cua vong do
+          // (tranh ro timer giua cac vong retry).
+          const impProgressTimer = setInterval(() => {
+            const cur = db.getJobById(id);
+            if (!cur || cur.status === 'CANCELLED') {
+              clearInterval(impProgressTimer);
+              return;
+            }
+            jobEventBus.emitJobLog(id, { text: `🤖 [IMPLEMENT] Agent đang tiếp tục viết mã nguồn...\n` });
+          }, 6000);
+
+          let attemptExpired = false;
+          let attemptTimedOut = false;
+          let attemptExitCode = null;
+          let attemptFailed = true;
+          let attemptCancelled = false;
+
+          try {
+            // Timeout moi vong = min(step timeout, thoi gian con lai cua job).
+            const attemptTimeout = jobPolicy.resolveEffectiveTimeout({ stepTimeoutMs: stepTimeoutMs, deadlineAt: jobDeadlineAt });
+            if (attemptTimeout.expired) {
+              attemptExpired = true;
+            } else {
+              implementResult = null;
+              try {
+                implementResult = await runner.execute({
+                  prompt: implementGuard.promptToUse, cwd: workspacePath, jobId: id,
+                  timeoutMs: attemptTimeout.timeoutMs,
+                  onStdout: (text) => jobEventBus.emitJobLog(id, { text }),
+                  onStderr: (text) => jobEventBus.emitJobLog(id, { text })
+                });
+              } catch (execErr) {
+                // Loi thuc thi cung la 1 vong that bai de retry, khong throw ra ngoai.
+                implementResult = { exitCode: 1, timedOut: false, stdout: '', stderr: execErr.message };
+                jobEventBus.emitJobLog(id, { text: `[IMPLEMENT] Loi thuc thi: ${execErr.message}\n` });
+              }
+            }
+
+            const checkAfterImp = db.getJobById(id);
+            if (checkAfterImp && checkAfterImp.status === 'CANCELLED') {
+              attemptCancelled = true;
+            }
+
+            attemptTimedOut = attemptExpired || !!(implementResult && implementResult.timedOut);
+            attemptExitCode = implementResult ? implementResult.exitCode : null;
+            attemptFailed = attemptExpired || !implementResult || attemptTimedOut || attemptExitCode !== 0;
+          } finally {
+            // Luon clear timer cua vong nay, ke ca khi vong do ket thuc bang `return`.
+            clearInterval(impProgressTimer);
+          }
+
+          if (attemptCancelled) {
+            return;
+          }
+
+          if (!attemptFailed) {
+            implementFailed = false;
+            implementIsTimeout = false;
+            implementFailReason = '';
+            break;
+          }
+
+          implementIsTimeout = attemptTimedOut;
+          implementFailReason = attemptExpired
+            ? `het ngan sach thoi gian cua job (deadline)`
+            : (attemptTimedOut
+              ? `vuot qua gioi han thoi gian (${(implementResult && implementResult.timeoutMs) || stepTimeoutMs}ms)`
+              : `exit code ${attemptExitCode === null ? 'null (bi kill)' : attemptExitCode}`);
+
+          // Het ngan sach thoi gian cua job => retry vo nghia, dung luon.
+          if (attemptExpired) {
+            implementFailed = true;
+            break;
+          }
+
+          // Con vong retry => thu lai, cho backoff roi thu tiep.
+          if (implementAttempt < implementMaxRetries) {
+            const backoffMs = jobPolicy.resolveRetryBackoffMs(implementAttempt + 1, {});
+            const retryLog = attemptTimedOut
+              ? `\n[IMPLEMENT] Timeout - thu lai lan ${implementAttempt + 1}/${implementMaxRetries} (backoff ${backoffMs}ms)\n`
+              : `\n[IMPLEMENT] Loi agent (${implementFailReason}) - thu lai lan ${implementAttempt + 1}/${implementMaxRetries} (backoff ${backoffMs}ms)\n`;
+            jobEventBus.emitJobLog(id, { text: retryLog });
+            if (backoffMs > 0) {
+              await new Promise((resolve) => setTimeout(resolve, backoffMs));
+            }
+            continue;
+          }
+
+          // Het so lan retry cho phep => dung pipeline.
+          implementFailed = true;
+          break;
         }
-        const checkAfterImp = db.getJobById(id);
-        if (checkAfterImp && checkAfterImp.status === 'CANCELLED') {
-          return;
-        }
-        // IMPLEMENT that bai (timeout hoac exit code != 0) thi DUNG pipeline, khong tu dong sang TESTING
-        if (!implementResult || implementResult.timedOut || implementResult.exitCode !== 0) {
-          const isTimeout = !!(implementResult && implementResult.timedOut);
-          const failReason = isTimeout
-            ? `vuot qua gioi han thoi gian (${implementResult.timeoutMs || stepTimeoutMs}ms)`
-            : `exit code ${implementResult ? implementResult.exitCode : 'khong xac dinh'}`;
+
+        if (implementFailed) {
           // Timeout la trang thai rieng (TIMED_OUT), khong gop voi loi thuoc.
-          const failStatus = isTimeout ? 'TIMED_OUT' : 'FAILED';
-          jobEventBus.emitJobLog(id, { text: `\n[IMPLEMENT-FAILED] Trien khai that bai (${failReason}). Pipeline DUNG tai IMPLEMENT, vui long kiem tra log va chay lai.\n` });
-          db.updateJob(id, { status: failStatus, current_step: 'IMPLEMENT', error_message: `IMPLEMENT that bai: ${failReason}` });
+          const failStatus = implementIsTimeout ? 'TIMED_OUT' : 'FAILED';
+          const failMsg = `IMPLEMENT that bai: ${implementFailReason}`;
+          jobEventBus.emitJobLog(id, { text: `\n[IMPLEMENT-FAILED] Trien khai that bai (${implementFailReason}). Pipeline DUNG tai IMPLEMENT, vui long kiem tra log va chay lai.\n` });
+          db.updateJob(id, { status: failStatus, current_step: 'IMPLEMENT', error_message: failMsg });
           jobEventBus.emitJobStatus(id, { status: failStatus });
-          jobEventBus.emitJobError(id, { error: `IMPLEMENT that bai: ${failReason}` });
-          throw new Error(`IMPLEMENT that bai: ${failReason}`);
+          jobEventBus.emitJobError(id, { error: failMsg });
+          // Dung pipeline tai IMPLEMENT, KHONG throw ra ngoai (tranh unhandled rejection).
+          return;
         }
         jobEventBus.emitJobLog(id, { text: `\n[IMPLEMENT] Hoan tat trien khai ma nguon.\n` });
       } else {
-        clearInterval(impProgressTimer);
         jobEventBus.emitJobLog(id, { text: `\n[IMPLEMENT-WARN] Khong tim thay runner hop le cho ${implementAgent}\n` });
       }
       db.updateJob(id, { status: 'TESTING', current_step: 'TESTING' });
@@ -3010,18 +3189,84 @@ function isQuickTrack(job) {
 }
 
 /**
- * Bat che do nhanh cho 1 job (ghi vao pipeline_config de moi lan chay deu doc duoc).
+ * Timeout user khai TUONG MINH cho job (ms). Tra null neu user KHONG khai.
+ *
+ * Nguon: pipeline_config.timeout / timeout_ms / timeout_seconds / timeout_minutes
+ * hoac job.timeout. Fallback null => KHONG dung DEFAULT_TIMEOUT (default = chua khai).
+ * @param {object} job
+ * @returns {number|null}
+ */
+function resolveExplicitTimeoutMs(job) {
+  try {
+    const ms = config.resolveJobTimeoutMs(job, null);
+    const n = Number(ms);
+    if (ms !== null && ms !== undefined && Number.isFinite(n) && n > 0) return n;
+    return null;
+  } catch (e) { return null; }
+}
+
+/**
+ * User da TAT che do nhanh tuong minh (pipeline_config.quick_track === false)?
+ * Phan biet "user tat" (false) voi "chua quyet dinh" (undefined).
+ * @param {object} job
+ * @returns {boolean}
+ */
+function isQuickTrackDisabledByUser(job) {
+  try {
+    const cfg = jobPolicy.parsePipelineConfig(job);
+    return cfg && cfg.quick_track === false;
+  } catch (e) { return false; }
+}
+
+/**
+ * Che do NHANH co THUC SU hieu luc cho job nay khong?
+ *
+ * 3 dieu kien phai cung dung:
+ * 1) `pipeline_config.quick_track === true` (co bat, thuong do triage tu bat),
+ * 2) user CHUA tat tường minh (`quick_track === false` => user quyet dinh roi),
+ * 3) user CHUA khai timeout tường minh (timeout user luon thang quick cap).
+ *
+ * Quan trong: cung bien nay phai dung cho chon TEMPLATE (planning-quick /
+ * implement-quick) - neu chi cap timeout ma van dung template "sua IT NHAT" thi
+ * task phuc tap van bi lam sai noi dung (job RSGATE-44).
+ * @param {object} job
+ * @returns {boolean}
+ */
+function resolveEffectiveQuickTrack(job) {
+  if (!isQuickTrack(job)) return false;
+  if (isQuickTrackDisabledByUser(job)) return false;
+  if (resolveExplicitTimeoutMs(job) !== null) return false;
+  return true;
+}
+
+/**
+ * Bat/TAT che do nhanh cho 1 job (ghi vao pipeline_config de moi lan chay deu doc duoc).
+ *
+ * 3 trang thai:
+ * - enabled=true  -> cfg.quick_track = true  (bat)
+ * - enabled=false -> cfg.quick_track = false (tat TUONG MINH: triage khong tu bat lai)
+ * - enabled=null  -> DELETE cfg.quick_track    (auto: he thong tu quyet dinh)
+ *
+ * Phan biet bat buoc `false` vs `auto` (xoa key): `isQuickTrackDisabledByUser`
+ * chi chan khi key CÓ gia tri false. Neu auto gan false se chan triage bat lai
+ * o cac lan Start sau - sai nghia.
  * @param {string} jobId
- * @param {boolean} enabled
+ * @param {boolean|null} enabled
+ * @returns {boolean} true neu ghi thanh cong
  */
 function setQuickTrack(jobId, enabled) {
   try {
     const job = db.getJobById(jobId);
-    if (!job) return;
+    if (!job) return false;
     const cfg = jobPolicy.parsePipelineConfig(job);
-    cfg.quick_track = !!enabled;
+    if (enabled === null || enabled === undefined) {
+      delete cfg.quick_track;
+    } else {
+      cfg.quick_track = !!enabled;
+    }
     db.updateJob(jobId, { pipeline_config: cfg });
-  } catch (e) {}
+    return true;
+  } catch (e) { return false; }
 }
 
 const handleJobStart = async (req, res) => {
@@ -3081,11 +3326,19 @@ const handleJobStart = async (req, res) => {
     // goi network o day chi ton mot call ma khong doi hanh vi gi.
     const dedup = systemone.localDedup({ taskCode, prompt: job.prompt || job.title || '' });
     jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-TRIAGE] complexity=${triage.complexity} track=${triage.track} needBrowser=${triage.needBrowser} confidence=${triage.confidence}${triage.cached ? ' (cache)' : ''} bucket=${dedup.bucketId}.\n` });
+    const explicitTimeout = resolveExplicitTimeoutMs(job);
     if (triage && triage.track === 'quick' && Number(triage.confidence) >= 0.5) {
       systemone.addCliSaved(1);
       // Bat che do nhanh THUC SU: plan rut gon + implement toi uu, khong chi tang priority.
-      setQuickTrack(id, true);
-      jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-TRIAGE] Task nhẹ (S/quick, confidence ${Number(triage.confidence).toFixed(2)}) — chế độ NHANH: plan rút gọn, implement tối ưu tốc độ.\n` });
+      // KHONG bat khi user da TAT tuong minh (quick_track === false) hoac user da khai timeout.
+      if (isQuickTrackDisabledByUser(job)) {
+        jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-TRIAGE] Bo qua che do NHANH: user da tat che do nhanh cho task nay.\n` });
+      } else if (explicitTimeout !== null) {
+        jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-TRIAGE] Bo qua che do NHANH: user da khai timeout ${explicitTimeout}ms.\n` });
+      } else {
+        setQuickTrack(id, true);
+        jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-TRIAGE] Task nhẹ (S/quick, confidence ${Number(triage.confidence).toFixed(2)}) — chế độ NHANH: plan rút gọn, implement tối ưu tốc độ.\n` });
+      }
     }
     // 3. Đưa job vào TaskQueue để quản lý Concurrency & Workspace Queue Lock
     taskQueue.enqueue(job, (queuedJob, queueOpts) => runJobPipeline(id, queueOpts), (triage && triage.track === 'quick' ? (job.priority || 0) + 1 : job.priority || 0));
