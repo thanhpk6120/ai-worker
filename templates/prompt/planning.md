@@ -65,6 +65,11 @@ Nhiệm vụ của bạn là khảo sát codebase tại workspace và lập kế
    - ⚠️ BỎ QUA bước khảo sát rộng (grep/find toàn repo, đọc hết docs) nếu kế hoạch cũ đã bao phủ phạm vi — đó là lãng phí thời gian.
 4. BẮT BUỘC BẠN PHẢI TỰ TAY VIẾT TRỰC TIẾP LẦN LƯỢT ĐỦ CẢ 2 TỆP (TUYỆT ĐỐI KHÔNG spawn async background subagent / background task vì tiến trình headless CLI sẽ kết thúc trước khi subagent kịp ghi file):
    - **Bước 4a. Ghi tệp `{{FEATURE_DIR}}/dev_plan.md`:** Liệt kê các module/service cần chỉnh sửa, kiến trúc giải pháp, APIs, và các bước code chi tiết.
+     * **BẮT BUỘC ghi 1 dòng marker ngay dưới tiêu đề đầu tiên của `dev_plan.md`:**
+       `<!-- IMPLEMENT_STATUS: DONE -->` **khi mã nguồn theo phạm vi đã được implement đầy đủ** (bạn đã ĐỌC file trong workspace và xác nhận nội dung khớp yêu cầu),
+       hoặc `<!-- IMPLEMENT_STATUS: NEEDED -->` **khi còn phần chưa implement** (ghi rõ phần nào còn thiếu).
+       - Worker dùng marker này để QUYẾT ĐỊNH có chạy bước IMPLEMENT hay không: `DONE` ⇒ bỏ qua IMPLEMENT, sang thẳng TESTING.
+       - Bạn PHẢI ĐỌC file thật trong workspace để kết luận, KHÔNG được suy đoán từ tên task hay từ kế hoạch cũ.
    - **Bước 4b. Ghi tiếp tệp `{{FEATURE_DIR}}/test_plan.md`:** Mô tả cụ thể kịch bản kiểm thử (task trung bình/phức tạp: tối thiểu 100 dòng chi tiết; task đơn giản: viết ngắn gọn nhưng BẮT BUỘC đủ mã TC-* gồm happy path + edge case + lỗi chính và nội dung sau trim đạt length>=60 ký tự để khớp kiểm tra server.js; MỌI độ khó KHÔNG ĐƯỢC để file rỗng hoặc chỉ có 1 dòng tiêu đề).
      * **ĐẶC BIỆT BẮT BUỘC: Khai báo ngay phần đầu `test_plan.md` mục: `## 0. Cấu hình Bằng Chứng Nghiệm Thu (Evidence Configuration)`:**
        - Chọn tối đa 1 đến 2 loại bằng chứng thực sự phù hợp nhất với task (tuyệt đối không chọn cả 4):

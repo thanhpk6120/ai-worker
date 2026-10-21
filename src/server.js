@@ -24,6 +24,7 @@ const fileContext = require('./systemone/fileContext');
 const { guardPrompt } = require('./execution/promptGuard');
 const evidenceStore = require('./verification/evidenceStore');
 const { EvidenceWatcher } = require('./verification/evidenceWatcher');
+const stepGate = require('./execution/stepGate');
 
 // === Evidence realtime (TASK-PIPELINE-FIX C-1..C-3) ===
 // Theo doi thu muc evidence cua job dang chay => day evidence moi len SSE ngay
@@ -2619,10 +2620,30 @@ function computeJobRuntimeMs(job, steps) {
   if (!hasStarted) return null;
   return total;
 }
-
+/**
+ * Chuyen sang buoc tiep theo, giu duong dan so lan chuyen (hops) de test
+ * va net an toan co the gioi han chuoi chuyen buoc.
+ */
+const scheduleNextStep = (id, opts, delayMs = 100) => {
+  const timer = setTimeout(() => {
+    executeStep(id, opts).catch((__e) => { console.error('[EXECUTE-STEP-NEXT-ERR]', (__e && __e.message) || __e); });
+  }, delayMs);
+  if (timer && typeof timer.unref === 'function') timer.unref();
+  return timer;
+};
 const executeStep = async (id, opts) => {
   const job = db.getJobById(id);
   if (!job || job.status === 'CANCELLED') return;
+
+  // Gioi han so lan chuyen step lien tiep trong 1 lan goi.
+  // Pipeline 5 step x N retry co the chay lau; gioi han nay chi dung cho test
+  // va la net an toan (tranh vong lap vo han khi agent tra loi kieu sai).
+  const maxHops = (opts && Number(opts.maxHops)) || 0;
+  if (maxHops > 0) {
+    const hops = Number((opts && opts._hops) || 0) + 1;
+    if (hops > maxHops) return;
+    opts = { ...(opts || {}), _hops: hops };
+  }
   
   const taskCode = job.task_code || job.id;
   const workspacePath = job.repo_path || job.worktree_path || './';
@@ -2695,6 +2716,19 @@ const executeStep = async (id, opts) => {
 
   try {
     if (job.status === 'PLANNING') {
+      // Kế hoạch đã được verify ở lượt trước (marker tồn tại) => KHÔNG chạy
+      // lại agent PLANNING. PLANNING chỉ làm việc PLANNING rồi chuyển bước -
+      // không có lý do chạy lại 20 phút để viết lại plan đã đúng.
+      const planMarker = stepGate.readPlanOkMarker(featureDir);
+      if (planMarker) {
+        const markerPipe = jobPolicy.parsePipelineConfig(db.getJobById(id) || job);
+        delete markerPipe.pending_started_at;
+        db.updateJob(id, { status: 'IMPLEMENT', current_step: 'IMPLEMENT', runner: (agentMapping.IMPLEMENT || 'claude-code'), pipeline_config: markerPipe });
+        jobEventBus.emitJobStatus(id, { status: 'IMPLEMENT', runner: (agentMapping.IMPLEMENT || 'claude-code') });
+        jobEventBus.emitJobLog(id, { text: `\n[PLANNING] Kế hoạch đã được verify lúc ${planMarker.at} và còn hiệu lực → BỎ QUA agent PLANNING, chuyển thẳng sang IMPLEMENT.\n` });
+        scheduleNextStep(id, opts, 100);
+        return;
+      }
       const planningAgent = agentMapping.PLANNING || 'claude-code';
       beginStepTimeline(id, 'PLANNING', planningAgent);
       db.updateJob(id, { runner: planningAgent });
@@ -2860,6 +2894,18 @@ const executeStep = async (id, opts) => {
           test_plan: planFiles.testPlan || planFiles.test_plan || effectiveTestPlan || '',
           status: 'GENERATED'
         });
+        // Agent PLANNING vua xac nhan trang thai trien khai trong dev_plan.md
+        // (`<!-- IMPLEMENT_STATUS: DONE|NEEDED -->`). Ghi marker de buoc sau
+        // (IMPLEMENT) doc duoc, va giu nguyen trong pipeline_config.
+        const planStatus = stepGate.readImplementStatus(planFiles.devPlan || effectiveDevPlan || '');
+        if (planStatus) {
+          const planPipe = jobPolicy.parsePipelineConfig(db.getJobById(id) || job);
+          planPipe.implement_status = planStatus;
+          db.updateJob(id, { pipeline_config: planPipe });
+          jobEventBus.emitJobLog(id, { text: `\n[PLANNING] Trạng thái triển khai theo xác nhận của agent: ${planStatus} (đọc từ dev_plan.md).\n` });
+        }
+        // Ke hoach da duoc verify => ghi marker de lan chay sau bo qua agent PLANNING.
+        stepGate.writePlanOkMarker(featureDir, { taskCode });
         jobEventBus.emitJobLog(id, { text: `\n[PLANNING] Đã ghi dev_plan.md và test_plan.md đầy đủ. Lưu metadata Dual Plan vào DB thành công.\n` });
       } else {
         jobEventBus.emitJobLog(id, { text: `[PLANNING-WARN] Không tìm thấy runner hợp lệ cho ${planningAgent}\n` });
@@ -2885,15 +2931,34 @@ const executeStep = async (id, opts) => {
       db.updateJob(id, { status: 'IMPLEMENT', current_step: 'IMPLEMENT', runner: implementAgent, had_pending: (answeredQuestions.length > 0 ? 1 : (job.had_pending || 0)), pipeline_config: resumedPipe });
       jobEventBus.emitJobStatus(id, { status: 'IMPLEMENT', runner: implementAgent });
       jobEventBus.emitJobLog(id, { text: `\n[PLANNING -> IMPLEMENT] Hoàn tất Kế hoạch sau khi làm rõ. Tự động chuyển tiếp sang triển khai mã nguồn (IMPLEMENT) với 🤖 Agent: ${implementAgent}...\n` });
-      setTimeout(() => { executeStep(id).catch((__e) => { console.error('[EXECUTE-STEP-NEXT-ERR]', (__e && __e.message) || __e); }); }, 100);
+      scheduleNextStep(id, opts, 100);
       return;
     }
 
     if (job.status === 'IMPLEMENT') {
-      beginStepTimeline(id, 'IMPLEMENT', agentMapping.IMPLEMENT || 'claude-code');
       const prevContext = fileManager.loadPreviousContext(workspacePath, taskCode, 'implement');
       const planFiles = fileManager.readPlanFiles(workspacePath, taskCode);
       const devPlanText = (planFiles && planFiles.devPlan) || (typeof prevContext === 'string' ? prevContext : '');
+
+      // CODE DA DUOC IMPLEMENT CHUA? Ket luan do PLANNING ghi trong dev_plan.md
+      // (`<!-- IMPLEMENT_STATUS: DONE -->`) sau khi verify plan voi code that.
+      // Neu da xong => BO QUA agent IMPLEMENT, chuyen thang sang TESTING.
+      // KHONG dua vao ket qua lan chay truoc: marker chi ghi khi agent xac nhan
+      // bang cach DOC file trong workspace - khong phai do he thong do bang.
+      const implementStatus = stepGate.readImplementStatus(devPlanText)
+        || (jobPolicy.parsePipelineConfig(db.getJobById(id) || job).implement_status || null);
+      if (implementStatus === 'DONE') {
+        jobEventBus.emitJobLog(id, {
+          text: `\n[2/5] >>> 🤖 [IMPLEMENT] Dev Plan xác nhận mã nguồn đã được implement đầy đủ (đã verify với code hiện tại) → BỎ QUA bước IMPLEMENT, chuyển thẳng sang [TESTING] để kiểm tra thực tế.\n`
+        });
+        const testAgent = agentMapping.TESTING || 'claude-code';
+        db.updateJob(id, { status: 'TESTING', current_step: 'TESTING', runner: testAgent });
+        jobEventBus.emitJobStatus(id, { status: 'TESTING', runner: testAgent });
+        scheduleNextStep(id, opts, 200);
+        return;
+      }
+
+      beginStepTimeline(id, 'IMPLEMENT', agentMapping.IMPLEMENT || 'claude-code');
       const isReadOnlyOrVerification =
         /không phát sinh can thiệp mã nguồn|không cần sửa.*mã nguồn|không chỉnh sửa.*mã nguồn|không can thiệp.*mã nguồn/i.test(devPlanText) ||
         /^(kiểm tra|xác minh|test|check|ping|khảo sát)\s/i.test(job.prompt || '');
@@ -2905,7 +2970,7 @@ const executeStep = async (id, opts) => {
         const testAgent = agentMapping.TESTING || 'test-runner';
         db.updateJob(id, { status: 'TESTING', current_step: 'TESTING', runner: testAgent });
         jobEventBus.emitJobStatus(id, { status: 'TESTING', runner: testAgent });
-        setTimeout(() => { executeStep(id).catch((__e) => { console.error('[EXECUTE-STEP-NEXT-ERR]', (__e && __e.message) || __e); }); }, 200);
+        scheduleNextStep(id, opts, 200);
         return;
       }
 
@@ -3068,15 +3133,21 @@ const executeStep = async (id, opts) => {
       }
       db.updateJob(id, { status: 'TESTING', current_step: 'TESTING' });
       jobEventBus.emitJobStatus(id, { status: 'TESTING' });
-      setTimeout(() => { executeStep(id).catch((__e) => { console.error('[EXECUTE-STEP-NEXT-ERR]', (__e && __e.message) || __e); }); }, 100);
+      scheduleNextStep(id, opts, 100);
       return;
     }
 
     if (job.status === 'TESTING') {
+      // TESTING va cac buoc sau LUON chay lai - khong dua vao ket qua cu.
+      // Bang chung cu (evidence) phai reset ve NOT VERIFY truoc khi chay,
+      // neu giu PASS cu thi VERIFY co the pass bang bang chung lượt truoc.
+      const resetCount = evidenceStore.resetAllToNotVerify(evidenceDir);
+      if (resetCount > 0) {
+        jobEventBus.emitJobLog(id, { text: `\n[TESTING] Đã reset ${resetCount} bằng chứng cũ về NOT VERIFY — lần chạy này phải tạo lại và verify lại từ đầu.\n` });
+      }
       beginStepTimeline(id, 'TESTING', agentMapping.TESTING || 'claude-code');
       const checkBeforeTest = db.getJobById(id);
       if (checkBeforeTest && checkBeforeTest.status === 'CANCELLED') return;
-
       const testAgent = agentMapping.TESTING || 'claude-code';
       const testingPrompt = promptTemplateManager.buildPrompt({
         step: 'testing', taskCode, userPrompt: job.prompt || '', workspacePath, featureDir,
@@ -3174,7 +3245,7 @@ const executeStep = async (id, opts) => {
         jobEventBus.emitJobLog(id, { text: `\n[TESTING] Agent kiem thu bao loi ('+failReasonText+'), chuyen sang [FIXING]...` });
         db.updateJob(id, { status: 'FIXING', current_step: 'FIXING', runner: fixAgentAfterTest, error_message: 'Kiem thu that bai ('+failReasonText+').', gate_result: failGate });
         jobEventBus.emitJobStatus(id, { status: 'FIXING', runner: fixAgentAfterTest });
-        setTimeout(() => { executeStep(id).catch((__e) => { console.error('[EXECUTE-STEP-NEXT-ERR]', (__e && __e.message) || __e); }); }, 100);
+        scheduleNextStep(id, opts, 100);
         return;
       }
       jobEventBus.emitJobLog(id, { text: `\n[TESTING] Hoan tat kiem thu qua Agent, chuyen sang [VERIFY] de doi soat evidence...` });
@@ -3182,7 +3253,7 @@ const executeStep = async (id, opts) => {
       db.updateJob(id, { status: 'VERIFY', current_step: 'VERIFY', runner: verifyAgent });
       jobEventBus.emitJobStatus(id, { status: 'VERIFY', runner: verifyAgent });
       jobEventBus.emitJobLog(id, { text: `\n[3/5] >>> 🔍 [VERIFY] Bắt đầu đối soát evidence thực tế trong ${evidenceDir}...\n` });
-      setTimeout(() => { executeStep(id).catch((__e) => { console.error('[EXECUTE-STEP-NEXT-ERR]', (__e && __e.message) || __e); }); }, 100);
+      scheduleNextStep(id, opts, 100);
       return;
     }
 
@@ -3205,7 +3276,7 @@ const executeStep = async (id, opts) => {
         jobEventBus.emitJobLog(id, { text: `\n[VERIFY] ❌ Đối soát evidence thất bại: ${reasonText}. Chuyển sang FIXING với 🤖 Agent: ${fixAgent}.\n` });
         db.updateJob(id, { status: 'FIXING', current_step: 'FIXING', runner: fixAgent, error_message: reasonText, gate_result: failGate });
         jobEventBus.emitJobStatus(id, { status: 'FIXING', runner: fixAgent });
-        setTimeout(() => { executeStep(id).catch((__e) => { console.error('[EXECUTE-STEP-NEXT-ERR]', (__e && __e.message) || __e); }); }, 100);
+        scheduleNextStep(id, opts, 100);
         return;
       }
       // Lưu path gọn nhẹ vào SQLite DB (chỉ lưu đường dẫn, KHÔNG lưu payload lớn)
@@ -3363,7 +3434,7 @@ const executeStep = async (id, opts) => {
       // Quay lại TESTING
       db.updateJob(id, { status: 'TESTING', current_step: 'TESTING' });
       jobEventBus.emitJobStatus(id, { status: 'TESTING' });
-      setTimeout(() => { executeStep(id).catch((__e) => { console.error('[EXECUTE-STEP-NEXT-ERR]', (__e && __e.message) || __e); }); }, 100);
+      scheduleNextStep(id, opts, 100);
       return;
     }
 
@@ -4333,6 +4404,7 @@ module.exports = {
   buildEvidenceSnapshot,
   getTaskEvidences,
   evaluateRepeatedCause,
+  executeStep,
   // Runtime accounting (thoi gian worker thuc su chay task) - export de test.
   computeJobRuntimeMs,
   beginStepTimeline,

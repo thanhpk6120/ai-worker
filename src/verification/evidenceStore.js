@@ -359,6 +359,33 @@ function updateStatus(evidenceDir, fileName, status, extra) {
 }
 
 /**
+ * Reset TOAN BO evidence ve trang thai NOT VERIFY.
+ *
+ * Dung truoc moi lan chay TESTING: ket qua lan chay truoc KHONG duoc dua vao
+ * lan chay moi (user chot 2026-10-22). Bang chung cu phai duoc verify lai
+ * tu dau - neu giu PASS cu, VERIFY co the pass bang bang chung cua lượt truoc.
+ *
+ * @param {string} evidenceDir
+ * @returns {number} so file da bi reset
+ */
+function resetAllToNotVerify(evidenceDir) {
+  if (!evidenceDir) return 0;
+  try {
+    const { records } = readMetadata(evidenceDir);
+    if (!records || records.length === 0) return 0;
+    const map = {};
+    for (const rec of records) {
+      if (rec.fileName) map[rec.fileName] = STATUS.NOT_VERIFY;
+    }
+    if (Object.keys(map).length === 0) return 0;
+    setStatuses(evidenceDir, map);
+    return Object.keys(map).length;
+  } catch (e) {
+    return 0;
+  }
+}
+
+/**
  * Sắp xếp evidence theo thứ tự step test:
  *   order -> stepIndex -> timestamp -> tên file
  */
@@ -436,6 +463,7 @@ module.exports = {
   readMetadata,
   writeMetadata,
   setStatuses,
+  resetAllToNotVerify,
   updateStatus,
   sortRecords,
   findByFileName,
