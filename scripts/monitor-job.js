@@ -25,7 +25,7 @@ const KEY_PATTERNS = [
   /\[SYSTEMONE-FIXGATE\]/,
   /\[REPEAT-CHECK\]/,
   /\[TIMEOUT\]/,
-  /\[DEADLINE\]/,
+  /\[IMPLEMENT\]\s+(Hoan tat|Hoàn tất|FAILED)/,
   /\[IMPLEMENT-FAILED\]/,
   /\[FIXING-FAILED\]/,
   /\[FIXING-RETRY\]/,
@@ -35,9 +35,8 @@ const KEY_PATTERNS = [
   /\[PIPELINE-SKIP\]/
 ];
 
-let lastOffset = 0;
-let lastStatus = null;
-let lastStep = null;
+// Bat dau TAI CUOI file => KHONG replay log cu (de doc nham su kien cua luan chay truoc).
+let lastOffset = fs.existsSync(LOG_PATH) ? fs.statSync(LOG_PATH).size : 0;
 
 function readNewLog() {
   if (!fs.existsSync(LOG_PATH)) return '';
