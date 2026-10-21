@@ -288,6 +288,18 @@ ${prompt || 'Không có mô tả chi tiết.'}
     
     if (stepLower === 'planning') {
       filesToLoad = ['expect.md', 'context.md'];
+      // Ke hoach da ton tai (vong chay truoc) => chi tro DUONG DAN, khong nhoi
+      // full text (dev_plan 39KB + test_plan 48KB lam prompt phinh to).
+      // Agent PLANNING phai DOC file nay de verify + cap nhat, thay vi khao sat
+      // lai tu dau (Job RSGATE-44 mat 20 phut khao sat lai plan da day du).
+      for (const planFile of ['dev_plan.md', 'test_plan.md']) {
+        if (fs.existsSync(path.join(dir, planFile))) {
+          context += `### Kế hoạch đã có sẵn (ĐỌC FILE NÀY trước khi khảo sát lại)\n`
+            + `- \`${path.join(dir, planFile)}\`\n`
+            + `  Nếu file này còn đúng với code hiện tại: CẬP NHẬT phần sai/lỗi thời, KHÔNG khảo sát lại từ đầu.\n`
+            + `  Chỉ khảo sát sâu phần chưa có hoặc phần bạn nghi ngờ đã lỗi thời.\n\n`;
+        }
+      }
     } else if (isImplementStep) {
       filesToLoad = ['dev_plan.md', 'test_plan.md'];
       // Bước IMPLEMENT không được thấy phần "bằng chứng" của test_plan.md:

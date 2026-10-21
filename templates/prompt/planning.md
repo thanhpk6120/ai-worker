@@ -11,7 +11,7 @@ Nhiệm vụ của bạn là khảo sát codebase tại workspace và lập kế
 
 - **Đường dẫn Workspace:** {{WORKSPACE_PATH}}
 - **Thư mục Feature của task này (mọi tài liệu của task nằm tại đây):** {{FEATURE_DIR}}
-- **Các file ngữ cảnh của task:** `{{FEATURE_DIR}}/expect.md`, `{{FEATURE_DIR}}/plan.md`, `{{FEATURE_DIR}}/tasks.md`, `{{FEATURE_DIR}}/memory.md`, `{{FEATURE_DIR}}/context.md` (file nào tồn tại thì đọc, không có thì bỏ qua)
+- **Các file ngữ cảnh của task:** `{{FEATURE_DIR}}/expect.md`, `{{FEATURE_DIR}}/plan.md`, `{{FEATURE_DIR}}/tasks.md`, `{{FEATURE_DIR}}/memory.md`, `{{FEATURE_DIR}}/context.md`, `{{FEATURE_DIR}}/dev_plan.md`, `{{FEATURE_DIR}}/test_plan.md` (file nào tồn tại thì đọc, không có thì bỏ qua — xem mục 3b nếu `dev_plan.md`/`test_plan.md` đã có)
 
 {{MCP_SERVERS}}
 
@@ -49,6 +49,13 @@ Nhiệm vụ của bạn là khảo sát codebase tại workspace và lập kế
 1. **BƯỚC 0 — KIỂM TRA MCP KHI BẮT ĐẦU (1 lần duy nhất, không lặp lại mỗi turn):** Đọc mục `🔌 DANH SÁCH MCP SERVERS` ở trên một lần ở đầu phiên để biết có tool Jira/Confluence/Browser nào khả dụng hay không. Các tác vụ đọc tài liệu và mã nguồn local: BẮT BUỘC ưu tiên dùng native tool (`read`/`grep`), TUYỆT ĐỐI KHÔNG spam dòng suy nghĩ hay log "Không MCP dùng được..." trước mỗi thao tác file.
 2. BẮT BUỘC truy cập thư mục docs của workspace (ví dụ docs/, docs/features/, README.md, ARCHITECTURE.md, DESIGN.md, DB schema) để lấy: kiến trúc dự án, sơ đồ module/service, hướng dẫn run service, lệnh build/chạy service, port/API endpoint, biến môi trường và prerequirement. Ghi các lệnh run service và port đã phát hiện vào dev_plan.md để các bước sau (IMPLEMENT/TESTING) dùng lại, tránh tự suy đoán lệnh chạy.
 3. Đọc các file ngữ cảnh của task trong `{{FEATURE_DIR}}` (`expect.md`, `plan.md`, `tasks.md`, `memory.md`, `context.md` — file nào có thì đọc).
+3b. **NẾU `{{FEATURE_DIR}}/dev_plan.md` HOẶC `{{FEATURE_DIR}}/test_plan.md` ĐÃ TỒN TẠI (từ lượt chạy trước) — BẮT BUỘC LÀM THEO:**
+   - **ĐỌC file đó TRƯỚC** (đường dẫn được nêu ở mục "Kế hoạch đã có sẵn" trong phần ngữ cảnh).
+   - **KHÔNG khảo sát lại từ đầu.** Kế hoạch cũ đã đầy đủ ở nhiều trường hợp (task chạy lại sau khi gián đoạn / sửa lỗi / bổ sung).
+   - **VERIFY** xem kế hoạch còn đúng với code hiện tại không: đối chiếu tên file, hàm, endpoint, lệnh test có còn tồn tại không.
+   - **CẬP NHẬT** phần sai/lỗi thời; giữ nguyên phần còn đúng. Chỉ khảo sát sâu phần chưa có hoặc phần bạn nghi ngờ đã lỗi thời.
+   - Ghi rõ trong `dev_plan.md` mục "Mức độ khó" + 1 dòng ghi chú đã verify/cập nhật kế hoạch cũ.
+   - ⚠️ BỎ QUA bước khảo sát rộng (grep/find toàn repo, đọc hết docs) nếu kế hoạch cũ đã bao phủ phạm vi — đó là lãng phí thời gian.
 4. BẮT BUỘC BẠN PHẢI TỰ TAY VIẾT TRỰC TIẾP LẦN LƯỢT ĐỦ CẢ 2 TỆP (TUYỆT ĐỐI KHÔNG spawn async background subagent / background task vì tiến trình headless CLI sẽ kết thúc trước khi subagent kịp ghi file):
    - **Bước 4a. Ghi tệp `{{FEATURE_DIR}}/dev_plan.md`:** Liệt kê các module/service cần chỉnh sửa, kiến trúc giải pháp, APIs, và các bước code chi tiết.
    - **Bước 4b. Ghi tiếp tệp `{{FEATURE_DIR}}/test_plan.md`:** Mô tả cụ thể kịch bản kiểm thử (task trung bình/phức tạp: tối thiểu 100 dòng chi tiết; task đơn giản: viết ngắn gọn nhưng BẮT BUỘC đủ mã TC-* gồm happy path + edge case + lỗi chính và nội dung sau trim đạt length>=60 ký tự để khớp kiểm tra server.js; MỌI độ khó KHÔNG ĐƯỢC để file rỗng hoặc chỉ có 1 dòng tiêu đề).

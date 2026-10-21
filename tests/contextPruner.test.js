@@ -46,13 +46,21 @@ describe('Context Pruner & Step-specific Context Loading Test Suite', () => {
     assert.strictEqual(utilsFileManager.loadPreviousContext, storageFileManager.loadPreviousContext);
   });
 
-  it('PLANNING: Chỉ nạp expect.md và context.md, không nạp dev_plan, tasks, report...', () => {
+  it('PLANNING: nạp expect.md + context.md, và TRỎ ĐƯỜNG DẪN plan có sẵn (không nội dung)', () => {
+    // Contract đổi 2026-10-22: PLANNING nạp expect.md + context.md như cũ.
+    // Ngoài ra nếu dev_plan.md / test_plan.md đã tồn tại (job chạy lại) thì
+    // trỏ ĐƯỜNG DẪN để agent verify + cập nhật, thay vì khảo sát lại từ đầu.
+    // KHÔNG nhồi nội dung plan (39KB + 48KB) — chỉ đường dẫn.
     const ctx = storageFileManager.loadPreviousContext(testWorkspace, taskCode, 'planning');
     assert.ok(ctx.includes('expect.md'), 'Phải chứa expect.md');
     assert.ok(ctx.includes('context.md'), 'Phải chứa context.md');
-    assert.ok(!ctx.includes('dev_plan.md'), 'Không được chứa dev_plan.md ở bước planning');
+    assert.ok(ctx.includes('Kế hoạch đã có sẵn'), 'Phải có tiêu đề kế hoạch đã có sẵn');
+    assert.ok(ctx.includes('dev_plan.md'), 'Phải trỏ đường dẫn dev_plan.md');
+    assert.ok(ctx.includes('test_plan.md'), 'Phải trỏ đường dẫn test_plan.md');
+    assert.ok(!ctx.includes('Nội dung dev_plan.md'), 'KHÔNG được nhồi nội dung dev_plan');
+    assert.ok(!ctx.includes('Nội dung test_plan.md'), 'KHÔNG được nhồi nội dung test_plan');
     assert.ok(!ctx.includes('tasks.md'), 'Không được chứa tasks.md');
-    assert.ok(!ctx.includes('report.md'), 'Không được chứa report.md');
+    assert.ok(!ctx.includes('Nội dung report.md'), 'Không được chứa nội dung report.md');
   });
 
   it('IMPLEMENT: Chỉ nạp dev_plan.md và test_plan.md, KHÔNG nhồi expect, tasks, memory, report, context', () => {
