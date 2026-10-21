@@ -79,3 +79,35 @@ test('backoff tang dan theo attempt (vong 1 khong wait)', () => {
   assert.ok(jobPolicy.resolveRetryBackoffMs(2) > 0);
   assert.ok(jobPolicy.resolveRetryBackoffMs(3) > jobPolicy.resolveRetryBackoffMs(2));
 });
+
+// --- Tong ngan sach thoi gian cho job (chong job treo vo han) ---------------
+
+test('job KHONG khai deadline => van co tong ngan sach (mac dinh 4 gio)', () => {
+  // Khong co deadline => max_retries=10 x step timeout 1h = ~10h treo.
+  // Job RSGATE-44 chay 7h/8 step chi vi khong co tong ngan sach thoi gian.
+  const job = { pipeline_config: { timeout: 3600000, max_retries: 10 } };
+  const ms = jobPolicy.resolveJobDeadlineMs(job);
+  assert.equal(ms, jobPolicy.DEFAULT_JOB_DEADLINE_MS);
+  assert.ok(Number.isFinite(ms) && ms > 0);
+});
+
+test('job khai deadline => gia tri khai duoc dung', () => {
+  assert.equal(jobPolicy.resolveJobDeadlineMs({ pipeline_config: { job_deadline_hours: 2 } }), 2 * 60 * 60 * 1000);
+  assert.equal(jobPolicy.resolveJobDeadlineMs({ pipeline_config: { job_deadline_minutes: 90 } }), 90 * 60 * 1000);
+});
+
+test('deadline la TUYET DOI: luu deadline_at roi doc lai giu nguyen', () => {
+  const job = { pipeline_config: { job_deadline_hours: 1 } };
+  const first = jobPolicy.resolveDeadlineAt(job, 1000);
+  assert.equal(first.isNew, true);
+  const stored = { pipeline_config: { deadline_at: first.deadlineAt } };
+  const second = jobPolicy.resolveDeadlineAt(stored, 999999);
+  assert.equal(second.isNew, false);
+  assert.equal(second.deadlineAt, first.deadlineAt, 'deadline khong duoc truot');
+});
+
+test('deadline het han => resolveEffectiveTimeout expired=true', () => {
+  const r = jobPolicy.resolveEffectiveTimeout({ stepTimeoutMs: 3600000, deadlineAt: 1000, now: 2000 });
+  assert.equal(r.expired, true);
+  assert.equal(r.timeoutMs, 0);
+});

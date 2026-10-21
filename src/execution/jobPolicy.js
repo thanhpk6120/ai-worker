@@ -68,8 +68,15 @@ function resolveMaxRetries(job, envValue) {
 
 /**
  * Tổng ngân sách thời gian cho job (ms). `job_deadline_ms` trong pipeline_config.
- * Trả null nếu job không khai => không đặt deadline (giữ hành vi cũ).
+ *
+ * QUAN TRỌNG: nếu job KHÔNG khai => phải có default. Nếu không:
+ *   max_retries=10 × step timeout 1h = tối đa ~10h cho 1 job treo.
+ *   Job RSGATE-44 đã chạy 7h/8 step chỉ vì không có tổng ngân sách.
+ *
+ * Default = 4 giờ: đủ cho task thật (RSGATE-44 cần ~30-60 phút/step) và
+ * vẫn chặn được job treo. Có thể ghi đè bằng `job_deadline_ms|_minutes|_hours`.
  */
+const DEFAULT_JOB_DEADLINE_MS = 4 * 60 * 60 * 1000; // 4 gio
 function resolveJobDeadlineMs(job) {
   const pipe = parsePipelineConfig(job);
   const direct = toFiniteNumber(pipe.job_deadline_ms !== undefined ? pipe.job_deadline_ms : pipe.jobDeadlineMs);
@@ -78,7 +85,7 @@ function resolveJobDeadlineMs(job) {
   if (minutes !== null && minutes > 0) return minutes * 60 * 1000;
   const hours = toFiniteNumber(pipe.job_deadline_hours !== undefined ? pipe.job_deadline_hours : pipe.jobDeadlineHours);
   if (hours !== null && hours > 0) return hours * 60 * 60 * 1000;
-  return null;
+  return DEFAULT_JOB_DEADLINE_MS;
 }
 
 /**
@@ -304,5 +311,6 @@ module.exports = {
   collectAgentOutput,
   QUICK_STEP_DEFAULT_MS,
   QUICK_STEP_MIN_MS,
+  DEFAULT_JOB_DEADLINE_MS,
   RATE_LIMIT_PATTERNS
 };

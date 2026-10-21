@@ -2150,8 +2150,24 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
                   });
                 }
                 // Mọi file evidence phải được khai báo trong metadata.json để chứng minh mapping với test case
+                // `t.evidence` do AGENT tự viết => co the la object/string, khong phai array.
+                // Khong Array.isArray => .forEach throw => catch ngoai => gate FAIL-OPEN (PASS khong bang chung).
                 const declared = new Set();
-                testsArr.forEach(t => { (t.evidence || t.evidences || t.files || []).forEach(f => declared.add(String(f))); });
+                for (const t of testsArr) {
+                  if (!t || typeof t !== 'object') continue;
+                  for (const field of ['evidence', 'evidences', 'files']) {
+                    const v = t[field];
+                    if (Array.isArray(v)) for (const f of v) declared.add(String(f));
+                    else if (typeof v === 'string' && v) declared.add(v);
+                    else if (v && typeof v === 'object') {
+                      // object dang { fileName: 'a.png' } hoac map { 'a.png': {...} }
+                      for (const [k, val] of Object.entries(v)) {
+                        if (typeof k === 'string' && k) declared.add(k);
+                        if (val && typeof val === 'object' && val.fileName) declared.add(String(val.fileName));
+                      }
+                    }
+                  }
+                }
                 const undeclared = validFiles.filter(f => f !== 'metadata.json' && ![...declared].some(d => d.includes(f) || f.includes(d)));
                 if (undeclared.length > 0) {
                   agentFailed = true;
@@ -2160,21 +2176,29 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
                     text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: File evidence chưa được khai trong metadata.json nên không chứng minh cho test case nào: ${undeclared.join(', ')}. Agent phải mapping mỗi file với đúng test case trong plan!\n`
                   });
                 }
-                // CHIEU NGUOC: file KHAI trong metadata.json nhung KHONG TON TAI tren dia
-                // => bang chung khong co that. Job RSGATE-44: metadata khai 17 file,
-                // evidence/ chi con metadata.json -> co the PASS voi 0 bang chung.
-                // Do chinh xac phai tuyet doi => file khai ma thieu = FAIL.
+                // CHIỀU NGƯỢC: file KHAI trong metadata.json nhưng KHÔNG TỒN TẠI trên đĩa
+                // => bằng chứng không có thật. Job RSGATE-44: metadata khai 17 file,
+                // evidence/ chỉ còn metadata.json -> có thể PASS với 0 bằng chứng.
+                // Độ chính xác phải tuyệt đối => file khai mà thiếu = FAIL.
+                // Đường dẫn lồng nhau (sub/dir/a.png) phải được giữ, không cắt basename.
                 const missingOnDisk = [];
                 for (const d of declared) {
-                  const base = path.basename(String(d).replace(/\\/g, '/'));
-                  if (!base || base === 'metadata.json') continue;
-                  const abs = path.join(evidenceDir, base);
-                  if (!fs.existsSync(abs)) missingOnDisk.push(base);
+                  const raw = String(d).replace(/\\/g, '/').trim();
+                  if (!raw || raw === 'metadata.json') continue;
+                  const rel = raw.replace(/^\.\//, '');
+                  const abs = path.isAbsolute(rel)
+                    ? rel
+                    : path.join(evidenceDir, rel);
+                  if (!fs.existsSync(abs)) {
+                    // Thử basename (metadata có thể khai chỉ tên file, file nằm ở evidence/ gốc).
+                    const base = path.basename(rel);
+                    if (!fs.existsSync(path.join(evidenceDir, base))) missingOnDisk.push(raw);
+                  }
                 }
                 if (missingOnDisk.length > 0) {
                   agentFailed = true;
                   jobEventBus.emitJobLog(id, {
-                    text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: ${missingOnDisk.length} file bằng chứng được khai trong metadata.json nhưng KHÔNG tồn tại trên đĩa: ${missingOnDisk.slice(0, 20).join(', ')}${missingOnDisk.length > 20 ? ', ...' : ''}. Agent phải tạo đúng các file bằng chứng này (đường dẫn tuyệt đối trong metadata.json phải trỏ tới file thật)!\n`
+                    text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: ${missingOnDisk.length} file bằng chứng được khai trong metadata.json nhưng KHÔNG tồn tại trên đĩa: ${missingOnDisk.slice(0, 20).join(', ')}${missingOnDisk.length > 20 ? ', ...' : ''}. Agent phải tạo đúng các file bằng chứng này (đường dẫn khai trong metadata.json phải trỏ tới file thật)!\n`
                   });
                 }
               } else {
@@ -2354,7 +2378,14 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
           // TUYỆT ĐỐI KHÔNG tự động mock/sinh file evidence thay cho Agent.
           // Nếu Agent thiếu evidence hoặc verify thất bại -> agentFailed = true để chuyển FIXING!
         } catch (evWriteErr) {
+          // FAIL-CLOSED: lỗi trong lúc verify => KHÔNG được coi là PASS.
+          // Trước đây chỉ console.warn => gate trả failed:false => job PASS
+          // dù evidence hỏng. Độ chính xác phải tuyệt đối => lỗi = FAIL.
+          agentFailed = true;
           console.warn('Ghi bằng chứng cảnh báo:', evWriteErr.message);
+          jobEventBus.emitJobLog(id, {
+            text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: Lỗi khi đối soát bằng chứng (${evWriteErr.message}). Không thể xác nhận bằng chứng => coi như THẤT BẠI (fail-closed), không cho qua.\n`
+          });
         }
 
         // Vong doi trang thai evidence: verify thanh cong -> PASS, verify loi -> FAILED.
@@ -3237,7 +3268,12 @@ const executeStep = async (id, opts) => {
       } else {
         let fixAttempt = attempt;
         let fixingOk = false;
-        let fixFailReason = '';
+        // Da het so vong sua (fix_attempt >= maxRetries) => while khong chay,
+        // `fixFailReason` rong => error_message "FIXING that bai sau 10/10 vong: ."
+        // (khong ro ly do). Khoi tao san ly do cho ca truong hop nay.
+        let fixFailReason = attempt >= maxRetries
+          ? `đã hết số vòng sửa (fix_attempt=${attempt}/${maxRetries})`
+          : '';
         let fixRepeatedStop = null;
         while (fixAttempt < maxRetries) {
           // Lay config MOI NHAT tu DB (khong dung snapshot `job` dau executeStep) -
@@ -3372,6 +3408,10 @@ const runJobPipeline = (jobId, opts) => {
       const freshPipe = jobPolicy.clearFailureHistory(jobPolicy.parsePipelineConfig(jobToStart));
       delete freshPipe.fix_attempt;
       delete freshPipe.fixAttempt;
+      // Xoa deadline cu: lan chay moi phai co ngan sach thoi gian MOI
+      // (neu giu deadline da het han, job moi se chet ngay o buoc dau tien).
+      delete freshPipe.deadline_at;
+      delete freshPipe.deadlineAt;
       db.updateJob(jobId, {
         status: 'PLANNING', current_step: 'PLANNING', error_message: null,
         pipeline_config: freshPipe, gate_result: null
@@ -3646,10 +3686,13 @@ const handleJobClone = async (req, res) => {
       } catch (e) {}
     }
     delete pipeConfig.fix_attempt;
+    delete pipeConfig.fixAttempt;
     // Xoa lich su loi: job moi khong duoc mang loi cua job goc (co che so trung
     // nguyen nhan se so sanh sai ngay tu vong 1).
     pipeConfig = jobPolicy.clearFailureHistory(pipeConfig);
-    delete pipeConfig.fixAttempt;
+    // Xoa deadline cu: job clone phai co ngan sach thoi gian rieng.
+    delete pipeConfig.deadline_at;
+    delete pipeConfig.deadlineAt;
 
     const sourceCode = (sourceJob.task_code || '').trim();
     const sourceTitle = (sourceJob.title || '').trim();

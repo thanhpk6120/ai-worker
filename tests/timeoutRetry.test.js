@@ -71,9 +71,13 @@ test('job_deadline_minutes -> ms', () => {
   assert.equal(r, 90 * 60 * 1000);
 });
 
-test('khong khai deadline => null (khong ep deadline)', () => {
-  assert.equal(policy.resolveJobDeadlineMs({ pipeline_config: {} }), null);
-  assert.equal(policy.resolveJobDeadlineMs({}), null);
+test('khong khai deadline => van co deadline MAC DINH (chong job treo vo han)', () => {
+  // Contract doi (2026-10-21): job khong khai deadline => dung DEFAULT_JOB_DEADLINE_MS
+  // thay vi null. Ly do: max_retries=10 x step timeout 1h = ~10h treo.
+  // Job RSGATE-44 chay 7h/8 step chi vi khong co tong ngan sach thoi gian.
+  const expected = 4 * 60 * 60 * 1000;
+  assert.equal(policy.resolveJobDeadlineMs({ pipeline_config: {} }), expected);
+  assert.equal(policy.resolveJobDeadlineMs({}), expected);
 });
 
 test('resolveEffectiveTimeout: min(step timeout, thoi gian con lai)', () => {
@@ -134,10 +138,12 @@ test('deadline duoc gan 1 lan roi doc lai, khong truot theo moi lan chuyen step'
   assert.equal(second.deadlineAt, first.deadlineAt, 'deadline phai tuyet doi');
 });
 
-test('job khong khai deadline => null (khong gan deadline_at)', () => {
+test('job khong khai deadline => DUNG MAC DINH (co deadline_at moi, isNew=true)', () => {
+  // Contract doi (2026-10-21): job khong khai deadline => dung default 4 gio
+  // thay vi khong gan deadline (chong job treo vo han: 10 luot x 1h = 10h).
   const r = policy.resolveDeadlineAt({ pipeline_config: {} }, 1000000);
-  assert.equal(r.deadlineAt, null);
-  assert.equal(r.isNew, false);
+  assert.equal(r.isNew, true, 'phai gan deadline moi');
+  assert.equal(r.deadlineAt, 1000000 + policy.DEFAULT_JOB_DEADLINE_MS);
 });
 
 test('deadline da het han => resolveEffectiveTimeout expired', () => {
