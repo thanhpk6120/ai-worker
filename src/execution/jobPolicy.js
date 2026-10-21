@@ -226,8 +226,9 @@ function buildFailureSignature(reason) {
   text = text.toLowerCase().replace(/\s+/g, ' ').trim();
   if (!text) return '';
   for (const [re, rep] of _NOISE_PATTERNS) text = text.replace(re, rep);
-  // Cat con 600 ky tu dau - loi thuong nam o dau (stack trace / message).
-  return text.slice(0, 600).trim();
+  // Cat con 400 ky tu dau - loi thuong nam o dau (stack trace / message).
+  // 400 x 50 muc = 20KB, pipeline_config (JSON string trong DB) van re.
+  return text.slice(0, 400).trim();
 }
 
 /**
