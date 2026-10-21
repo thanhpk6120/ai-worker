@@ -147,7 +147,11 @@ async function decideTriage({ taskCode = '', prompt = '', jobId = '' } = {}) {
   //
   // DA BO heuristic regex `sig.quick` / `sig.large` (confidence gia 0.9): no tu bat
   // `quick_track` -> cat ngan sach thoi gian cua user (job bd88ae0a / RSGATE-44 that bai).
-  if (!isEnabled()) { stats.fallbacks += 1; return policy.triageHeuristic({ prompt }); }
+  //
+  // THU TU QUAN TRONG: AI headless (CLI local) phai chay TRUOC gate `isEnabled()`
+  // cua gateway Jev. `isEnabled()` la kill-switch cua Jev - khong lien quan CLI local.
+  // Neu gate Jev dat truoc, SYSTEMONE_ENABLED=false se quay ve heuristic regex
+  // (dung cai ban da quyet dinh bo).
   const cached = getCache(route, payload);
   if (cached) return cached;
 
@@ -182,6 +186,9 @@ async function decideTriage({ taskCode = '', prompt = '', jobId = '' } = {}) {
     }
   }
 
+
+  // Gate Jev (kill-switch gateway, doc lap khoi CLI local AI triage).
+  if (!isEnabled()) { stats.fallbacks += 1; return policy.triageHeuristic({ prompt }); }
   // 2) Jev network: model gateway manh hon, giu nguyen de dung khi can.
   // Chi 2 cau hoi: is_quick + is_large. `need_browser` da bi bo - ket qua chi
   // duoc ghi vao log, khong quyet dinh gi => hoi model la ton call thua.
@@ -471,11 +478,9 @@ async function checkGuard({ taskCode, prompt, jobId }) {
 }
 async function checkTriage({ taskCode, prompt, jobId }) {
   try {
-    if (!isEnabled()) {
-      const d = policy.triageHeuristic({ prompt });
-      trackJobDecision(jobId, d, 'triage');
-      return d;
-    }
+    // KHONG gate `isEnabled()` o day: gate Jev nam TRONG `decideTriage` (sau khoi
+    // AI headless). Neu gate o day, SYSTEMONE_ENABLED=false se chan AI triage
+    // (CLI local) va quay ve heuristic regex - dung cai da quyet dinh bo.
     const d = await decideTriage({ taskCode, prompt, jobId });
     trackJobDecision(jobId, d, 'triage');
     return d;

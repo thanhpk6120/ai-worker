@@ -7,6 +7,9 @@ const assert = require('node:assert');
 const { describe, it } = require('node:test');
 
 process.env.SYSTEMONE_ENABLED = 'false';
+// AI triage (CLI local) chay TRUOC gate Jev => tat rieng de test file nay
+// thuc su offline (khong spawn `claude` that, khong ton 10-26s/test).
+process.env.AI_TRIAGE_ENABLED = 'false';
 
 const policy = require('../src/systemone/policy');
 const client = require('../src/systemone/client');

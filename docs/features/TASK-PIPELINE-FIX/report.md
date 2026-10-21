@@ -1,7 +1,7 @@
 ---
 feature: TASK-PIPELINE-FIX
 service: ai-worker
-status: done
+status: testing
 owner: AI
 updated_at: 2026-10-21
 ---
@@ -14,7 +14,7 @@ Phân tích task `bd88ae0a-da46-4d35-af4e-49252e16dade` (RSGATE-44, FAILED sau *
 
 **Đợt 2 (RC-23 → RC-28)**: điều tra lại job RSGATE-44 lần 2 (fail ở IMPLEMENT sau khi bấm Start 3 lần). Phát hiện 6 lỗi xếp chồng làm **timeout user bị hệ thống tự ghi đè từ 3600s xuống 300s**: triage regex phân loại sai + `confidence: 0.9` giả ⇒ tự bật quick mode; quick cap không dùng `fallbackMs`; PLANNING timeout bị coi là "xong" và sinh plan mẫu; IMPLEMENT timeout không đi qua retry; `quick_track` không có đường reset; quick mode chọn sai template.
 
-**Yêu cầu bổ sung**: triage **không** dùng regex mà gọi **1 lượt headless AI** trả JSON (không thinking) để đo độ phức tạp task.
+**Yêu cầu bổ sung**: triage **không** dùng regex mà gọi **1 lượt headless AI** trả JSON để đo độ phức tạp task. Code **không ép cờ tắt thinking**; chỉ quan sát được `thinking_tokens: 0` ở model hiện tại (xem mục 4.6).
 
 | Nhóm | Trạng thái | Bằng chứng |
 |---|---|---|
@@ -34,7 +34,7 @@ Phân tích task `bd88ae0a-da46-4d35-af4e-49252e16dade` (RSGATE-44, FAILED sau *
 | File | Mục đích |
 |---|---|
 | `src/execution/jobPolicy.js` | Quy tắc timeout/retry cho job: `resolveMaxRetries`, `resolveJobDeadlineMs`, `resolveDeadlineAt`, `resolveEffectiveTimeout`, `resolveRetryBackoffMs`, `detectRateLimit`. Tách riêng khỏi `server.js` để test độc lập. |
-| `src/execution/aiTriage.js` | **Mới (đợt 2)**: phân loại độ phức tạp task bằng **1 lượt gọi headless AI** (`claude -p --output-format json`, không thinking) trả JSON. Parse 3 tầng, validate/ép shape, scrub secret, cache RAM (TTL 1h), fallback fail-safe `{M, full, confidence 0.3}` (không tự bật quick track). |
+| `src/execution/aiTriage.js` | **Mới (đợt 2)**: phân loại độ phức tạp task bằng **1 lượt gọi headless AI** (`claude -p --output-format json --tools "" --strict-mcp-config --no-session-persistence`) trả JSON. Parse 3 tầng, validate/ép shape, scrub secret, cache RAM (TTL 1h), fallback fail-safe `{M, full, confidence 0.3}` (không tự bật quick track). Không truyền `jobId` (tránh kill nhầm process của job thật), `cwd = os.tmpdir()` (không nạp context repo). |
 | `src/verification/evidenceStore.js` | Nguồn chân lý evidence: đọc/ghi `metadata.json` (3 shape), chuẩn hóa 3 trạng thái, sort theo step, `setStatuses` giữ nguyên shape. |
 | `src/verification/evidenceWatcher.js` | Theo dõi thư mục evidence (`fs.watch` + debounce 500ms + fallback poll 2s) để đẩy evidence mới lên SSE realtime. |
 | `tests/timeoutRetry.test.js` | 28 test cho timeout/retry/rate-limit/backoff/deadline tuyệt đối. |
@@ -198,12 +198,17 @@ $ npm run test:verify-fix
 ```
 Trước đây: `complexity=S track=quick confidence=0.9` (heuristic regex, confidence hardcode) ⇒ quick cap 300000ms. Giờ: `M/full` ⇒ **không bật quick mode**.
 
-**Đo độ trễ lượt gọi** (không thinking):
+**Đo độ trễ lượt gọi** (đo thực tế, nhiều lần — dao động theo tải gateway):
 
 | Lệnh | Độ trễ | Output |
 |---|---|---|
-| `claude -p --output-format json` | ~4.5s | 1 object JSON, field `result` = text; `usage.output_tokens_details.thinking_tokens = 0` |
-| `omp -p --mode=json` | ~30s | 377 dòng JSONL (nhiễu) ⇒ chọn `claude` |
+| `claude -p --output-format json` (bản đầy đủ, có MCP) | ~10-17s, 69k input tokens | 1 object JSON, field `result` = text |
+| `claude -p --output-format json --tools "" --strict-mcp-config --no-session-persistence` (**bản dùng thật**) | **~11-22s**, ~16.8k input tokens | 1 object JSON, field `result` = text |
+| `omp -p --mode=json` | ~30s, 377 dòng JSONL | nhiễu, phải parse event `message_end` ⇒ chọn `claude` |
+
+**Về "không thinking"**: code **không truyền cờ tắt thinking**. Ở model đang dùng, `usage.output_tokens_details.thinking_tokens` trả `0` — đây là **quan sát**, không phải hành vi được ép. Nếu đổi sang model bật thinking mặc định thì con số này sẽ khác.
+
+**Tối ưu context**: `--tools ""` (tắt tool — quan trọng vì prompt triage chứa URL Jira + `admin/admin`, agent có thể bỏ lượt phân loại để đi mở URL) + `--strict-mcp-config` (bỏ MCP server của máy) + `--no-session-persistence` + `cwd = os.tmpdir()` (không nạp `AGENTS.md`/chỉ dẫn dự án) ⇒ input token từ ~69k xuống ~16.8k.
 
 **`resolveEffectiveQuickTrack` với job RSGATE-44 thật** (DB: `quick_track=true`, `timeout=3600000`):
 ```
@@ -329,15 +334,26 @@ Ngoài ra: `getEvidenceByJobId` (`db.js:588`) map mọi `verdict` ≠ `'FAIL'` t
 | `MultiVerificationGate` 4 kênh chưa chạy trong pipeline | Trung bình | RC-3 — cần feature riêng. Hiện pipeline dùng `verifyTaskEvidence` (đơn giản hơn). |
 | `PENDING` chờ người dùng có thể treo vô hạn | Trung bình | RC-15 — `pause_timeout` không có listener. Ngoài phạm vi feature này. |
 | Bảng SQLite `evidence` còn dead-code | Thấp | ADR-1 — không ảnh hưởng hành vi. |
+| **AI triage tốn thêm ~11-22s mỗi lần bấm Start** (timeout mặc định `AI_TRIAGE_TIMEOUT_MS=30000` ⇒ biên chỉ ~8s) | Trung bình | `handleJobStart` await triage **trước** khi trả HTTP response ⇒ nút Start treo đúng bằng thời gian gọi. Cache RAM 1h theo hash(prompt+title+timeout) giảm phần lớn số lần gọi lại cho cùng 1 task. Tắt bằng `AI_TRIAGE_ENABLED=false` (khi đó tự động rơi về heuristic ≤ 0.4 ⇒ **không** cắt timeout của bạn). |
+| **Triage KHÔNG tất định** — cùng 1 prompt có thể ra `M/full` (0.65) lần này, `L/full` (0.82) lần khác | Thấp | Hệ quả của việc dùng model thật thay regex. Đã ép `track==='quick' ⇒ complexity==='S'` để tránh mâu thuẫn nội tại, và cache 1h để 1 task không bị phân loại lại nhiều lần. Ngưỡng bật quick mode là `confidence >= 0.5` — với phân bố 0.55-0.65 quan sát được, ngưỡng này **có thể** vô tình bật quick mode cho task trung bình. |
 
 ---
 
 ## 8. Deploy
 
-Không có thay đổi DB schema, không có dependency mới, không có biến môi trường mới bắt buộc.
+Không có thay đổi DB schema, không có dependency mới.
 
-**Biến môi trường tùy chọn (mới):**
-- `job_deadline_ms` / `job_deadline_minutes` / `job_deadline_hours` trong `pipeline_config` của job — tổng ngân sách thời gian cho job. Không khai ⇒ không đặt deadline (giữ hành vi cũ).
+**Biến môi trường tùy chọn (mới) — đều có giá trị mặc định, không bắt buộc.** Xem `.env.example`:
+
+| Biến | Mặc định | Ý nghĩa |
+|---|---|---|
+| `AI_TRIAGE_ENABLED` | `true` | Kill-switch nhánh triage headless AI (độc lập `SYSTEMONE_ENABLED` là kill-switch gateway Jev). `false` ⇒ rơi về heuristic offline (≤ 0.4 ⇒ **không** cắt timeout của bạn). |
+| `AI_TRIAGE_TIMEOUT_MS` | `30000` | Timeout 1 lượt gọi AI triage (độc lập timeout của job). |
+| `AI_TRIAGE_CACHE_TTL_MS` | `3600000` | TTL cache kết quả triage trong RAM. |
+
+**Biến trong `pipeline_config` của job:**
+- `job_deadline_ms` / `job_deadline_minutes` / `job_deadline_hours` — tổng ngân sách thời gian cho job. Không khai ⇒ không đặt deadline (giữ hành vi cũ).
+- `quick_track` (`true` / `false` / không khai) + `quick_timeout_ms` — chế độ NHANH. Không khai `quick_track` ⇒ hệ thống tự quyết định theo AI triage.
 
 **Lệnh kiểm tra sau khi deploy:**
 ```bash

@@ -1,7 +1,7 @@
 ---
 feature: TASK-PIPELINE-FIX
 service: ai-worker
-status: done
+status: testing
 owner: AI
 updated_at: 2026-10-21
 ---
@@ -68,9 +68,9 @@ updated_at: 2026-10-21
 | H-9 | Bỏ `checkDedup` (→ `localDedup` hash local) + bỏ `checkPreJudge` (chỉ log, không quyết định) | ai-worker | `src/server.js`, `src/systemone/client.js` | ✅ |
 | **Phase I — Hiệu năng & tự điều hướng** ||||
 | I-1 | Chế độ NHANH cho task nhẹ: `pipeline_config.quick_track` + template `planning-quick.md` / `implement-quick.md` | ai-worker | `templates/prompt/planning-quick.md`, `templates/prompt/implement-quick.md`, `src/server.js` | ✅ |
-| I-2 | Timeout quick track: `jobPolicy.resolveQuickStepTimeoutMs()` (mặc định 5 phút/step) | ai-worker | `src/execution/jobPolicy.js`, `src/server.js` | ✅ |
+| I-2 | Timeout quick track: `jobPolicy.resolveQuickStepTimeoutMs()` — cap **chỉ áp khi user KHÔNG khai timeout tường minh** (timeout user luôn thắng), sàn 1 phút, không vượt timeout hiện có | ai-worker | `src/execution/jobPolicy.js`, `src/server.js` | ✅ |
 | **Phase J — Kiểm thử (bổ sung)** ||||
-| J-6 | TRIAGE chọn lọc: heuristic tức thì khi prompt rõ ràng, chỉ gọi model khi mơ hồ, chỉ 2 câu (bỏ `need_browser`) | ai-worker | `src/systemone/policy.js` (`triageSignals`), `src/systemone/client.js` (`decideTriage`) | ✅ |
+| J-6 | TRIAGE: **1 lượt gọi headless AI** (`claude -p --output-format json --tools ""`) trả JSON quyết định độ phức tạp → Jev network (2 câu, bỏ `need_browser`) → heuristic offline (≤ 0.4, không tự bật quick track) | ai-worker | `src/execution/aiTriage.js`, `src/systemone/client.js` (`decideTriage`) | ✅ |
 | J-7 | Sửa bug heuristic `quick` check trước `large` ⇒ "migrate..." bị nhầm là task nhẹ; thêm `fold()` bỏ dấu | ai-worker | `src/systemone/policy.js` | ✅ |
 | J-8 | Badge chỉ đổi khi model thật quyết định (bỏ qua `cached` / `attempt-limit` / `heuristic-fast`) | ai-worker | `src/systemone/client.js`, `src/server.js` | ✅ |
 | J-9 | Fix UI: typo `CHƯA GỠI` → `CHƯA GỌI`; đổi tham số `renderSystemOneBadge(state)` → `soState` (không che biến `state` toàn cục) | ai-worker | `public/app.js` | ✅ |
