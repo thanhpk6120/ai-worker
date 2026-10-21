@@ -2,7 +2,7 @@
 
 > **Ngày:** 2026-10-21 · **Commit khảo sát:** `acd6af8` (main) · **Phạm vi:** `public/` + `src/`
 > **Phương pháp:** đọc mã nguồn tĩnh + **đo đạc thực tế** trên instance đang chạy (PID 23624, port 3000) bằng HTTP client, Node script, và Chrome DevTools Protocol qua CloakBrowser.
-> **Trạng thái:** CHỈ PHÂN TÍCH. Không sửa file nào. `git status` sạch tại thời điểm viết báo cáo.
+> **Trạng thái:** CHỈ PHÂN TÍCH — **không sửa file source nào của dự án**. Xem mục §8b: quá trình đo có ghi 200 dòng thử nghiệm vào 1 file log thật, **đã được khôi phục và verify sạch**.
 
 ---
 
@@ -13,12 +13,15 @@
 | # | Nguyên nhân | Bằng chứng đo được | Sửa được bằng |
 |---|---|---|---|
 | **1** | `runnerRegistry.detectAll()` gọi **10 `spawnSync` blocking** trong mỗi request `/status`, `/health`, `/runners` | `/api/v1/status` = **1.435–1.595 s**; block **toàn bộ event loop**; mọi request khác (kể cả SSE, `/jobs`) phải xếp hàng | Cache TTL 60 s + `spawn` async |
-| **2** | SSE `/logs/stream` đọc **đồng bộ toàn bộ file log** rồi gửi 1 event khổng lồ (file lớn nhất **25,8 MB**) | `readFileSync` 25,8 MB = **178 ms** server; phía browser: **2 long task 393 ms + 545 ms**, JSON.stringify payload 23 MB = **163 ms** | Đọc chunk có offset + `Last-Event-ID`, giới hạn bytes |
-| **3** | Frontend render lại **toàn bộ danh sách job bằng `innerHTML`** mỗi 8 s + gọi `loadPlanFiles` mỗi SSE event | ~25–45 lần render/phút, ~25–40 HTTP request/phút, ~30–60 `marked.parse`/phút cho nội dung không đổi | Render tăng dần + cache/dedupe `loadPlanFiles` |
+| **2** | SSE `/logs/stream` đọc **đồng bộ toàn bộ file log** rồi gửi **1 event `log` duy nhất** chứa toàn bộ nội dung (file lớn nhất **25,8 MB** → payload **23,03 MB**) | `readFileSync` 25,8 MB = **178 ms** server; phía browser: **2 long task 393 ms + 545 ms**; xử lý text 22,3 MB = **843 ms**; `JSON.stringify` payload = **163 ms** | Đọc chunk có offset + `Last-Event-ID`, giới hạn bytes |
+| **3** *(phụ)* | Frontend render lại **toàn bộ danh sách job bằng `innerHTML`** mỗi 8 s + gọi `loadPlanFiles` mỗi SSE event | **Đo được:** render lại toàn bộ list = **11,76 ms/lần** (kể cả forced layout) × 7,5 lần/phút ≈ **88 ms/phút**. **Ước lượng (chưa đo):** `loadPlanFiles` sinh thêm ~20–40 HTTP + ~30–60 `marked.parse`/phút | Render tăng dần (0,02 ms/lần) + cache/dedupe `loadPlanFiles` |
 
-**Quyết định về ngôn ngữ: KHÔNG chuyển.** Chi tiết ở §5 — đã benchmark Node vs Python trên chính máy này, Python **không nhanh hơn** ở bất kỳ nút thắt nào, và chi phí chuyển đổi rất lớn so với chi phí sửa.
+> **Phân bổ vai trò — đo thay vì suy đoán:** nguyên nhân **#1 là nguyên nhân chính** (đứng yên 1,3 s mỗi 15 s, ảnh hưởng *mọi* thao tác của người dùng) và **#2 là nguyên nhân gây freeze cục bộ** (1,9 s khi mở job có log lớn). Nguyên nhân **#3 là phụ** — chi phí mỗi lần render đo được chỉ 11,76 ms; các con số tần suất render/phút, HTTP/phút, `marked.parse`/phút trong báo cáo đều là **ước lượng từ phân tích tĩnh mã nguồn, chưa đo trực tiếp** (xem §4.2–4.3).
 
-**Ước lượng:** sửa #1 + #2 + #3 (cơ bản) → **TTFB mọi endpoint < 50 ms**, **UI không còn freeze > 400 ms**, giảm ~70% request nền. Ước lượng **4–6 giờ công** cho phần lõi; không cần đổi ngôn ngữ.
+**Quyết định về ngôn ngữ: KHÔNG chuyển.** Chi tiết ở §5 — đã benchmark Node vs Python trên chính máy này: ở nút thắt subprocess, Python **nhanh hơn ở bản blocking** (1.109 ms vs 1.392 ms) nhưng **ngang bằng khi dùng async** (336 ms vs 365 ms); ở SQLite, Python **chậm hơn** (0,55 ms vs 0,49 ms/lần). Vấn đề là *blocking*, không phải ngôn ngữ — nên đổi ngôn ngữ **không mang lại lợi ích hiệu năng** mà chi phí chuyển đổi rất lớn.
+
+
+**Ước lượng (thứ tự ưu tiên theo tác động đo được):** sửa **#1** → **#2** → **#3** để đạt **TTFB mọi endpoint < 50 ms**, **UI không còn freeze > 400 ms**. Riêng #1 + #2 (~7,25 giờ) đã xử lý được phần lớn cảm nhận "lag"; #3 (~8,5 giờ) là tối ưu bổ sung. Tổng công sức **~15,75 giờ** (chi tiết §6). Không cần đổi ngôn ngữ.
 
 ---
 
@@ -157,11 +160,21 @@ MD5 25,8 MB (evidence hashing):  166,0 ms
 appendFileSync 200 dòng (file 25,8 MB): 50,7 ms  → 0,25 ms/dòng
 ```
 
-**Phía server → client:**
+**Phía server → client (đếm theo chuẩn SSE, tách frame bằng `\n\n`):**
 ```
-SSE first byte:                   528 ms
-bytes nhận 12 MB / 9 events:      nhận trong 753 ms
+TONG bytes stream:                     26,56 MB
+  event "log":        1 event,  data 23,03 MB, frame lớn nhất 23,03 MB   ← 1 event chứa TOÀN BỘ log
+  event "evidence":   6 event,  data 0,01 MB
+  event "status":     1 event
+  event "systemone":  1 event
+  event "message":    1 event
+  ────────────────────────────────────────────────────
+  TỔNG:               10 frame SSE
 ```
+
+> **Lưu ý về phương pháp đếm:** đếm bằng `chunk.count("event:")` cho ra **9** — con số này **sai**, vì 8 chuỗi `event: ` còn lại nằm *bên trong nội dung log* được escape trong JSON, không phải event SSE. Parse chuẩn theo frame (`\n\n`) cho kết quả **10 frame, đúng 1 event `log` chứa 23,03 MB**. Báo cáo này dùng số đo parse chuẩn.
+>
+> **SSE first byte: 528 ms.**
 
 **Phía browser (Chrome, longtask observer):**
 ```
@@ -221,9 +234,11 @@ innerHTML reassign:            1,06 ms
 append node mới (incremental): 0,02 ms   ← 590× rẻ hơn
 ```
 
-→ Với 50 job (~1.000 node): **~12 ms × 7,5 lần/phút = 90 ms/phút** chỉ để dựng lại danh sách không đổi.
+→ Với 7 job hiện tại: **11,76 ms × 7,5 lần/phút ≈ 88 ms/phút** chỉ để dựng lại danh sách không đổi. Với 50 job (~1.000 node) con số này **tăng theo số node**, nhưng **chưa đo trực tiếp ở quy mô 50 job** — ở mức 50 job ước lượng ~50–90 ms/lần.
+>
+> **Đánh giá mức độ:** đây là nút thắt **phụ**, không phải nguyên nhân chính của cảm nhận "lag". Lý do: dù dựng lại toàn bộ list, chi phí đo được chỉ **11,76 ms/lần** — nhỏ hơn 2 bậc độ lớn so với 1.435 s của #1 và ~1,9 s của #2. Tác động thật của #3 nằm ở **số lần render/phút** (xem ước lượng bên dưới), không nằm ở chi phí mỗi lần.
 
-### 4.3 `loadPlanFiles` — nút thắt nặng nhất phía client
+### 4.3 `loadPlanFiles` — nút thắt phụ, cần đo thêm để xác nhận
 
 ```
 app.js:1244   loadPlanFiles(job.id);     ← gọi trong renderActiveJobDetail()
@@ -231,26 +246,28 @@ app.js:3556+  fetch('/api/v1/tasks/{id}/plan-files')   (fallback: /api/v1/jobs/{
               → formatMarkdownContent() × 2  (marked.parse)
 ```
 
-`renderActiveJobDetail()` chạy mỗi SSE `status` event (5–15 lần/phút) **và** mỗi SSE `systemone` event (5–20 lần/phút). Mỗi lần:
+`renderActiveJobDetail()` được gọi mỗi SSE `status` event **và** mỗi SSE `systemone` event. Theo phân tích tĩnh mã nguồn, tần suất các event này vào khoảng **5–20 lần/phút** khi job đang chạy; mỗi lần:
 - **1–2 HTTP request** (fallback 404 → request thứ 2)
 - **2 `marked.parse`** cho `dualPlan` (`app.js:1469`, `1483`)
 - **2 `marked.parse`** nữa cho `plan-files` (`app.js:3580`, `3593`) — **trùng nội dung đã render**
 
-→ **20–40 HTTP request/phút + 30–60 `marked.parse`/phút** cho nội dung plan **không đổi**.
+> **Phân biệt rõ:** con số "**20–40 HTTP request/phút + 30–60 `marked.parse`/phút**" là **ƯỚC LƯỢNG từ phân tích tĩnh mã nguồn, chưa đo trực tiếp** (cần instrument đếm request trong 1 phút job chạy thật để xác nhận). Dù vậy, phần **chắc chắn đo được** là: mỗi lần gọi đều re-fetch + re-parse **cùng một nội dung plan không đổi** → đây là **lãng phí chắc chắn**, chỉ là mức độ lớn hay nhỏ còn cần đo.
+>
+> Vì vậy #3 được xếp là **nguyên nhân phụ**: có waste chắc chắn (không cần đo cũng nên sửa), nhưng **chưa chứng minh được là nguyên nhân chính** của cảm nhận lag.
 
 ### 4.4 `renderJobsList(true)` — vô hiệu hóa cache
 
 ```
 app.js:821   renderJobsList(true);      ← trong handler SSE 'systemone'
 ```
-Chữ ký cache (`app.js:944-947`) **đã chứa** `systemone_state.updatedAt` → `force=true` là thừa, gây dựng lại list 5–20 lần/phút.
+Chữ ký cache (`app.js:944-947`) **đã chứa** `systemone_state.updatedAt` → `force=true` là thừa, gây dựng lại list mỗi SystemOne event. Số lần/phút là **ước lượng** (theo tần suất event, §4.3).
 
 ### 4.5 Tailwind Play CDN — runtime CSS compiler
 
 ```
 index.html:9   <script src="https://cdn.tailwindcss.com"></script>
 ```
-Tailwind Play CDN **quét DOM + biên dịch CSS runtime** bằng `MutationObserver`. Mỗi lần `innerHTML` thay đổi (25–45 lần/phút) → style recalc O(DOM).
+Tailwind Play CDN **quét DOM + biên dịch CSS runtime** bằng `MutationObserver`. Mỗi lần `innerHTML` thay đổi → style recalc O(DOM). (Số lần render/phút là ước lượng — xem §4.3.)
 
 Đo được: **1.307 CSS rule / 110,9 KB** sinh runtime; style tag Tailwind 29.107 ký tự.
 
@@ -307,7 +324,7 @@ Python sqlite3:   0,55 ms/lần
 | **Tác động UI** | Frontend là vanilla JS + xterm.js + Tailwind — **không đổi ngôn ngữ** → không có tác động nào lên hiệu năng render |
 | **Ước lượng công sức** | Port + verify độ chính xác tuyệt đối: **15–25 ngày công**, rủi ro cao |
 
-**Trong khi sửa 3 nguyên nhân gốc: ~4–6 giờ công.**
+**Trong khi sửa 3 nguyên nhân gốc: ~15,75 giờ công (P0 1,25 h + P1 6 h + P2 8,5 h — chi tiết §6).**
 
 ### 5.3 Ngôn ngữ khác (Go / Rust) — cũng không khắc phục được
 
@@ -354,8 +371,8 @@ Chỉ giúp được phần "ngôn ngữ nhanh hơn" — mà **đo được là 
 
 | # | Hành động | File | Công sức | Hiệu quả |
 |---|---|---|---|---|
-| 8 | Cache + dedupe `loadPlanFiles` theo `jobId` + hash nội dung | `public/app.js:1244, 3556` | 1,5 giờ | −20–40 HTTP/phút, −30–60 `marked.parse`/phút |
-| 9 | Bỏ `force=true` ở `renderJobsList(true)` | `public/app.js:821` | 5 phút | −5–20 lần dựng list/phút |
+| 8 | Cache + dedupe `loadPlanFiles` theo `jobId` + hash nội dung | `public/app.js:1244, 3556` | 1,5 giờ | Loại bỏ waste chắc chắn: bỏ re-fetch + re-parse cùng nội dung không đổi *(giảm ước lượng ~20–40 HTTP + ~30–60 `marked.parse`/phút)* |
+| 9 | Bỏ `force=true` ở `renderJobsList(true)` | `public/app.js:821` | 5 phút | Bỏ dựng lại list không cần thiết *(ước lượng ~5–20 lần/phút)* |
 | 10 | Render danh sách tăng dần + delegate listener | `public/app.js:984, 1037` | 3 giờ | 12 ms → 0,02 ms/lần; O(n) → O(changed) |
 | 11 | Debounce ô search | `public/app.js:380-383` | 15 phút | Không dựng lại list mỗi ký tự |
 | 12 | `AbortController` cho mọi fetch | `public/app.js:630, 652, 3565, 673` | 1 giờ | Hết race + request chồng nhau |
@@ -456,4 +473,4 @@ Tất cả file script đo đã được chuyển vào **Recycle Bin** (`temp/_p
 
 ## 9. Tóm tắt một dòng
 
-> UI chậm vì **server chặn event loop 1,3 s mỗi 15 s** (`spawnSync` detect runner), **SSE đẩy 23 MB log một lần** (freeze 1,9 s), và **frontend dựng lại toàn bộ DOM 25–45 lần/phút** cho dữ liệu không đổi — **không phải vì Node.js**; benchmark cùng máy cho thấy Python ngang bằng hoặc kém Node ở cả hai nút thắt, nên sửa 3 nguyên nhân gốc (~15 giờ) là đủ, chuyển ngôn ngữ (~15–25 ngày) là quyết định sai.
+> UI chậm chủ yếu vì **server chặn event loop 1,3 s mỗi 15 s** (`spawnSync` detect runner — đo được, nguyên nhân chính), kèm **SSE đẩy 1 event chứa 23,03 MB log** gây freeze ~1,9 s khi mở job có log lớn (đo được). Phần **frontend dựng lại DOM** là nút thắt **phụ** (đo được 11,76 ms/lần ≈ ~88 ms/phút; tần suất render/phút và `loadPlanFiles` là **ước lượng, chưa đo**) — **không phải vì Node.js**: benchmark cùng máy cho thấy Python nhanh hơn ở bản blocking nhưng ngang bằng khi dùng async, và chậm hơn ở SQLite, nên đổi ngôn ngữ **không mang lại lợi ích hiệu năng**. Sửa #1 + #2 trước (~7,25 giờ) là xử lý được phần lớn cảm nhận lag, thêm #3 (~8,5 giờ) để tối ưu bổ sung — tổng ~15,75 giờ. Chuyển ngôn ngữ (~15–25 ngày) là quyết định sai.

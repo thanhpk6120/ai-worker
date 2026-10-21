@@ -2160,6 +2160,23 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
                     text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: File evidence chưa được khai trong metadata.json nên không chứng minh cho test case nào: ${undeclared.join(', ')}. Agent phải mapping mỗi file với đúng test case trong plan!\n`
                   });
                 }
+                // CHIEU NGUOC: file KHAI trong metadata.json nhung KHONG TON TAI tren dia
+                // => bang chung khong co that. Job RSGATE-44: metadata khai 17 file,
+                // evidence/ chi con metadata.json -> co the PASS voi 0 bang chung.
+                // Do chinh xac phai tuyet doi => file khai ma thieu = FAIL.
+                const missingOnDisk = [];
+                for (const d of declared) {
+                  const base = path.basename(String(d).replace(/\\/g, '/'));
+                  if (!base || base === 'metadata.json') continue;
+                  const abs = path.join(evidenceDir, base);
+                  if (!fs.existsSync(abs)) missingOnDisk.push(base);
+                }
+                if (missingOnDisk.length > 0) {
+                  agentFailed = true;
+                  jobEventBus.emitJobLog(id, {
+                    text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: ${missingOnDisk.length} file bằng chứng được khai trong metadata.json nhưng KHÔNG tồn tại trên đĩa: ${missingOnDisk.slice(0, 20).join(', ')}${missingOnDisk.length > 20 ? ', ...' : ''}. Agent phải tạo đúng các file bằng chứng này (đường dẫn tuyệt đối trong metadata.json phải trỏ tới file thật)!\n`
+                  });
+                }
               } else {
                 // Bắt buộc schema tests[] non-empty: metadata parse được nhưng không liệt kê case nào là FAIL
                 agentFailed = true;
