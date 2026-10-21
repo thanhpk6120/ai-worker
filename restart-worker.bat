@@ -29,10 +29,15 @@ if not errorlevel 1 (
 echo Port %PORT% da tu do.
 
 echo [3/4] Start nen: node src/index.js ...
-REM Xoa bien SystemOne ke thua tu shell cha truoc khi start (gia tri cu se che do .env).
+REM Dung worker-control.js: spawn DETACHED (tiến trình con của explorer).
+REM Ban cua `start "" /MIN cmd /c` => tien trinh thuoc cay con cua shell cha,
+REM bi reap khi shell agent dong => worker chet giua chung (step de lai RUNNING mo coi).
 call "%~dp0clear-systemone-env.bat"
-start "" /MIN cmd /c "node src/index.js >> %LOGFILE% 2>&1"
-ping -n 4 127.0.0.1 >nul
+node scripts\worker-control.js start
+if errorlevel 1 (
+  echo Loi: khong start duoc worker. Xem %LOGFILE%.
+  exit /b 1
+)
 
 echo [4/4] Kiem tra /api/v1/status ...
 curl -s -o nul -w "HTTP %%{http_code}\n" http://localhost:%PORT%/api/v1/status
