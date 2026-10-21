@@ -45,6 +45,13 @@ Nhiệm vụ của bạn là khảo sát codebase tại workspace và lập kế
    - Task trung bình/phức tạp: test_plan BẮT BUỘC đủ case chi tiết, giữ tối thiểu 100 dòng như Bước 4b, KHÔNG được rút gọn test plan theo dev_plan.
 3. Ghi dòng kết luận dạng: Mức độ khó: ĐƠN GIẢN / TRUNG BÌNH / PHỨC TẠP + lý do 1 dòng.
 
+## 🔒 PHẠM VI ĐỌC (BẮT BUỘC):
+1. Chỉ được đọc file trong **`{{WORKSPACE_PATH}}`** và **`{{FEATURE_DIR}}`**.
+2. **TUYỆT ĐỐI KHÔNG** đọc/grép ngoài 2 thư mục trên — đặc biệt KHÔNG đọc thư mục log/hạ tầng của hệ thống điều phối (ví dụ `ai-worker/logs`, `ai-worker/src`, thư mục `.git`).
+   - Thư mục đó **không liên quan** tới task, đọc vào chỉ là lãng phí thời gian và có thể làm lộ thông tin nội bộ.
+   - Nếu cần hiểu hành vi của một script/lệnh chưa rõ: đọc script đó trong `{{FEATURE_DIR}}/runtime/` hoặc trong `{{WORKSPACE_PATH}}`, KHÔNG đi tìm log của hệ thống.
+3. Mọi đường dẫn ngoài phạm vi → bỏ qua, ghi 1 dòng `[PLANNING-SCOPE] bỏ qua: <path>` rồi tiếp tục.
+
 ## Hướng dẫn thực thi:
 1. **BƯỚC 0 — KIỂM TRA MCP KHI BẮT ĐẦU (1 lần duy nhất, không lặp lại mỗi turn):** Đọc mục `🔌 DANH SÁCH MCP SERVERS` ở trên một lần ở đầu phiên để biết có tool Jira/Confluence/Browser nào khả dụng hay không. Các tác vụ đọc tài liệu và mã nguồn local: BẮT BUỘC ưu tiên dùng native tool (`read`/`grep`), TUYỆT ĐỐI KHÔNG spam dòng suy nghĩ hay log "Không MCP dùng được..." trước mỗi thao tác file.
 2. BẮT BUỘC truy cập thư mục docs của workspace (ví dụ docs/, docs/features/, README.md, ARCHITECTURE.md, DESIGN.md, DB schema) để lấy: kiến trúc dự án, sơ đồ module/service, hướng dẫn run service, lệnh build/chạy service, port/API endpoint, biến môi trường và prerequirement. Ghi các lệnh run service và port đã phát hiện vào dev_plan.md để các bước sau (IMPLEMENT/TESTING) dùng lại, tránh tự suy đoán lệnh chạy.
