@@ -54,6 +54,7 @@ Bạn là Kỹ sư phần mềm. Task **{{TASK_CODE}}** nhẹ — cần kế ho�
 ## 3. Bằng chứng cần thu
 - (loại evidence: ảnh UI / API response / log / DB query — chỉ những gì thực sự cần)
 ```
+> **Lưu ý phạm vi:** Phần "Bằng chứng cần thu" chỉ là KẾ HOẠCH cho BƯỚC TESTING. Bước IMPLEMENT không tạo evidence, không tạo/sửa `evidence/metadata.json`. Evidence mới mặc định có trạng thái `NOT VERIFY`, chỉ bước VERIFY mới xác nhận `PASS`/`FAILED`. TUYỆT ĐỐI KHÔNG tự đánh dấu `PASSED`.
 
 ## 🔒 QUY TẮC BẮT BUỘC:
 1. **Mọi tài liệu phải nằm trong `{{FEATURE_DIR}}`.** TUYỆT ĐỐI KHÔNG tạo file rải rác ngoài feature folder.

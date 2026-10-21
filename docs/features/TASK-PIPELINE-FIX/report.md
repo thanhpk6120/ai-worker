@@ -235,6 +235,49 @@ explicit timeout  : 3600000
 
 **Hồi quy**: 221/221 `npm test` PASS · `node --check` OK cho `src/server.js`, `src/config.js`, `src/execution/aiTriage.js`, `src/execution/jobPolicy.js`, `src/systemone/client.js`, `public/app.js`.
 
+### 4.7 Verify đợt 3 — Vòng đời evidence & Thời lượng thực (2026-10-21)
+
+**Evidence mới luôn `NOT VERIFY`** — đọc metadata thật của job RSGATE-44 (agent tự ghi `tests[].status: "PASSED"`):
+```
+shape = tests | records = 30
+PASS = 0 | NOT VERIFY = 30 | other = 0
+  01_ui_doi_soat_ung_dung_tich_hop_list.png => status=NOT VERIFY verdict=null verified=false
+```
+Trước: cả 30 hiện **PASS** (agent tự khai) mà chưa qua VERIFY.
+
+**Vòng tròn đóng kín** (test thật, shape `tests[]`):
+
+| Bước | Kết quả |
+|---|---|
+| Đọc lần 1 (agent tự khai `PASSED`/`FAILED`) | `a.png=NOT VERIFY`, `b.log=NOT VERIFY` |
+| VERIFY gọi `setStatuses({a.png:'PASS', b.log:'FAILED'})` | `a.png=PASS/PASS`, `b.log=FAILED/FAIL` |
+| `metadata.json` sau VERIFY | `evidenceStatus: {"a.png":{...,"verified":true}, "b.log":{...,"verified":true}}` |
+| Agent ghi đè `metadata.json` (xoá `evidenceStatus`) | quay về `NOT VERIFY` (fail-safe, không giữ PASS giả) |
+
+**Transition PASS → FAILED vẫn hoạt động** (đã kiểm tra cả 2 shape `tests[]` và `array`): `setStatuses` giữ `verified: true` ⇒ evidence đã PASS **có thể** bị đánh FAILED ở lần verify sau.
+
+**"Thời lượng" = runtime thực** — job RSGATE-44 (`steps` thật trong DB):
+
+| Step | Thời gian |
+|---|---|
+| PLANNING (lần 1) | 301s |
+| IMPLEMENT (lần 1, CANCELLED) | 64s |
+| PLANNING (lần 2) | 302s |
+| IMPLEMENT (lần 2, TIMED_OUT) | 302s |
+| PLANNING (lần 3) | 1904s |
+| IMPLEMENT (lần 3) | 1908s |
+| TESTING | 3601s |
+| FIXING (FAILED) | 2s |
+| **TỔNG runtime** | **8385s (2h20m)** |
+
+Wall-clock (`created_at → completed_at`) là ~6h (bao gồm thời gian chờ user + thời gian job nằm im). API mới trả `runtime_ms = 8384561`.
+
+**UI**: mở job RSGATE-44 ⇒ "Thời lượng: **02:19:44**" — khớp `runtime_ms`.
+
+**API evidence**: 17 evidence, `{"NOT VERIFY": 17}` (trước khi sửa: agent tự khai PASS).
+
+**Hồi quy**: 245/245 `npm test` PASS (thêm 3 file test mới: `runtimeAccounting`, `evidenceNotVerifyGate`, `evidenceNotVerifyEndToEnd`, `implementContextNoEvidence`).
+
 ## 5. Bug phát hiện trong quá trình verify UI (đã sửa)
 
 `escapeHtml(item.order)` — `order` là **number** (1/2/3) nhưng `escapeHtml` gọi `str.replace()` → `TypeError` ngay trong `.map()` ⇒ `uiGallery.innerHTML` không bao giờ được set ⇒ gallery giữ nguyên markup tĩnh của `index.html`, còn badge đã set trước đó ⇒ triệu chứng "3 mục" + 0 card. Exception bị nuốt trong `try/catch` của `fetchJobDetails` nên không có console error.

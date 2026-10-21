@@ -60,6 +60,10 @@ Nhiệm vụ của bạn là khảo sát codebase tại workspace và lập kế
          * `DB_ASSERT`: Chọn nếu task có sửa đổi schema hoặc dữ liệu DB.
        - Lưu ý: Hệ thống Worker sẽ đối soát chặt chẽ ở bước VERIFY (sau TESTING). Nếu `test_plan.md` đánh dấu kênh nào mà bước VERIFY không tìm thấy bằng chứng hợp lệ của kênh đó, task sẽ bị coi là FAILED và bắt buộc chuyển FIXING để làm lại!
    - **Bước 4c. CHỈ khi Mức độ khó = PHỨC TẠP: ghi thêm 3 tệp chỉ dẫn per-step (KHÔNG ghi đè outputFile của bước sau):**
+     * **PHẠM VI — KẾ HOẠCH BẰNG CHỨNG NÀY LÀ VIỆC CỦA BƯỚC TESTING, KHÔNG PHẢI IMPLEMENT:**
+       - Bước IMPLEMENT chỉ sửa mã nguồn + viết/thêm unit test cho các hàm bị ảnh hưởng. TUYỆT ĐỐI KHÔNG tạo file evidence, KHÔNG tạo hay sửa `evidence/metadata.json`.
+       - Bước TESTING mới là bước tạo file evidence và `metadata.json`. Trạng thái mặc định của mọi evidence mới là `NOT VERIFY`; chỉ bước VERIFY mới xác nhận `PASS`/`FAILED`.
+       - TUYỆT ĐỐI KHÔNG tự đánh dấu `PASSED` trong `test_plan.md` hay `metadata.json` — chỉ mô tả kỳ vọng, còn kết quả thật do TESTING/VERIFY xác nhận.
      * Ghi vào `{{FEATURE_DIR}}/prompts/implement.md`, `{{FEATURE_DIR}}/prompts/testing.md`, `{{FEATURE_DIR}}/prompts/fixing.md` (tự tạo thư mục `prompts/` nếu chưa có).
      * Mỗi tệp chỉ chứa chỉ dẫn ĐẶC THÙ theo scope task: module/service trọng tâm, file trọng tâm, thứ tự làm, bẫy thường gặp, tiêu chí xong của bước đó dựa trên dev_plan.md/test_plan.md.
      * KHÔNG lặp lại guardrail hệ thống (vị trí file, MCP-first, evidence), KHÔNG ghi secret/token/password, KHÔNG đoán trước nội dung runtime chưa có (`report.md`, `ERROR_LOGS`). Worker sẽ tự ghép 3 tệp này vào template chuẩn của từng bước lúc runtime.

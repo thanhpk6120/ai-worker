@@ -781,6 +781,21 @@
       }
     });
 
+    // Custom Named Event: runtime (thoi luong worker thuc su chay task)
+    state.eventSource.addEventListener('runtime', (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        if (!payload || !payload.jobId) return;
+        if (state.activeJob && state.activeJob.id === payload.jobId) {
+          state.activeJob.runtime_ms = Number(payload.runtime_ms) || 0;
+          if (payload.status) state.activeJob.status = payload.status;
+          renderActiveJobDuration();
+        }
+      } catch (e) {
+        console.warn('Runtime event error:', e);
+      }
+    });
+
     // Custom Named Event: systemone (trang thai SystemOne CUA TASK NAY)
     state.eventSource.addEventListener('systemone', (event) => {
       try {
@@ -1050,6 +1065,9 @@
   function renderActiveJobDetail() {
     const job = state.activeJob;
     if (!job) return;
+
+    // "Thoi luong" = thoi gian worker thuc su chay (runtime_ms tu server).
+    renderActiveJobDuration();
 
     // Header info
     const idBadge = document.getElementById('activeJobIdBadge');
@@ -1913,17 +1931,32 @@
     if (uptimeEl) {
       uptimeEl.textContent = formatDuration(state.systemStatus.uptimeSeconds);
     }
+    renderActiveJobDuration();
+  }
 
-    if (state.activeJob && state.activeJob.created_at) {
-      const durationEl = document.getElementById('activeJobDuration');
-      if (durationEl) {
-        const start = new Date(state.activeJob.created_at).getTime();
-        const end = state.activeJob.completed_at
-          ? new Date(state.activeJob.completed_at).getTime()
-          : Date.now();
-        const seconds = Math.max(0, Math.floor((end - start) / 1000));
-        durationEl.textContent = formatDuration(seconds);
-      }
+  // Render "Thoi luong" cua job dang xem.
+  // "Thoi luong" = thoi gian worker THUC SU chay task, khong phai wall-clock
+  // tu created_at (sai: tinh ca thoi gian cho queue + thoi gian cho user).
+  // `runtime_ms` do server cong don tu cac doan `steps` da/đang chay.
+  function renderActiveJobDuration() {
+    if (!state.activeJob) return;
+    const durationEl = document.getElementById('activeJobDuration');
+    if (!durationEl) return;
+
+    const runtimeMs = Number(state.activeJob.runtime_ms);
+    if (Number.isFinite(runtimeMs)) {
+      durationEl.textContent = formatDuration(Math.floor(runtimeMs / 1000));
+      return;
+    }
+
+    // Job cu (API chua co runtime_ms) => fallback ve wall-clock.
+    if (state.activeJob.created_at) {
+      const start = new Date(state.activeJob.created_at).getTime();
+      const end = state.activeJob.completed_at
+        ? new Date(state.activeJob.completed_at).getTime()
+        : Date.now();
+      const seconds = Math.max(0, Math.floor((end - start) / 1000));
+      durationEl.textContent = formatDuration(seconds);
     }
   }
 

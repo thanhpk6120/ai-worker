@@ -101,6 +101,34 @@ class FileManager {
   }
 
   /**
+   * Bỏ các mục "bằng chứng" (evidence) khỏi nội dung markdown.
+   * Dùng cho bước IMPLEMENT: kế hoạch thu evidence là việc của bước TESTING,
+   * IMPLEMENT không tạo evidence nên không cần đọc phần đó.
+   */
+  stripEvidenceSections(content) {
+    if (!content) return content;
+    const lines = String(content).split(/\r?\n/);
+    const isEvidenceHeading = (t) => /b[aă]ng\s*ch[aứ]ng|bang\s*chung|evidence/i.test(t);
+    const headingLevel = (line) => {
+      const m = /^(#{1,6})\s/.exec(line);
+      return m ? m[1].length : 0;
+    };
+    const out = [];
+    let skipLevel = 0;
+    for (const line of lines) {
+      const lvl = headingLevel(line);
+      if (skipLevel) {
+        // Đang bỏ mục -> dừng khi gặp heading cùng cấp hoặc cao hơn.
+        if (lvl && lvl <= skipLevel) skipLevel = 0;
+        else continue;
+      }
+      if (lvl && isEvidenceHeading(line)) { skipLevel = lvl; continue; }
+      out.push(line);
+    }
+    return out.join('\n');
+  }
+
+  /**
    * Đảm bảo thư mục feature và thư mục evidence tồn tại
    * @param {string} workspacePath Đường dẫn workspace
    * @param {string} taskCode Mã task
@@ -252,13 +280,20 @@ ${prompt || 'Không có mô tả chi tiết.'}
 
     let context = '';
     let filesToLoad = [];
-    
+
     const stepLower = step ? String(step).toLowerCase() : null;
+    // Bước IMPLEMENT (kể cả implement-quick): bỏ mục bằng chứng khỏi test_plan.md.
+    const isImplementStep = stepLower === 'implement' || stepLower === 'implement-quick';
+    let stripEvidenceFrom = null;
     
     if (stepLower === 'planning') {
       filesToLoad = ['expect.md', 'context.md'];
-    } else if (stepLower === 'implement') {
+    } else if (isImplementStep) {
       filesToLoad = ['dev_plan.md', 'test_plan.md'];
+      // Bước IMPLEMENT không được thấy phần "bằng chứng" của test_plan.md:
+      // kế hoạch thu evidence là việc của bước TESTING, còn IMPLEMENT chỉ
+      // sửa mã nguồn + viết unit test cho hàm bị ảnh hưởng.
+      stripEvidenceFrom = 'test_plan.md';
       if (!fs.existsSync(path.join(dir, 'dev_plan.md')) && fs.existsSync(path.join(dir, 'plan.md'))) {
         filesToLoad.push('plan.md');
       }
@@ -281,6 +316,9 @@ ${prompt || 'Không có mô tả chi tiết.'}
         const fullPath = path.join(dir, file);
         if (fs.existsSync(fullPath)) {
           let fileContent = fs.readFileSync(fullPath, 'utf-8');
+          if (stripEvidenceFrom && file === stripEvidenceFrom) {
+            fileContent = this.stripEvidenceSections(fileContent);
+          }
           if (fileContent.length > MAX_SECTION_LENGTH) {
             fileContent = fileContent.substring(0, MAX_SECTION_LENGTH) + '\n... [Nội dung đã bị cắt bớt do vượt quá giới hạn 8,000 ký tự để tránh tràn bộ đệm CLI]';
           }

@@ -19,6 +19,12 @@ class PromptTemplateManager {
       return fs.readFileSync(fullPath, 'utf-8');
     }
     // Fallback template mặc định nếu không tìm thấy file
+    // Bước IMPLEMENT: cấm tạo evidence (chỉ sửa code + unit test hàm bị ảnh hưởng).
+    const isImplement = /^implement/i.test(String(step || ''));
+    const evidenceMention = isImplement ? '' : 'ảnh chụp màn hình bằng chứng (evidence/*.png), ';
+    const implementRule = isImplement
+      ? `3. **BƯỚC IMPLEMENT KHÔNG ĐƯỢC TẠO EVIDENCE:** TUYỆT ĐỐI KHÔNG tạo file nào trong {{FEATURE_DIR}}/evidence/ và KHÔNG tạo hay sửa evidence/metadata.json. Chỉ sửa mã nguồn + viết/thêm unit test cho các hàm bị ảnh hưởng.\n`
+      : '';
     return `# Template Prompt cho bước ${step.toUpperCase()}
 
 Task: {{TASK_CODE}}
@@ -27,8 +33,9 @@ Workspace: {{WORKSPACE_PATH}}
 Thư mục Feature bắt buộc: {{FEATURE_DIR}}
 
 ## ⚠️ QUY TẮC BẮT BUỘC VỀ VỊ TRÍ TỆP TIN:
-1. Tất cả tài liệu, dữ liệu, ảnh chụp màn hình bằng chứng (evidence/*.png), logs BẮT BUỘC phải tạo bên trong: {{FEATURE_DIR}}
+1. Tất cả tài liệu, dữ liệu, ${evidenceMention}logs BẮT BUỘC phải tạo bên trong: {{FEATURE_DIR}}
 2. CHỈ KHI sửa code: Mới xác định service cần sửa ở workspace {{WORKSPACE_PATH}} và sửa tại service đó.
+${implementRule}
 
 {{PREVIOUS_CONTEXT}}
 

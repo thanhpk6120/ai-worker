@@ -92,6 +92,17 @@ updated_at: 2026-10-21
 | K-6 | `quick_track` có **đường reset**: `POST /api/v1/jobs/:id/quick-track` (`auto`/`on`/`off`) + select 3 trạng thái trong UI | ai-worker | `src/server.js`, `public/app.js`, `public/index.html` | ✅ |
 | K-7 | Quick mode hiệu lực dùng chung cho **cả cap timeout lẫn template** (`planning-quick`/`implement-quick`) | ai-worker | `src/server.js` (`resolveEffectiveQuickTrack`) | ✅ |
 | K-8 | Kill-switch `AI_TRIAGE_ENABLED` (độc lập `SYSTEMONE_ENABLED`) + test triage không gọi CLI thật | ai-worker | `src/config.js`, `tests/systemoneJobState.test.js` | ✅ |
+| **Phase L — Vòng đời evidence & Thời lượng thực** ||||
+| L-1 | Ngưỡng bật quick mode `confidence >= 0.5` → **`0.7`** (hằng số `QUICK_TRACK_MIN_CONFIDENCE`); phân bố quan sát 0.6-0.68 ⇒ ngưỡng cũ vô tình bật quick cho task trung bình | ai-worker | `src/server.js` | ✅ |
+| L-2 | **IMPLEMENT không tạo evidence**: bỏ `evidence/*.png` khỏi danh sách file được phép tạo + thêm quy tắc cấm tạo file trong `evidence/` và cấm tự viết `metadata.json` | ai-worker | `templates/prompt/implement.md`, `implement-quick.md`, `src/runners/promptTemplateManager.js` | ✅ |
+| L-3 | IMPLEMENT bắt buộc **viết/thêm unit test cho các hàm bị ảnh hưởng** (test nằm trong source tree, KHÔNG phải evidence) | ai-worker | `templates/prompt/implement.md`, `implement-quick.md` | ✅ |
+| L-4 | `test_plan.md` cắt mục "Bằng chứng" khi nạp context cho step `implement` ⇒ IMPLEMENT không thấy kế hoạch evidence | ai-worker | `src/storage/fileManager.js` (`stripEvidenceSections`) | ✅ |
+| L-5 | **Evidence mới luôn `NOT VERIFY`**: chỉ bước VERIFY mới được gán PASS/FAILED (cờ `verified: true`); agent tự khai `PASSED` trong `metadata.json` bị bỏ qua | ai-worker | `src/verification/evidenceStore.js` (`isVerified`, `suppressUnverified`) | ✅ |
+| L-6 | TESTING/FIXING không tự gán `PASSED` trong `metadata.json` | ai-worker | `templates/prompt/testing.md`, `fixing.md`, `planning.md`, `planning-quick.md` | ✅ |
+| L-7 | **"Thời lượng" = thời gian worker thực sự chạy** (tổng các đoạn `steps` đã/đang chạy), không phải `completed_at - created_at` | ai-worker | `src/server.js` (`computeJobRuntimeMs`), `public/app.js` | ✅ |
+| L-8 | Mỗi lần chạy = 1 row `steps` riêng (bỏ nuốt `prev.phase === phase`) ⇒ retry/chạy lại không bị mất thời gian | ai-worker | `src/server.js` (`beginStepTimeline`) | ✅ |
+| L-9 | Job dừng (PENDING chờ user, TO DO, DONE…) ⇒ **đóng đoạn đang mở ⇒ ngừng đếm**; resume ⇒ mở đoạn mới ⇒ tiếp tục đếm | ai-worker | `src/server.js` (`emitJobStatus`) | ✅ |
+| L-10 | API trả `runtime_ms` + SSE event `runtime` tick 1s; UI hiển thị từ `runtime_ms` (fallback wall-clock cho job cũ) | ai-worker | `src/server.js`, `public/app.js` | ✅ |
 
 ## Ghi chú
 

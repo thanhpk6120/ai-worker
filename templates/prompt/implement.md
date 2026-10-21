@@ -22,9 +22,10 @@ Nhiệm vụ của bạn là hiện thực hóa toàn bộ mã nguồn của tas
 
 ## ⚠️ QUY TẮC BẮT BUỘC VỀ VỊ TRÍ TỆP TIN (MANDATORY FILE STORAGE RULES):
 1. **MỌI TÀI LIỆU, DATA, ẢNH, BẰNG CHỨNG PHẢI NẰM TRONG FEATURE FOLDER:**
-   - Tất cả các tệp tài liệu kỹ thuật bổ sung (`report.md`, `deploy.md`, ghi chú phát sinh...), tệp dữ liệu kiểm thử (`data/`), tệp ảnh màn hình bằng chứng (`evidence/*.png`), và log thực thi **BẮT BUỘC PHẢI TẠO BÊN TRONG**:
+   - Tất cả các tệp tài liệu kỹ thuật bổ sung (`report.md`, `deploy.md`, ghi chú phát sinh...), tệp dữ liệu kiểm thử (`data/`), và log thực thi **BẮT BUỘC PHẢI TẠO BÊN TRONG**:
      👉 `{{FEATURE_DIR}}`
    - TUYỆT ĐỐI KHÔNG tạo tệp tài liệu, ảnh, evidence rải rác ngoài thư mục gốc workspace hoặc các thư mục khác.
+   - **BƯỚC IMPLEMENT KHÔNG ĐƯỢC TẠO EVIDENCE:** TUYỆT ĐỐI KHÔNG tạo bất kỳ file nào trong `{{FEATURE_DIR}}/evidence/` (không ảnh `.png`/`.webp`, không log, không file kết quả), và **KHÔNG tạo hay sửa `evidence/metadata.json`**. Thư mục `evidence/` là nơi BƯỚC TESTING ghi bằng chứng thật.
 2. **QUY TẮC SỬA MÃ NGUỒN (CODE REPOSITORY):**
    - CHỈ KHI SỬA CODE / VIẾT MÃ NGUỒN: Bạn mới xác định service/module cần sửa trong workspace `{{WORKSPACE_PATH}}` (dựa trên bản thiết kế trong `dev_plan.md`) và chỉ sửa đổi các tệp mã nguồn thuộc service đó.
    - Không được sửa đổi mã nguồn hoặc tạo file rác bên ngoài service/module liên quan.
@@ -44,9 +45,14 @@ Nhiệm vụ của bạn là hiện thực hóa toàn bộ mã nguồn của tas
 3. **CHỈ XÁC MINH CÚ PHÁP NHANH — CẤM CHẠY TEST SUITE LỚN:**
    - Sau khi sửa code xong, CHỈ chạy kiểm tra cú pháp nhanh cục bộ (`mvn test-compile`, `npx tsc`, `node --check`).
    - TUYỆT ĐỐI KHÔNG chạy toàn bộ test suite lớn hay kiểm thử E2E (việc chạy kiểm thử toàn diện thuộc về phase TESTING tiếp theo).
-4. **GHI BÁO CÁO VÀ KẾT THÚC NGAY:**
+4. **BẮT BUỘC VIẾT/THÊM UNIT TEST CHO CÁC HÀM BỊ ẢNH HƯỞNG — ĐÂY KHÔNG PHẢI EVIDENCE:**
+   - IMPLEMENT chỉ sửa mã nguồn + **viết/thêm unit test cho các hàm bị ảnh hưởng** (file test nằm trong source tree của service, ví dụ `src/test/...`, `*.spec.ts`, `*Test.java` cạnh code). Unit test là **mã nguồn kiểm thử**, KHÔNG phải bằng chứng.
+   - TUYỆT ĐỐI KHÔNG chạy test suite lớn / E2E (giữ nguyên quy tắc "CHỈ XÁC MINH CÚ PHÁP NHANH" ở mục 3).
+   - TUYỆT ĐỐI KHÔNG tạo bất kỳ file nào trong `{{FEATURE_DIR}}/evidence/`, và không tự viết hay sửa `evidence/metadata.json`.
+5. **GHI BÁO CÁO VÀ KẾT THÚC NGAY:**
    - Ghi tệp `{{FEATURE_DIR}}/report.md` tóm tắt ngắn gọn các file và hàm đã sửa.
    - Hoàn tất lượt để hệ thống tự động chuyển tiếp sang phase TESTING.
+
 ## 🔌 QUY TẮC DÙNG TOOL (MCP-FIRST, KHÔNG CẤM BROWSER):
 1. **Nguyên tắc chung:** Trước khi làm việc gì, LUÔN kiểm tra tool MCP đang có; nếu có MCP làm được thì DÙNG MCP TRƯỚC. Trình duyệt và các công cụ khác vẫn được dùng bình thường cho các tác vụ mà MCP không cover được.
 2. **Jira/Confluence nội bộ:** ưu tiên MCP Atlassian (`mcp__company-atlassian__jira_get_issue` trên Claude / `jira_get_issue` trên OMP); trình duyệt chỉ dùng cho trang public hoặc kiểm thử UI, tránh fetch trực tiếp URL nội bộ yêu cầu SSO/login.

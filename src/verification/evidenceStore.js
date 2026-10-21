@@ -57,6 +57,27 @@ function verdictOf(status) {
   if (status === STATUS.FAILED) return 'FAIL';
   return null;
 }
+/**
+ * Evidence chỉ được coi là PASS/FAILED khi HỆ THỐNG (bước VERIFY) đã xác nhận.
+ * Agent tự ghi `status` trong metadata.json => KHÔNG được tin.
+ * Dấu hiệu xác nhận: field `verified === true` (chỉ writeMetadata/system ghi).
+ */
+const isVerified = (rec) => !!(rec && rec.verified === true);
+
+/**
+ * Đưa về NOT VERIFY + verdict null mọi trạng thái chưa được hệ thống xác nhận.
+ */
+function suppressUnverified(rec) {
+  if (!rec || rec.verified === true) return rec;
+  if (rec.status === STATUS.NOT_VERIFY) {
+    rec.verified = false;
+    return rec;
+  }
+  rec.status = STATUS.NOT_VERIFY;
+  rec.verdict = null;
+  rec.verified = false;
+  return rec;
+}
 
 const num = (v) => {
   if (v === undefined || v === null || v === '') return null;
@@ -86,6 +107,7 @@ function normalizeRecord(raw) {
     timestamp: str(r.timestamp) || str(r.capturedAt) || str(r.captured_at) || str(r.created_at) || null,
     status,
     verdict: verdictOf(status),
+    verified: isVerified(r),
     type: str(r.type) || str(r.evidence_type) || null,
     channel: str(r.channel) || null,
     testCase: str(r.testCase) || str(r.testcase) || (typeof r.case === 'string' ? r.case : null) || null,
@@ -113,7 +135,21 @@ function readMetadata(evidenceDir) {
   if (Array.isArray(parsed)) {
     const records = [];
     for (const item of parsed) {
-      const rec = normalizeRecord(item);
+      const rec = suppressUnverified(normalizeRecord(item));
+      // server.js getEvidenceFileMeta tìm theo fileName | name | file | file_path.
+      // Phải tạo record cho mọi biến thể đó, nếu không server.js rơi về
+      // metadata RAW và đọc thẳng status do agent tự khai (bypass NOT VERIFY).
+      // Chỉ nhận tên có đuôi file thật, tránh biến tiêu đề (vd name:
+      // "Man hinh danh sach") thành record ma (gây đếm FAILED sai).
+      if (!rec.fileName) {
+        const alt = str(item && (item.file || item.name)) || null;
+        if (alt && EVIDENCE_FILE_RE.test(alt)) rec.fileName = alt;
+        else {
+          const fp = str(item && (item.filePath || item.file_path)) || null;
+          const base = fp ? path.basename(String(fp).replace(/\\/g, '/')) : null;
+          if (base && EVIDENCE_FILE_RE.test(base)) rec.fileName = base;
+        }
+      }
       if (rec.fileName) records.push(rec);
     }
     return { shape: SHAPE.ARRAY, raw: parsed, records };
@@ -133,8 +169,11 @@ function readMetadata(evidenceDir) {
         for (const f of files) {
           const fileName = str(f);
           if (!fileName) continue;
-          records.push(normalizeRecord({
-            fileName,
+          // Agent có thể ghi đường dẫn đầy đủ -> lấy basename cho khớp tên file
+          // trên đĩa (server.js so khớp theo tên file).
+          const baseName = path.basename(String(fileName).replace(/\\/g, '/'));
+          records.push(suppressUnverified(normalizeRecord({
+            fileName: baseName,
             name: testName,
             description: str(t.description) || str(t.note) || str(t.summary) || null,
             passCriteria: str(t.passCriteria) || str(t.expected) || str(t.criteria) || null,
@@ -150,19 +189,33 @@ function readMetadata(evidenceDir) {
             channel: str(t.channel) || null,
             currentUrl: str(t.currentUrl) || str(t.url) || null,
             status: testStatus
-          }));
+          })));
         }
       }
-      // File nào có trong evidenceStatus (do server ghi) thì ưu tiên trạng thái đó
+      // File nào có trong evidenceStatus mà ĐÃ ĐƯỢC hệ thống xác nhận (verified === true)
+      // thì ưu tiên trạng thái đó. Mục evidenceStatus do agent tự viết (không có cờ
+      // verified) KHÔNG được tin -> giữ NOT VERIFY cho tới khi VERIFY chạy.
       const statusMap = (parsed.evidenceStatus && typeof parsed.evidenceStatus === 'object') ? parsed.evidenceStatus : {};
       for (const rec of records) {
         const key = String(rec.fileName || '').toLowerCase();
         const over = statusMap[rec.fileName] || statusMap[key];
-        if (over) {
-          const s = normalizeStatus(typeof over === 'string' ? over : over.status);
-          rec.status = s;
-          rec.verdict = verdictOf(s);
-        }
+        if (!over || typeof over !== 'object' || over.verified !== true) continue;
+        const s = normalizeStatus(over.status);
+        rec.status = s;
+        rec.verdict = verdictOf(s);
+        rec.verified = true;
+      }
+      // Key top-level là TÊN FILE THẬT (vd "01_ui_list.png": {...}) -> cũng là evidence
+      // agent tự khai, phải có record để server đọc đúng (mặc định NOT VERIFY).
+      for (const [key, val] of Object.entries(parsed)) {
+        if (key === 'tests' || key === 'records' || key === 'evidenceStatus') continue;
+        if (!val || typeof val !== 'object' || Array.isArray(val)) continue;
+        if (!EVIDENCE_FILE_RE.test(key)) continue;
+        if (records.some((r) => String(r.fileName || '').toLowerCase() === key.toLowerCase())) continue;
+        const rec = suppressUnverified(normalizeRecord(val));
+        if (!rec.fileName) rec.fileName = key;
+        if (!rec.name) rec.name = str(val && val.name) || null;
+        records.push(rec);
       }
       return { shape: SHAPE.TESTS, raw: parsed, records };
     }
@@ -171,7 +224,16 @@ function readMetadata(evidenceDir) {
     if (Array.isArray(parsed.records)) {
       const records = [];
       for (const item of parsed.records) {
-        const rec = normalizeRecord(item);
+        const rec = suppressUnverified(normalizeRecord(item));
+        if (!rec.fileName) {
+          const alt = str(item && (item.file || item.name)) || null;
+          if (alt && EVIDENCE_FILE_RE.test(alt)) rec.fileName = alt;
+          else {
+            const fp = str(item && (item.filePath || item.file_path)) || null;
+            const base = fp ? path.basename(String(fp).replace(/\\/g, '/')) : null;
+            if (base && EVIDENCE_FILE_RE.test(base)) rec.fileName = base;
+          }
+        }
         if (rec.fileName) records.push(rec);
       }
       return { shape: SHAPE.ARRAY, raw: parsed, records };
@@ -187,7 +249,7 @@ function readMetadata(evidenceDir) {
       if (key === 'records' || key === 'evidenceStatus') continue;
       if (!val || typeof val !== 'object' || Array.isArray(val)) continue;
       if (!EVIDENCE_FILE_RE.test(key)) continue;
-      const rec = normalizeRecord(val);
+      const rec = suppressUnverified(normalizeRecord(val));
       if (!rec.fileName) rec.fileName = key;
       if (!rec.name) rec.name = str(val && val.name) || null;
       records.push(rec);
@@ -208,6 +270,12 @@ function readMetadata(evidenceDir) {
 function writeMetadata(evidenceDir, shape, raw, records) {
   const metadataPath = path.join(evidenceDir, 'metadata.json');
   let payload = raw;
+  // Ghi metadata.json là hành động của hệ thống (VERIFY / API) => mọi record có
+  // trạng thái thật đều được đánh dấu đã xác minh. Record agent tự khai đã bị đưa
+  // về NOT VERIFY lúc đọc nên không bị đánh dấu nhầm.
+  for (const rec of records || []) {
+    if (rec && rec.status !== STATUS.NOT_VERIFY && rec.verified !== true) rec.verified = true;
+  }
   if (shape === SHAPE.ARRAY) {
     payload = records;
   } else if (shape === SHAPE.MAP) {
@@ -225,7 +293,7 @@ function writeMetadata(evidenceDir, shape, raw, records) {
     for (const rec of records) {
       if (!rec.fileName) continue;
       const key = String(rec.fileName);
-      if (rec.status !== STATUS.NOT_VERIFY) statusMap[key] = { status: rec.status, verdict: rec.verdict };
+      if (rec.status !== STATUS.NOT_VERIFY) statusMap[key] = { status: rec.status, verdict: rec.verdict, verified: true };
     }
     payload.evidenceStatus = statusMap;
   } else {

@@ -32,6 +32,11 @@ const { EvidenceWatcher } = require('./verification/evidenceWatcher');
 // ma khong gap TDZ (const).
 const evidenceWatchers = new Map();
 
+// Trang thai job => worker co dang CHAY THAT hay khong.
+// Job DUNG (PENDING cho user tra loi, TO DO, DONE...) => khong co doan dang mo
+// => thoi luong KHONG dem tiep (cong don).
+const RUNNING_JOB_STATUSES = new Set(['PLANNING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING']);
+
 // Quản lý event bus tập trung cho SSE Realtime Logs & Events
 class JobEventBus extends EventEmitter {
   constructor() {
@@ -90,6 +95,12 @@ class JobEventBus extends EventEmitter {
       try { stopEvidenceWatcher(jobId); } catch (e) {}
       try { endStepTimeline(jobId, { status: normalized.status }); } catch (e) {}
     }
+    // Job roi trang thai KHONG chay (PENDING cho user, TO DO, ARCHIVED...) => DONG
+    // doan dang mo. Neu de mo, thoi gian cho user se bi tinh nham vao "Thoi luong".
+    // Khi job tiep tuc chay lai, `beginStepTimeline` tao doan MOI => tiep tuc dem.
+    if (normalized.status && !RUNNING_JOB_STATUSES.has(normalized.status)) {
+      try { endStepTimeline(jobId, { status: normalized.status }); } catch (e) {}
+    }
   }
 
   /**
@@ -141,6 +152,8 @@ class JobEventBus extends EventEmitter {
     this.emit(`job:${jobId}:done`, normalized);
     this.emit('done', normalized);
     try { stopEvidenceWatcher(jobId); } catch (e) {}
+    // Job DONE => dong doan dang mo (thoi gian chay cua buoc VERIFY cuoi cung).
+    try { endStepTimeline(jobId, { status: 'DONE' }); } catch (e) {}
   }
 
   emitJobError(jobId, payload) {
@@ -1350,7 +1363,10 @@ app.get('/api/v1/jobs/:id', (req, res) => {
       return res.status(404).json({ success: false, error: `Job with ID '${id}' not found` });
     }
 
-    const steps = db.getStepsByJobId(id);
+    // `id` tu URL co the la prefix/task_code => dung id canonical de doc steps
+    // (bang `steps` luon luu job_id la UUID day du).
+    const canonicalId = job.id || id;
+    const steps = db.getStepsByJobId(canonicalId);
     const dualPlan = db.getDualPlanByJobId(id);
     const pendingQuestion = db.getPendingQuestionByJobId(id);
     const questions = db.getQuestionsByJobId(id);
@@ -1359,6 +1375,9 @@ app.get('/api/v1/jobs/:id', (req, res) => {
       ...job,
       systemone_state: parseSystemOneState(job),
       steps,
+      // Thoi luong worker THUC SU chay task (tong cac doan steps da/đang chay).
+      // Khong phai wall-clock tu created_at (sai: tinh ca thoi gian cho queue/cho user).
+      runtime_ms: computeJobRuntimeMs(job, steps),
       dual_plan: dualPlan,
       dualPlan,
       pending_question: pendingQuestion,
@@ -2369,24 +2388,53 @@ function stopAllEvidenceWatchers() {
 // Truoc day chi co 1 step PENDING lau duoc tao luc tao job, `updateStep` khong co
 // caller nao => KHONG do duoc thoi gian tung buoc (task bd88ae0a ton ~4h, khong
 // phan biet duoc buoc nao an het thoi gian).
+//
+// YEU CAU: "Thoi luong" phai la thoi luong worker THUC SU chay task do.
+// => MOI LAN CHAY = 1 ROW `steps` RIENG (co started_at/finished_at).
+// => TONG thoi luong = SUM(finished_at - started_at) cua cac doan da DONG
+//    + doan dang MO (neu job van chay).
+//
+// DIEM MU (da sua):
+//  1. Truoc day `if (prev && prev.phase === phase) return;` => khi re-enter cung
+//     phase (retry, chay lai) bi NUOT MAT vong chay do => thoi gian that bi thieu.
+//     Bay moi luon tao row moi (dong step cu truoc truoc).
+//  2. Khi job roi vao PENDING (cho user tra loi) step bi TREO => thoi gian cho
+//     user bi tinh nham. Bay `endStepTimeline` duoc goi khi job ngung chay.
 const stepTimeline = new Map(); // jobId -> { stepId, phase, startedAt }
+
+/**
+ * Chuan hoa id job ve UUID canonical trong bang `jobs`.
+ * `db.getJobById` ho tro tra ve theo prefix/task_code, nhung `steps.job_id` la
+ * FK -> phai dung id canonical (neu khong, INSERT step se bi loi FK).
+ * Dung chung mot ham nay cho `beginStepTimeline` va `endStepTimeline` de key
+ * cua `stepTimeline` luon khop.
+ */
+function resolveCanonicalJobId(jobId) {
+  if (!jobId) return jobId;
+  try {
+    const job = db.getJobById(jobId);
+    if (job && job.id) return job.id;
+  } catch (e) {}
+  return jobId;
+}
 
 function beginStepTimeline(jobId, phase, runner) {
   if (!jobId || !phase) return;
+  const key = resolveCanonicalJobId(jobId);
   try {
-    const prev = stepTimeline.get(jobId);
-    if (prev && prev.phase === phase) return; // da bat dau phase nay roi
-    if (prev) endStepTimeline(jobId, { exitCode: null });
-    const steps = db.getStepsByJobId(jobId) || [];
+    // Dong doan dang chay truoc (neu co) => moi lan chay la 1 doan rieng bi biet.
+    // KHONG duoc bo qua khi cung phase: retry/chay lai cung la 1 doan thoi gian moi.
+    if (stepTimeline.has(key)) endStepTimeline(key, { exitCode: null });
+    const steps = db.getStepsByJobId(key) || [];
     const created = db.createStep({
-      job_id: jobId,
+      job_id: key,
       step_type: phase,
       step_index: steps.length + 1,
       status: 'RUNNING',
       runner: runner || null,
       started_at: new Date().toISOString()
     });
-    stepTimeline.set(jobId, { stepId: created && created.id, phase, startedAt: Date.now() });
+    stepTimeline.set(key, { stepId: created && created.id, phase, startedAt: Date.now() });
   } catch (e) {
     console.warn('[STEP-TIMELINE] Khong ghi duoc step:', e.message);
   }
@@ -2394,7 +2442,8 @@ function beginStepTimeline(jobId, phase, runner) {
 
 function endStepTimeline(jobId, { exitCode, status } = {}) {
   if (!jobId) return;
-  const cur = stepTimeline.get(jobId);
+  const key = resolveCanonicalJobId(jobId);
+  const cur = stepTimeline.get(key);
   if (!cur || !cur.stepId) return;
   try {
     db.updateStep(cur.stepId, {
@@ -2405,7 +2454,57 @@ function endStepTimeline(jobId, { exitCode, status } = {}) {
   } catch (e) {
     console.warn('[STEP-TIMELINE] Khong cap nhat duoc step:', e.message);
   }
-  stepTimeline.delete(jobId);
+  stepTimeline.delete(key);
+}
+
+/**
+ * Tinh thoi luong THUC SU cua job = tong cac doan worker da chay.
+ *
+ * NGUON SU THAT: bang `steps`. Moi LAN worker chay 1 doan (1 phase) = 1 row
+ * `steps` co `started_at` / `finished_at`.
+ *
+ * - Doan DA DONG (`finished_at` != null): cong het `finished_at - started_at`.
+ * - Doan DANG MO (`finished_at` == null): chi cong khi doan do DANG DUOC worker
+ *   chay trong process nay (co trong `stepTimeline`) VA job dang o trang thai
+ *   chay. Doan mo nhung khong duoc theo doi (orphan tu process da crash) =>
+ *   KHONG cong (khong doan nao bi dem thoi gian khi job dung).
+ *
+ * => Job PENDING (cho user tra loi): doan da DONG luc chuyen PENDING => thoi
+ *    gian cho user khong bi tinh. Job chay lai => doan MOI => tiep tuc dem.
+ * => Job moi vao queue (chua co doan nao): tong doan da dong = 0 (khong dem
+ *    thoi gian cho queue).
+ * => Job chua tung chay: khong co doan nao co `started_at` => 0.
+ *
+ * @param {object} job  Job tu `db.getJobById` (can `id` canonical + `status`)
+ * @param {Array<object>} steps  Rows tu `db.getStepsByJobId`
+ * @returns {number} tong so ms da chay thuc te
+ */
+function computeJobRuntimeMs(job, steps) {
+  if (!job) return 0;
+  const status = (job.status || '').toString().trim().toUpperCase();
+  const list = Array.isArray(steps) ? steps : [];
+  const now = Date.now();
+  // Job dang CHAY thuc te => doan dang mo duoc dem tiep.
+  const isRunning = RUNNING_JOB_STATUSES.has(status);
+  // Doan dang chay trong process nay (neu co) => moi cong phan "chua dong".
+  const tracked = stepTimeline.get(job.id);
+  let total = 0;
+  for (const st of list) {
+    if (!st) continue;
+    const startedAt = Date.parse(st.started_at || '');
+    if (!Number.isFinite(startedAt)) continue;
+    const finishedAt = st.finished_at ? Date.parse(st.finished_at) : NaN;
+    if (Number.isFinite(finishedAt)) {
+      const diff = finishedAt - startedAt;
+      if (diff > 0) total += diff;
+    } else if (isRunning && tracked && tracked.stepId === st.id) {
+      // Doan dang MO va worker DANG chay doan nay => cong den thoi diem hien tai.
+      const diff = now - startedAt;
+      if (diff > 0) total += diff;
+    }
+    // Doan MO khong duoc theo doi (orphan) => bo qua, khong dem thoi gian cho.
+  }
+  return total;
 }
 
 const executeStep = async (id, opts) => {
@@ -3115,6 +3214,14 @@ const executeStep = async (id, opts) => {
  */
 const TERMINAL_JOB_STATUSES = new Set(['DONE', 'TIMED_OUT', 'ARCHIVED', 'DELETED']);
 const RESTARTABLE_JOB_STATUSES = new Set(['TO DO', 'TO_DO', 'FAILED', 'CANCELLED']);
+
+/**
+ * Nguong confidence toi thieu de AI triage bat che do NHANH (quick track).
+ * Chi khi model THAT rat ro rang rang task la "nhe" moi duoc dung template rut gon.
+ * Do phan bo confidence quan sat duoc tren task that: 0.6-0.68 => nguong 0.5 se
+ * vô tinh bat quick mode cho task trung binh (va cat timeout cua user).
+ */
+const QUICK_TRACK_MIN_CONFIDENCE = 0.7;
 const runJobPipeline = (jobId, opts) => {
   return new Promise((resolve) => {
     const jobToStart = db.getJobById(jobId);
@@ -3327,7 +3434,10 @@ const handleJobStart = async (req, res) => {
     const dedup = systemone.localDedup({ taskCode, prompt: job.prompt || job.title || '' });
     jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-TRIAGE] complexity=${triage.complexity} track=${triage.track} needBrowser=${triage.needBrowser} confidence=${triage.confidence}${triage.cached ? ' (cache)' : ''} bucket=${dedup.bucketId}.\n` });
     const explicitTimeout = resolveExplicitTimeoutMs(job);
-    if (triage && triage.track === 'quick' && Number(triage.confidence) >= 0.5) {
+    // Nguong bat che do NHANH: chi khi model THAT rat ro rang rang task nhe.
+    // Do phan bo confidence quan sat duoc o 0.6-0.68 => nguong 0.5 se vô tinh
+    // bat quick mode cho task trung binh. Raise len 0.7 de an toan.
+    if (triage && triage.track === 'quick' && Number(triage.confidence) >= QUICK_TRACK_MIN_CONFIDENCE) {
       systemone.addCliSaved(1);
       // Bat che do nhanh THUC SU: plan rut gon + implement toi uu, khong chi tang priority.
       // KHONG bat khi user da TAT tuong minh (quick_track === false) hoac user da khai timeout.
@@ -3938,6 +4048,25 @@ app.get('/api/v1/jobs/:id/logs/stream', (req, res) => {
   jobEventBus.on(`job:${id}:done`, doneListener);
   jobEventBus.on(`job:${id}:error`, errorListener);
   jobEventBus.on(`job:${id}:systemone`, systemOneListener);
+  // 4b. Tick "Thoi luong" realtime: gui runtime_ms moi giay cho client
+  // (thoi gian worker THUC SU chay, da cong don tu cac doan `steps`).
+  // Client tinh san 1s => khong can polling lai endpoint job chi tiet.
+  const runtimeTickInterval = setInterval(() => {
+    try {
+      const fresh = db.getJobById(id);
+      if (!fresh) return;
+      const freshSteps = db.getStepsByJobId(fresh.id) || [];
+      sendEvent('runtime', {
+        type: 'runtime',
+        jobId: fresh.id,
+        status: fresh.status,
+        runtime_ms: computeJobRuntimeMs(fresh, freshSteps)
+      });
+    } catch (e) {
+      // Bỏ qua lỗi tick (job có thể vừa bị xóa)
+    }
+  }, 1000);
+
   // 5. Heartbeat Ping giữ kết nối không bị timeout
   const keepAliveInterval = setInterval(() => {
     try {
@@ -3953,6 +4082,7 @@ app.get('/api/v1/jobs/:id/logs/stream', (req, res) => {
   // 6. Cleanup khi client ngắt kết nối
   req.on('close', () => {
     clearInterval(keepAliveInterval);
+    clearInterval(runtimeTickInterval);
     jobEventBus.removeListener(`job:${id}:log`, logListener);
     jobEventBus.removeListener(`job:${id}:step`, stepListener);
     jobEventBus.removeListener(`job:${id}:status`, statusListener);
@@ -4003,5 +4133,10 @@ module.exports = {
   startEvidenceWatcher,
   stopEvidenceWatcher,
   stopAllEvidenceWatchers,
-  buildEvidenceSnapshot
+  buildEvidenceSnapshot,
+  // Runtime accounting (thoi gian worker thuc su chay task) - export de test.
+  computeJobRuntimeMs,
+  beginStepTimeline,
+  endStepTimeline,
+  stepTimeline
 };

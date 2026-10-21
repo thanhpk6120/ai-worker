@@ -44,6 +44,7 @@ Nhiệm vụ của bạn là tiếp nhận toàn bộ ngữ cảnh kiểm thử 
      * Nếu mã nguồn đã đúng, test thực tế đã pass nhưng bị reject do thiếu file trong `evidence/` hoặc `metadata.json` khai báo thiếu/sai test case:
      * 👉 **TUYỆT ĐỐI CẤM sửa vào mã nguồn chức năng của workspace!**
      * Chỉ cần bổ sung/chỉnh sửa đúng file evidence trong `{{FEATURE_DIR}}/evidence/` và cập nhật lại `evidence/metadata.json` phản ánh trung thực kết quả test đã đạt rồi hoàn tất ngay.
+     * **TRẠNG THÁI EVIDENCE MỚI LUÔN LÀ `NOT VERIFY`:** File evidence bạn tạo/sửa ở bước FIXING mặc định có trạng thái `NOT VERIFY` (chưa được hệ thống xác minh). Chỉ khai báo kết quả từng TEST CASE trong mảng `tests[]` của `metadata.json` (`status: "PASSED"|"FAILED"`); TUYỆT ĐỐI KHÔNG tự gán `PASS`/`PASSED`/`verdict` cho TỪNG FILE evidence và KHÔNG tự tạo hay ghi đè mục `evidenceStatus` — VERIFY mới là nơi xác nhận.
    - **Trường hợp B — Lỗi do kiểm thử thất bại (Test Fail / Exception thật):**
      * Đọc kỹ error log, định vị đúng file và hàm gây lỗi.
      * Sửa tối thiểu đúng chỗ lỗi trong mã nguồn thuộc service đó, CẤM khảo sát lại toàn bộ monorepo.
