@@ -42,6 +42,12 @@ Nhiệm vụ của bạn là kiểm thử toàn diện giải pháp của task *
      * Nếu plan yêu cầu `UI_SCREENSHOT`: Mới cần khởi động dev server và dùng browser chụp ảnh giao diện thật.
 3. **CHẠY TEST THEO BATCH — CẤM CHẠY LẺ TẺ:**
    - Viết hoặc chạy toàn bộ các ca kiểm thử trong một lần duy nhất, thu thập log và kết quả tập trung vào `evidence/`. Không chạy lắt nhắt từng lệnh lẻ.
+4. **CẤM QUÉT THÙNG RÁC / TÌM LẠI FILE ĐÃ XOÁ:**
+   - TUYỆT ĐỐI KHÔNG quét Recycle Bin / thùng rác / thư mục `.trash` / `$Recycle.Bin` (Windows), KHÔNG dùng `Shell.Application`, `Get-ChildItem $Recycle.Bin`, `Microsoft.VisualBasic.FileIO.FileSystem` hay lệnh tương tự.
+   - Bằng chứng của lượt này phải được **tạo mới**. Không có bằng chứng cũ = chưa có bằng chứng, KHÔNG phải lý do đi tìm ở nơi khác.
+   - Nếu `test_plan.md` yêu cầu chạy script trong `{{FEATURE_DIR}}/runtime/` mà script không còn: **tạo lại** script đó (theo đúng mô tả trong `test_plan.md`) rồi chạy. KHÔNG đi tìm bản cũ.
+   - Nếu `report.md` / `fix_report.md` mô tả trạng thái lượt trước (evidence đã xoá, script đã mất) thì đó là **lịch sử**, KHÔNG phải trạng thái hiện tại. Hãy tự kiểm tra bằng cách đọc file thật.
+
 ## Hướng dẫn thực thi:
 0. **BƯỚC 0 — KIỂM TRA MCP KHI BẮT ĐẦU (1 lần duy nhất, không lặp lại mỗi turn):** Đọc mục `🔌 DANH SÁCH MCP SERVERS` ở trên một lần ở đầu bước. Chỉ dùng MCP khi tác vụ cần tool chuyên biệt (ví dụ `cloakbrowser` cho UI testing, Jira MCP nếu cần ticket). Các thao tác đọc/tìm file mã nguồn local: BẮT BUỘC ưu tiên dùng native tool (`read`/`grep`), TUYỆT ĐỐI KHÔNG spam dòng suy nghĩ hay log "Không MCP dùng được..." trước mỗi câu lệnh kiểm tra.
 1. **BÁM SÁT TEST_PLAN & EVIDENCE CONFIGURATION (ĐỌC 1 LẦN DUY NHẤT):**

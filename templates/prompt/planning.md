@@ -51,6 +51,11 @@ Nhiệm vụ của bạn là khảo sát codebase tại workspace và lập kế
    - Thư mục đó **không liên quan** tới task, đọc vào chỉ là lãng phí thời gian và có thể làm lộ thông tin nội bộ.
    - Nếu cần hiểu hành vi của một script/lệnh chưa rõ: đọc script đó trong `{{FEATURE_DIR}}/runtime/` hoặc trong `{{WORKSPACE_PATH}}`, KHÔNG đi tìm log của hệ thống.
 3. Mọi đường dẫn ngoài phạm vi → bỏ qua, ghi 1 dòng `[PLANNING-SCOPE] bỏ qua: <path>` rồi tiếp tục.
+4. **TUYỆT ĐỐI KHÔNG** quét Recycle Bin / thùng rác / thư mục `.trash` / `$Recycle.Bin` (Windows) để tìm lại file đã bị xoá. Cũng KHÔNG dùng `Shell.Application`, `Get-ChildItem $Recycle.Bin`, `Microsoft.VisualBasic.FileIO.FileSystem`, hay lệnh tương tự.
+   - Lý do: mất thời gian hàng chút phút mà **không bao giờ** mang lại thông tin cho task. Lượt chạy trước đã mất ~5 phút chỉ để lục Recycle Bin rồi bị huỷ.
+   - Nếu `test_plan.md` tham chiếu script trong `{{FEATURE_DIR}}/runtime/` mà file không còn: ghi rõ vào `dev_plan.md` là cần **tạo lại** script đó, KHÔNG đi tìm ở nơi khác.
+5. **TUYỆT ĐỐI KHÔNG** huỷ (cancel) task, KHÔNG gọi API huỷ, KHÔNG kết luận "task không thể chạy" chỉ vì thiếu evidence/script. Thiếu bằng chứng là chuyện bình thường ở lượt PLANNING — hãy ghi rõ trong `dev_plan.md` rồi đi tiếp.
+   - `report.md` / `fix_report.md` cũ có thể mô tả trạng thái của lượt trước (evidence đã xoá, script đã mất) — đó là **lịch sử**, KHÔNG phải trạng thái hiện tại. Hãy tự verify bằng cách đọc file thật.
 
 ## Hướng dẫn thực thi:
 1. **BƯỚC 0 — KIỂM TRA MCP KHI BẮT ĐẦU (1 lần duy nhất, không lặp lại mỗi turn):** Đọc mục `🔌 DANH SÁCH MCP SERVERS` ở trên một lần ở đầu phiên để biết có tool Jira/Confluence/Browser nào khả dụng hay không. Các tác vụ đọc tài liệu và mã nguồn local: BẮT BUỘC ưu tiên dùng native tool (`read`/`grep`), TUYỆT ĐỐI KHÔNG spam dòng suy nghĩ hay log "Không MCP dùng được..." trước mỗi thao tác file.
