@@ -29,15 +29,15 @@ Kết luận: xóa toàn bộ 6 UC cũ. Viết lại 6 UC dưới đây theo typ
 
 - `src/pipeline/dualPlanning.js` **chỉ ghép template local**: `require('node:fs','node:path')`, class `DualPlanningGenerator`, `generateDevPlan:32-218`, `generateTestPlan:231-464`, `verifyConsistency:474-611`, `savePlans:623-645`. Không `fetch/spawn/exec/execute/http`. Không tốn CLI call. Gắn tiết kiệm CLI ở đây là sai.
 - `src/server.js` **mới là nơi spawn CLI thật**:
-  - `src/server.js:2070-2073` `buildPrompt(step:planning)` → `src/server.js:2085` `runnerRegistry.getAvailableRunner(planningAgent)` → `src/server.js:2089-2093` `runner.execute({prompt: planningPrompt})`
-  - `src/server.js:2216` `buildPrompt(step:implement)` → `src/server.js:2229` `getAvailableRunner` → `src/server.js:2233-2236` `runner.execute`
-  - `src/server.js:2278-2282` `buildPrompt(step:testing)` → `src/server.js:2295` `getAvailableRunner` → `src/server.js:2301-2306` `runner.execute(timeoutMs:900000)`
-  - `src/server.js:2394-2398` `buildPrompt(step:fixing)` → `src/server.js:2401` `getAvailableRunner` → `src/server.js:2403-2407` `runner.execute`
-  - `src/server.js:2552` `taskQueue.enqueue(job, ()=>runJobPipeline(id))` (điểm enqueue chính; thêm `2806,2841,2948` retry/probe enqueue; `881` đang comment-out)
-  - `src/server.js:837-871` gọi `DualPlanningGenerator` local fallback (không CLI)
-- Điều phối: `src/runners/runnerRegistry.js:142-175` `getAvailableRunner`, `:181-183` `resolveRunner`; thực thi: `src/runners/baseAdapter.js:249-480` `execute()`; hàng đợi: `src/queue/taskQueue.js:36-62` `enqueue`, `:67-126` `_processNext`, `:133-151` `cancel`; prompt: `src/runners/promptTemplateManager.js:146-209` `buildPrompt`; secret: `src/execution/secretScrubber.js:115-127` `maskSecrets`; verify: `src/verification/multiVerificationGate.js:1245-1253` `evaluateAll`, `:1257` `Promise.allSettled` 4 kênh, `:1064-1215` `FixingContextPackGenerator`.
+  - `src/server.js:2562` `buildPrompt(step:planning)` → `src/server.js:2586` `runnerRegistry.getAvailableRunner(planningAgent)` → `src/server.js:2590` `runner.execute({prompt: planningPrompt})`
+  - `src/server.js:2720` `buildPrompt(step:implement)` → `src/server.js:2737` `getAvailableRunner` → `src/server.js:2741` `runner.execute`
+  - `src/server.js:2791` `buildPrompt(step:testing)` → `src/server.js:2812` `getAvailableRunner` → `src/server.js:2818` `runner.execute(timeoutMs: stepTimeoutMs)`
+  - `src/server.js:2941` `buildPrompt(step:fixing)` → `src/server.js:2988` `getAvailableRunner` → `src/server.js:2992` `runner.execute`
+  - `src/server.js:3211` `taskQueue.enqueue(job, (queuedJob, queueOpts) => runJobPipeline(id, queueOpts))` (điểm enqueue chính; thêm `3480,3515,3622` retry/probe enqueue; `1089` đang comment-out)
+  - `src/server.js:1044-1060` gọi `DualPlanningGenerator` local fallback (không CLI)
+- Điều phối: `src/runners/runnerRegistry.js:142-175` `getAvailableRunner`, `:181-183` `resolveRunner`; thực thi: `src/runners/baseAdapter.js:240-508` `execute()`; hàng đợi: `src/queue/taskQueue.js:36-65` `enqueue`, `:71-137` `_processNext`, `:144-162` `cancel`; prompt: `src/runners/promptTemplateManager.js:149-240` `buildPrompt`; secret: `src/execution/secretScrubber.js:115-127` `maskSecrets`; verify: `src/verification/multiVerificationGate.js:1245-1253` `evaluateAll`, `:1257` `Promise.allSettled` 4 kênh, `:1064-1215` `FixingContextPackGenerator`.
 
-→ Mọi điểm tiết kiệm CLI phải chèn quanh `src/server.js:2085,2229,2295,2401` (trước `runner.execute`) và `src/server.js:2552` (trước `enqueue`). Không chèn vào `dualPlanning.js`.
+→ Mọi điểm tiết kiệm CLI phải chèn quanh `src/server.js:2586,2737,2812,2988` (trước `runner.execute`) và `src/server.js:3211` (trước `enqueue`). Không chèn vào `dualPlanning.js`.
 
 ## 2. Actors + mục tiêu
 
@@ -62,7 +62,7 @@ Kết luận: xóa toàn bộ 6 UC cũ. Viết lại 6 UC dưới đây theo typ
 
 ### UC-1 — Router chọn runner `{runner, confidence}`
 
-- Vị trí: `src/server.js:2085,2229,2295,2401` trước `runnerRegistry.getAvailableRunner()`; logic trong `src/runners/runnerRegistry.js:142-183`.
+- Vị trí: `src/server.js:2586,2737,2812,2988` trước `runnerRegistry.getAvailableRunner()`; logic trong `src/runners/runnerRegistry.js:142-183`.
 - Schema:
 ```ts
 type RouterReq = { taskCode: string; step: "planning"|"implement"|"testing"|"fixing"; candidates: string[]; jobId: string };
@@ -74,7 +74,7 @@ type RouterRes = { runner: string; confidence: number; reason: "history"|"capabi
 
 ### UC-2 — Triage trước enqueue `{complexity, track, needBrowser}`
 
-- Vị trí: `src/server.js:2552` trước `taskQueue.enqueue()` (và `2806,2841,2948` dùng chung helper); hàng đợi `src/queue/taskQueue.js:36-62,67-126`.
+- Vị trí: `src/server.js:3211` trước `taskQueue.enqueue()` (và `3480,3515,3622` dùng chung helper); hàng đợi `src/queue/taskQueue.js:36-65,71-137`.
 - Schema:
 ```ts
 type TriageReq = { taskCode: string; prompt: string; jobId: string };
@@ -86,7 +86,7 @@ type TriageRes = { complexity: "S"|"M"|"L"; track: "quick"|"full"; needBrowser: 
 
 ### UC-3 — Cổng retry/fix `{retry, p_success, fixScope}`
 
-- Vị trí: nhánh `FIXING` `src/server.js:2392-2411` trước `src/server.js:2401-2407` spawn fixing; dùng `FixingContextPackGenerator` `src/verification/multiVerificationGate.js:1064-1215` làm input; tôn trọng `MAX_FIXING_RETRIES` `src/config.js:8`.
+- Vị trí: nhánh `FIXING` `src/server.js:2938-3002` trước `src/server.js:2988-2997` spawn fixing; dùng `FixingContextPackGenerator` `src/verification/multiVerificationGate.js:1064-1215` làm input; tôn trọng `MAX_FIXING_RETRIES` `src/config.js:89` (env, mặc định 3).
 - Schema:
 ```ts
 type FixGateReq = { jobId: string; attempt: number; maxRetries: number; failures: object; files: string[] };
@@ -98,7 +98,7 @@ type FixGateRes = { retry: boolean; p_success: number; fixScope: "tiny"|"scoped"
 
 ### UC-4 — Pre-judge verification song song `{pass, failedFields}`
 
-- Vị trí: trước `MultiVerificationGate.evaluateAll()` `src/verification/multiVerificationGate.js:1245-1253` (chạy `Promise.allSettled` 4 kênh tại `:1257`); gọi từ pipeline testing/fixing trong `src/server.js`.
+- Vị trí: trước `MultiVerificationGate.evaluateAll()` `src/verification/multiVerificationGate.js:1245-1253` (chạy `Promise.allSettled` 4 kênh tại `:1257`); **chưa nối**: `evaluateAll()` không có call site trong `src/`.
 - Schema:
 ```ts
 type PreJudgeReq = { jobId: string; featureName: string; testPlan: object };
@@ -110,7 +110,7 @@ type PreJudgeRes = { pass: boolean; failedFields: string[]; confidence: number; 
 
 ### UC-5 — Guard prompt/secret `{hasSecret, hasInjection, action}`
 
-- Vị trí: sau `buildPrompt()` `src/runners/promptTemplateManager.js:146-209` tại 4 điểm `src/server.js:2070,2216,2278,2394`, trước `runner.execute`; scrub bằng `maskSecrets` `src/execution/secretScrubber.js:115-127` + `BaseAdapter.maskSecrets` `src/runners/baseAdapter.js:104-115`.
+- Vị trí: sau `buildPrompt()` `src/runners/promptTemplateManager.js:149-240` tại 4 điểm `src/server.js:2562,2720,2791,2941`, trước `runner.execute`; scrub bằng `maskSecrets` `src/execution/secretScrubber.js:115-127` + `BaseAdapter.maskSecrets` `src/runners/baseAdapter.js:104-115`.
 - Schema:
 ```ts
 type GuardReq = { jobId: string; step: string; prompt: string };
@@ -122,7 +122,7 @@ type GuardRes = { hasSecret: boolean; hasInjection: boolean; action: "allow"|"sc
 
 ### UC-6 — Dedup + bucket evidence/log `{bucketId}`
 
-- Vị trí: `UiEvidenceCollector.verify` `src/verification/multiVerificationGate.js:68`, `LogScanner` `:684-838` (mask tại `:732`), evidence serve `src/server.js:335-408`, `getTaskEvidences:927-982`, `hashEvidenceBuffer:300-311`.
+- Vị trí: `UiEvidenceCollector.verify` `src/verification/multiVerificationGate.js:68`, `LogScanner` `:684-738` (mask tại `:732`), evidence serve `src/server.js:438-507` (`serveEvidenceFile`, route tại `:509-512`), `getTaskEvidences:1162-1326`, `hashEvidenceBuffer:403-410`.
 - Schema:
 ```ts
 type DedupReq = { jobId: string; kind: "evidence"|"log"; hash: string; bytes: number };
@@ -137,8 +137,8 @@ type DedupRes = { bucketId: string; confidence: number; cached: boolean };
 - R-01 fallback đường cũ: mọi UC lỗi/timeout/schema-invalid/offline → hành vi cũ (runner cũ, `track:full`, retry cũ, đủ 4 kênh, scrub+spawn, không dedup). Không thêm `JOB_STATUSES` (`src/state/stateMachine.js:3-15`), không phá `VALID_TRANSITIONS`.
 - R-02 offline cache+heuristic: cache RAM TTL key=SHA256(payload đã scrub); miss+offline → heuristic local <50ms trả typed đủ field với `confidence≤0.4`, `cached:false`, `reason/fallback`.
 - R-03 custom URL: `SYSTEMONE_BASE_URL` mặc định `http://127.0.0.1:20128/v1/systemone` (gồm cả base path `/v1/systemone`, cấm nối thêm path thừa); client `POST` thẳng vào `BASE_URL`. Cấm hardcode domain trong code. `SYSTEMONE_ENABLED=false` bypass toàn bộ về CLI-only <1 phút, không migrate DB.
-- R-04 zero dep: chỉ `fetch` global Node24 + `node:crypto` + `AbortController`. Không thêm `package.json`. Timeout SystemOne < `DEFAULT_TIMEOUT` (`src/config.js:7`).
-- R-05 metric tiết kiệm CLI: đếm tại điểm spawn `src/server.js` (wrapper quanh `runner.execute`), không sửa chữ ký `BaseAdapter/RunnerRegistry/TaskQueue`. Counters: `systemone_request_total{route}`, `systemone_cache_hit_ratio`, `systemone_fallback_total{reason}`, `cli_saved_total`. Mỗi response cộng `usage.cost` vào metric `cost` (kèm `cliSaved`).
+- R-04 zero dep: chỉ `fetch` global Node24 + `node:crypto` + `AbortController`. Không thêm `package.json`. Timeout SystemOne < `DEFAULT_TIMEOUT` (`src/config.js:27`, `DEFAULT_TIMEOUT_MS` tại `:28`).
+- R-05 metric tiết kiệm CLI: đếm tại điểm spawn `src/server.js` (wrapper quanh `runner.execute`), không sửa chữ ký `BaseAdapter/RunnerRegistry/TaskQueue`. Hiện thực: `systemone.getStats()` → `{calls, hits, misses, fallbacks, cliSaved, cost}` (`src/systemone/client.js:19,361-363`), expose qua `GET /api/v1/runners` (`src/server.js:529-531`); mỗi response cộng `usage.cost` vào `cost` (`src/systemone/client.js:87`).
 
 ## 5. Out-of-scope
 

@@ -17,16 +17,16 @@ Chèn 6 quyết định Jev typed trước điểm spawn CLI thật trong `src/s
 ## 2. Architecture overview
 
 - Thêm duy nhất `src/systemone/client.js` (CommonJS, zero dep): `fetch` global + `AbortController` timeout + cache RAM TTL (key SHA256 payload đã scrub) + `stats {calls,hits,misses,fallbacks,cliSaved}` + validator 6 schema UC + pipeline wire (`pickRunner/checkGuard/checkTriage/checkFixGate/checkPreJudge/checkDedup/getFixAttempt/withFixAttempt` gộp trong cùng file, không tách `wire.js`).
-- Extend `src/config.js:4-11,20-29` thêm env (không đổi key cũ, không đổi chữ ký exports).
+- Extend `src/config.js:93-98,122-127` thêm env (không đổi key cũ, không đổi chữ ký exports).
 - Không sửa chữ ký public `RunnerRegistry/BaseAdapter/TaskQueue/DualPlanningGenerator/MultiVerificationGate/PromptTemplateManager`. Chỉ chèn nhánh `if (systemoneEnabled) try→validate→dùng catch→fallback` tại `src/server.js`.
 - Luồng chuẩn mỗi UC: `maskSecrets` → check cache → `POST` thẳng vào `SYSTEMONE_BASE_URL` (`https://9router.thanhpk.io.vn/v1/systemone`, cấm nối thêm path thừa) với body `{model?, questions: {<name>: {type, question/context}}}` + timeout → validate `answers.<name>.noul` → ghi cache + `stats` (cộng `usage.cost` vào metric `cost`) → trả kết quả. Lỗi bất kỳ bước nào → cache cũ → heuristic → đường cũ.
 
 ## 3. Config env
 
-- File chạm: `src/config.js:4-11` hằng, `src/config.js:20-29` exports.
+- File chạm: `src/config.js:93-98` hằng, `src/config.js:122-127` exports.
 - `SYSTEMONE_ENABLED` mặc định `true`; `false` = bypass toàn bộ.
 - `SYSTEMONE_BASE_URL` mặc định `http://127.0.0.1:20128/v1/systemone` (self-host local — **không hardcode domain vào source** theo R-03; chỉ `.env` trỏ tới `https://9router.thanhpk.io.vn/v1/systemone`); client `POST` thẳng vào `BASE_URL`. Custom self-host, cấm hardcode.
-- `SYSTEMONE_TIMEOUT_MS` mặc định `8000`, bắt buộc < `DEFAULT_TIMEOUT` (`src/config.js:7`).
+- `SYSTEMONE_TIMEOUT_MS` mặc định `8000`, bắt buộc < `DEFAULT_TIMEOUT` (`src/config.js:27`).
 - `SYSTEMONE_CACHE_TTL_MS` mặc định `3600000`.
 - `SYSTEMONE_API_KEY` tùy chọn; gửi `Authorization: Bearer`, che khi log.
 
@@ -34,14 +34,14 @@ Chèn 6 quyết định Jev typed trước điểm spawn CLI thật trong `src/s
 
 | # | UC | Chèn tại | Logic cũ giữ nguyên |
 |---|---|---|---|
-| 1 | Router `{runner,confidence}` | `src/server.js:2085,2229,2295,2401` trước `getAvailableRunner()`; policy trong `src/runners/runnerRegistry.js:142-183` | `getAvailableRunner(preferredName)` là fallback |
-| 2 | Triage `{complexity,track,needBrowser}` | `src/server.js:2552` trước `taskQueue.enqueue()` (dùng chung cho `2806,2841,2948`); queue `src/queue/taskQueue.js:36-62,67-126` | fail → `track:full` |
-| 3 | Fix gate `{retry,p_success,fixScope}` | `src/server.js:2392-2411` trước spawn fixing `2401-2407`; input từ `src/verification/multiVerificationGate.js:1064-1215`; tôn trọng `MAX_FIXING_RETRIES` `src/config.js:8` | fail → retry đường cũ |
+| 1 | Router `{runner,confidence}` | `src/server.js:2586,2737,2812,2988` trước `getAvailableRunner()`; policy trong `src/runners/runnerRegistry.js:142-183` | `getAvailableRunner(preferredName)` là fallback |
+| 2 | Triage `{complexity,track,needBrowser}` | `src/server.js:3211` trước `taskQueue.enqueue()` (dùng chung cho `3480,3515,3622`); queue `src/queue/taskQueue.js:36-65,71-137` | fail → `track:full` |
+| 3 | Fix gate `{retry,p_success,fixScope}` | `src/server.js:2938-3002` trước spawn fixing `2988-2997`; input từ `src/verification/multiVerificationGate.js:1064-1215`; tôn trọng `MAX_FIXING_RETRIES` `src/config.js:89` | fail → retry đường cũ |
 | 4 | Pre-judge `{pass,failedFields}` | trước `evaluateAll()` `src/verification/multiVerificationGate.js:1245-1253` (song song 4 kênh `:1257`) | fail → đủ 4 kênh |
-| 5 | Guard `{hasSecret,hasInjection,action}` | sau `buildPrompt()` tại `src/server.js:2070,2216,2278,2394`, trước `execute`; scrub `src/execution/secretScrubber.js:115-127` + `src/runners/baseAdapter.js:104-115` | guard lỗi → `scrub` + đi tiếp; handler `src/server.js:3120-3129` không crash |
-| 6 | Dedup `{bucketId}` | `UiEvidenceCollector.verify` `:68`, `LogScanner` `:684-838` (mask `:732`), serve `src/server.js:335-408`, `getTaskEvidences:927-982`, `hashEvidenceBuffer:300-311` | fail → 1 file 1 bucket |
+| 5 | Guard `{hasSecret,hasInjection,action}` | sau `buildPrompt()` tại `src/server.js:2562,2720,2791,2941`, trước `execute`; scrub `src/execution/secretScrubber.js:115-127` + `src/runners/baseAdapter.js:104-115` | guard lỗi → `scrub` + đi tiếp; handler `src/execution/promptGuard.js:52-74` không crash |
+| 6 | Dedup `{bucketId}` | `UiEvidenceCollector.verify` `:68`, `LogScanner` `:684-738` (mask `:732`), serve `src/server.js:438-507`, `getTaskEvidences:1162-1326`, `hashEvidenceBuffer:403-410` | fail → 1 file 1 bucket |
 
-Không chèn vào `src/pipeline/dualPlanning.js` (template local, không CLI). `src/server.js:837-871` giữ nguyên fallback local.
+Không chèn vào `src/pipeline/dualPlanning.js` (template local, không CLI). `src/server.js:1044-1060` giữ nguyên fallback local.
 
 ## 5. Transport + Schema typed (validator trong `client.js`, thiếu field = miss)
 
@@ -1153,8 +1153,8 @@ DedupRes = { bucketId: string; confidence: number; cached: boolean };
 
 ## 7. Metric tiết kiệm CLI
 
-- Wrapper đếm quanh `runner.execute()` tại 4 điểm `src/server.js` (không sửa `BaseAdapter`): `cli_calls_per_job`, `cli_saved_total` (+1 mỗi lần router-guard-fixGate-preJudge-dedup tránh được spawn hoặc kênh verify).
-- `client.js#getStats()` → `{calls,hits,misses,fallbacks,cliSaved,cost}`; mỗi response cộng `usage.cost` vào `cost`; log kèm `jobId`; expose `GET /api/v1/status` (`src/server.js:446`) hoặc log.
+- Wrapper đếm quanh `runner.execute()` tại 4 điểm `src/server.js` (không sửa `BaseAdapter`): `cliSaved` (+1 mỗi lần tránh được spawn).
+- `client.js#getStats()` → `{calls,hits,misses,fallbacks,cliSaved,cost}`; mỗi response cộng `usage.cost` vào `cost`; log kèm `jobId`; expose `GET /api/v1/runners` (`src/server.js:529-531`).
 - Benchmark: cùng workload implement+testing+1 fixing ×10 job CLI-only vs SystemOne-first; đạt M-01 ≥50%.
 
 ## 8. Files to create / modify
@@ -1165,7 +1165,7 @@ DedupRes = { bucketId: string; confidence: number; cached: boolean };
 
 - Guard: `checkGuard` luôn trả `promptToUse` đã qua `maskSecrets`; `allow` chỉ giữ prompt gốc khi `hasSecret=false ∧ hasInjection=false`; `scrub` dùng prompt đã scrub. `src/server.js` 4 điểm planning/implement/testing/fixing truyền `guard.promptToUse` vào `runner.execute()`.
 - PreJudge: nhánh VERIFY luôn chạy `verifyTaskEvidence()` thật; PreJudge chỉ log gợi ý lọc kênh, không bypass DONE.
-- Sửa: `src/config.js:4-11,20-29`; `src/server.js` 6 điểm trên (chỉ thêm nhánh, không đổi chữ ký); `src/server.js:446` expose stats (tùy, không bắt buộc).
+- Sửa: `src/config.js:93-98,122-127`; `src/server.js` 6 điểm trên (chỉ thêm nhánh, không đổi chữ ký); `src/server.js:529-531` expose stats (tùy, không bắt buộc).
 - Không sửa: `dualPlanning.js`, `runnerRegistry.js`, `baseAdapter.js`, `taskQueue.js`, `promptTemplateManager.js`, `multiVerificationGate.js`, `stateMachine.js` (chỉ đọc).
 
 ## 10. Hạng mục gộp: fix evidence Log lọt tab API (đã xong, giữ nguyên sau wiring SystemOne)
