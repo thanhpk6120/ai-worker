@@ -1235,8 +1235,12 @@ function getTaskEvidences(job) {
         } catch (e) { return; }
       }
 
+      // CHI record tu evidenceStore (da qua suppressUnverified) moi mang trang thai
+      // dang tin. Fallback `getEvidenceFileMeta` doc RAW metadata ma AGENT tu viet
+      // (status: "PASSED") => phai ep NOT VERIFY, neu khong file co extension
+      // ngoai EVIDENCE_FILE_RE (vd .xlsx/.pdf/.zip) se LOTT qua gate.
       const storeRec = storeByFile.get(file.toLowerCase());
-      const meta = storeRec ? storeRec : getEvidenceFileMeta(metadata, file);
+      const meta = storeRec ? storeRec : { ...getEvidenceFileMeta(metadata, file), status: undefined, verdict: undefined };
       const evidenceHashes = buildEvidenceHashes(fullFilePath, stat);
       let fileContent = '';
       let parsedData = null;
@@ -1709,7 +1713,6 @@ app.get(['/api/v1/jobs/:id/evidence', '/api/v1/jobs/:id/evidences', '/api/v1/tas
     // Truoc day endpoint nay copy lai logic doc file => 2 noi lech nhau
     // (vd file binary doc nhu utf8 -> "PK\x03\x04..." rac mojibake).
     const realEvidenceList = getTaskEvidences(job);
-
     // Giữ toàn bộ evidence (không cắt 2 loại) để tab API/Log không mất mục cũ.
     const filteredEvidenceList = realEvidenceList;
 
@@ -2480,7 +2483,7 @@ function endStepTimeline(jobId, { exitCode, status } = {}) {
  * @returns {number} tong so ms da chay thuc te
  */
 function computeJobRuntimeMs(job, steps) {
-  if (!job) return 0;
+  if (!job) return null;
   const status = (job.status || '').toString().trim().toUpperCase();
   const list = Array.isArray(steps) ? steps : [];
   const now = Date.now();
@@ -2489,10 +2492,15 @@ function computeJobRuntimeMs(job, steps) {
   // Doan dang chay trong process nay (neu co) => moi cong phan "chua dong".
   const tracked = stepTimeline.get(job.id);
   let total = 0;
+  // Job CHUA TUNG CHAY (khong co doan nao co started_at) => null (chua bi do).
+  // Phai phan biet null voi 0: 0 = da chay nhung tong = 0 (doan 0ms),
+  // null = chua co du lieu runtime => UI fallback ve wall-clock cho job cu.
+  let hasStarted = false;
   for (const st of list) {
     if (!st) continue;
     const startedAt = Date.parse(st.started_at || '');
     if (!Number.isFinite(startedAt)) continue;
+    hasStarted = true;
     const finishedAt = st.finished_at ? Date.parse(st.finished_at) : NaN;
     if (Number.isFinite(finishedAt)) {
       const diff = finishedAt - startedAt;
@@ -2504,6 +2512,7 @@ function computeJobRuntimeMs(job, steps) {
     }
     // Doan MO khong duoc theo doi (orphan) => bo qua, khong dem thoi gian cho.
   }
+  if (!hasStarted) return null;
   return total;
 }
 
@@ -4051,10 +4060,13 @@ app.get('/api/v1/jobs/:id/logs/stream', (req, res) => {
   // 4b. Tick "Thoi luong" realtime: gui runtime_ms moi giay cho client
   // (thoi gian worker THUC SU chay, da cong don tu cac doan `steps`).
   // Client tinh san 1s => khong can polling lai endpoint job chi tiet.
+  // CHI tick khi job DANG CHAY: job terminal/FAILED/PENDING khong doi runtime
+  // nua => khong ton 2 query SQLite/giay cho moi connection (dang mo).
   const runtimeTickInterval = setInterval(() => {
     try {
       const fresh = db.getJobById(id);
       if (!fresh) return;
+      if (!RUNNING_JOB_STATUSES.has((fresh.status || '').toString().trim().toUpperCase())) return;
       const freshSteps = db.getStepsByJobId(fresh.id) || [];
       sendEvent('runtime', {
         type: 'runtime',
@@ -4134,6 +4146,7 @@ module.exports = {
   stopEvidenceWatcher,
   stopAllEvidenceWatchers,
   buildEvidenceSnapshot,
+  getTaskEvidences,
   // Runtime accounting (thoi gian worker thuc su chay task) - export de test.
   computeJobRuntimeMs,
   beginStepTimeline,

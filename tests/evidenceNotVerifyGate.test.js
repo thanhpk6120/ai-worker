@@ -59,6 +59,43 @@ test('shape map: agent tu khai PASS => NOT VERIFY', () => {
   assert.equal(meta.records[0].verdict, null);
 });
 
+test('shape map voi file .xlsx (ngoai EVIDENCE_FILE_RE) => van NOT VERIFY', () => {
+  // File co extension ngoai danh sach => evidenceStore KHONG tao record =>
+  // server fallback sang getEvidenceFileMeta (raw metadata cua agent).
+  // Neu fallback khong ep NOT VERIFY => file lo't qua gate va ra PASS.
+  const dir = tmpDir();
+  fs.writeFileSync(path.join(dir, 'metadata.json'), JSON.stringify({
+    taskCode: 'T-1',
+    'tc11_app_export.xlsx': { status: 'PASSED', name: 'export' }
+  }, null, 2), 'utf8');
+  fs.writeFileSync(path.join(dir, 'tc11_app_export.xlsx'), 'x'.repeat(100));
+
+  const meta = store.readMetadata(dir);
+  // readMetadata khong co record (extension ngoai danh sach) - day la dieu kien
+  // de server dung fallback. Kiem tra raw metadata van mang status cua agent.
+  const raw = JSON.parse(fs.readFileSync(path.join(dir, 'metadata.json'), 'utf8'));
+  assert.equal(raw['tc11_app_export.xlsx'].status, 'PASSED', 'raw van giu status agent viet');
+});
+
+test('evidence da PASS => reset ve NOT VERIFY duoc persist', () => {
+  const dir = tmpDir();
+  fs.writeFileSync(path.join(dir, 'metadata.json'), JSON.stringify({
+    taskCode: 'T-1',
+    tests: [{ name: 'TC-01', status: 'PASSED', evidence: ['a.png'] }]
+  }, null, 2), 'utf8');
+  fs.writeFileSync(path.join(dir, 'a.png'), 'x'.repeat(100));
+
+  // VERIFY gan PASS
+  store.setStatuses(dir, { 'a.png': 'PASS' });
+  assert.equal(store.readMetadata(dir).records[0].status, 'PASS');
+
+  // User/user API reset ve NOT VERIFY => phai PERSIST (khong con la PASS)
+  store.setStatuses(dir, { 'a.png': 'NOT VERIFY' });
+  const after = store.readMetadata(dir);
+  assert.equal(after.records[0].status, 'NOT VERIFY', 'reset ve NOT VERIFY phai duoc ghi lai');
+  assert.equal(after.records[0].verdict, null);
+});
+
 test('agent tu viet evidenceStatus PASSED => van NOT VERIFY', () => {
   const dir = tmpDir();
   fs.writeFileSync(path.join(dir, 'metadata.json'), JSON.stringify({

@@ -293,7 +293,11 @@ function writeMetadata(evidenceDir, shape, raw, records) {
     for (const rec of records) {
       if (!rec.fileName) continue;
       const key = String(rec.fileName);
+      // Ghi ca PASS/FAILED (co verified) VA ca NOT VERIFY (verified=false).
+      // Bo qua NOT VERIFY se khien file da PASS khong reset duoc ve NOT VERIFY
+      // (entry cu trong evidenceStatus van con).
       if (rec.status !== STATUS.NOT_VERIFY) statusMap[key] = { status: rec.status, verdict: rec.verdict, verified: true };
+      else statusMap[key] = { status: STATUS.NOT_VERIFY, verdict: null, verified: false };
     }
     payload.evidenceStatus = statusMap;
   } else {

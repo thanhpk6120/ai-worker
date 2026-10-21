@@ -1943,9 +1943,12 @@
     const durationEl = document.getElementById('activeJobDuration');
     if (!durationEl) return;
 
-    const runtimeMs = Number(state.activeJob.runtime_ms);
-    if (Number.isFinite(runtimeMs)) {
-      durationEl.textContent = formatDuration(Math.floor(runtimeMs / 1000));
+    // `runtime_ms` = null => job CHUA TUNG CHAY / job cu khong co du lieu
+    // runtime => fallback wall-clock. `runtime_ms` = 0 => da chay nhung tong 0ms
+    // (doan 0ms) => hien "0s", KHONG fallback.
+    const runtimeMs = state.activeJob.runtime_ms;
+    if (runtimeMs !== null && runtimeMs !== undefined && Number.isFinite(Number(runtimeMs))) {
+      durationEl.textContent = formatDuration(Math.floor(Number(runtimeMs) / 1000));
       return;
     }
 

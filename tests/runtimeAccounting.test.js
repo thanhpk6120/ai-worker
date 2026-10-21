@@ -114,10 +114,12 @@ test('job PENDING (cho user) dung dem, resume thi tiep tuc dem', () => {
   assert.equal(runtimeOf(jobId), 13 * 60 * 1000, 'tong = 8p + 5p (khong tinh 22p cho user)');
 });
 
-test('job chua tung chay (TO DO) => runtime = 0', () => {
+test('job chua tung chay (TO DO) => runtime = null (chua co du lieu, KHONG phai 0)', () => {
   const jobId = 'rt-todo-1';
   db.createJob({ id: jobId, title: 'T', prompt: 'p', status: 'TO DO' });
-  assert.equal(runtimeOf(jobId), 0);
+  // null = chua tung chay (UI fallback wall-clock cho job cu).
+  // 0 = da chay nhung tong 0ms - phai phan biet 2 truong hop nay.
+  assert.equal(runtimeOf(jobId), null);
   assert.equal((db.getStepsByJobId(jobId) || []).length, 0);
 });
 
@@ -169,4 +171,14 @@ test('doan MO chi duoc cong khi job dang chay that', () => {
   const s2 = db.createStep({ job_id: jobId, step_type: 'IMPLEMENT', step_index: 2, status: 'RUNNING', started_at: t0 });
   db.updateStep(s2.id, { status: 'COMPLETED', finished_at: shiftIso(t0, 5 * 60 * 1000), exit_code: 0 });
   assert.equal(runtimeOf(jobId), 5 * 60 * 1000, 'doan da dong van cong');
+});
+
+test('job da chay nhung doan 0ms => runtime = 0 (khac null)', () => {
+  const jobId = 'rt-zero-1';
+  db.createJob({ id: jobId, title: 'T', prompt: 'p', status: 'TO DO' });
+  const t0 = '2026-10-20T04:00:00.000Z';
+  const s1 = db.createStep({ job_id: jobId, step_type: 'IMPLEMENT', step_index: 1, status: 'RUNNING', started_at: t0 });
+  db.updateStep(s1.id, { status: 'COMPLETED', finished_at: t0, exit_code: 0 });
+  // Da chay (co started_at) nhung tong 0ms => 0, KHONG phai null.
+  assert.equal(runtimeOf(jobId), 0);
 });

@@ -11,7 +11,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { verifyTaskEvidence } = require('../src/server.js');
+const { verifyTaskEvidence, getTaskEvidences } = require('../src/server.js');
 const store = require('../src/verification/evidenceStore');
 
 function makeFeature() {
@@ -65,4 +65,27 @@ test('E2E: sau VERIFY -> PASS, tests[] van nguyen ban', () => {
   assert.equal(after.tests[0].status, 'PASSED', 'tests[] nguyen ban');
   assert.equal(after.evidenceStatus['a.png'].status, 'PASS');
   assert.equal(after.evidenceStatus['a.png'].verified, true);
+});
+
+test('E2E: file .xlsx (ngoai EVIDENCE_FILE_RE) agent tu khai PASSED => van NOT VERIFY', () => {
+  // File co extension ngoai danh sach => evidenceStore KHONG tao record =>
+  // server fallback sang getEvidenceFileMeta (raw metadata agent viet).
+  // Fallback phai ep NOT VERIFY neu khong file lo't qua gate thanh PASS.
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-worker-e2e-ws-'));
+  const featureDir = path.join(ws, 'docs', 'features', 'E2E-3');
+  const evidenceDir = path.join(featureDir, 'evidence');
+  fs.mkdirSync(evidenceDir, { recursive: true });
+  fs.writeFileSync(path.join(featureDir, 'test_plan.md'), '# Test plan\n', 'utf8');
+  fs.writeFileSync(path.join(evidenceDir, 'tc11_app_export.xlsx'), Buffer.alloc(6000, 1));
+  fs.writeFileSync(path.join(evidenceDir, 'metadata.json'), JSON.stringify({
+    taskCode: 'E2E-3',
+    'tc11_app_export.xlsx': { status: 'PASSED', name: 'export' }
+  }, null, 2), 'utf8');
+
+  const job = { id: 'job-e2e-3', task_code: 'E2E-3', repo_path: ws };
+  const items = getTaskEvidences(job);
+  const xl = items.find((e) => /\.xlsx$/i.test(e.filename || e.fileName || ''));
+  assert.ok(xl, `phai tim thay file .xlsx (n=${items.length})`);
+  assert.equal(xl.status, 'NOT VERIFY', 'file ngoai EVIDENCE_FILE_RE cung phai NOT VERIFY');
+  assert.equal(xl.verdict, null);
 });
