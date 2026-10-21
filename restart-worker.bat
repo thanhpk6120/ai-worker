@@ -16,7 +16,9 @@ echo [2/4] Cho port %PORT% tu do ...
 for /L %%i in (1,1,15) do (
   netstat -ano | findstr ":%PORT% " | findstr "LISTENING" >nul 2>&1
   if errorlevel 1 goto PORTFREE
-  timeout /t 1 /nobreak >nul
+  REM timeout /t doc stdin => loi "Input redirection is not supported" khi stdin bi redirect.
+  REM ping -n khong doc stdin, cho delay tuong duong.
+  ping -n 2 127.0.0.1 >nul
 )
 :PORTFREE
 netstat -ano | findstr ":%PORT% " | findstr "LISTENING" >nul 2>&1
@@ -27,8 +29,10 @@ if not errorlevel 1 (
 echo Port %PORT% da tu do.
 
 echo [3/4] Start nen: node src/index.js ...
+REM Xoa bien SystemOne ke thua tu shell cha truoc khi start (gia tri cu se che do .env).
+call "%~dp0clear-systemone-env.bat"
 start "" /MIN cmd /c "node src/index.js >> %LOGFILE% 2>&1"
-timeout /t 3 /nobreak >nul
+ping -n 4 127.0.0.1 >nul
 
 echo [4/4] Kiem tra /api/v1/status ...
 curl -s -o nul -w "HTTP %%{http_code}\n" http://localhost:%PORT%/api/v1/status

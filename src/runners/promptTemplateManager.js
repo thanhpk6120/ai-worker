@@ -11,6 +11,7 @@ class PromptTemplateManager {
    * @param {string} step Tên bước: planning, implement, testing, fixing
    */
   getTemplate(step) {
+    // step co the co suffix "-quick" (vd "planning-quick") -> dung template rieng cho task nhe.
     const filename = `${step.toLowerCase()}.md`;
     const fullPath = path.join(this.templatesDir, filename);
 

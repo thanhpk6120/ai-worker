@@ -10,5 +10,8 @@ if %errorlevel% equ 0 (
     echo [INFO] Port 3000 dang duoc dung, khong start them.
     exit /b 0
 )
+rem Xoa bien SystemOne ke thua tu shell cha (gia tri cu co the che do .env).
+rem XOA HAN (set "VAR="), khong gan rong - xem clear-systemone-env.bat.
+call "%~dp0clear-systemone-env.bat"
 powershell -NoProfile -WindowStyle Hidden -Command "Start-Process -FilePath 'node' -ArgumentList 'src/index.js' -WorkingDirectory '%PROJECT_ROOT%' -WindowStyle Hidden -RedirectStandardOutput '%PROJECT_ROOT%logs\server-bg.log' -RedirectStandardError '%PROJECT_ROOT%logs\server-bg-err.log'"
 echo [OK] Worker dang chay nen. Kiem tra: curl http://localhost:3000/api/v1/status

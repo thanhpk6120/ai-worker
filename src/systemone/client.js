@@ -9,11 +9,17 @@ const crypto = require('node:crypto');
 const config = require('../config');
 const { maskSecrets } = require('../execution/secretScrubber');
 const policy = require('./policy');
+const { mergeStateWithFiles } = require('./fileContext');
 
 const THRESHOLD = 0.5;
+// Ngan sach toi da cho `state` (ky tu). 240KB ~= 60k tokens - duoi context window model (~180k tokens).
+const MAX_STATE_CHARS = 240000;
 
 const cache = new Map(); // key -> { expiresAt, value }
 const stats = { calls: 0, hits: 0, misses: 0, fallbacks: 0, cliSaved: 0, cost: 0 };
+// Theo doi trang thai ket noi model that: null = chua goi, false = fail gan nhat, true = live.
+let lastLiveState = null;
+let lastError = null;
 
 function isEnabled() {
   return config.SYSTEMONE_ENABLED !== false;
@@ -55,7 +61,7 @@ function miss(route) {
 
 async function postJev({ state, questions }) {
   const url = config.SYSTEMONE_BASE_URL;
-  const model = config.SYSTEMONE_MODEL || 'oc/jev-1.13-free';
+  const model = config.SYSTEMONE_MODEL || 'openrouter/typesafe/jev-1.13';
   const timeoutMs = Number(config.SYSTEMONE_TIMEOUT_MS) || 8000;
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
@@ -67,12 +73,25 @@ async function postJev({ state, questions }) {
       method: 'POST',
       headers,
       signal: controller.signal,
-      body: JSON.stringify({ model, state: maskSecrets(String(state || '')).slice(0, 4000), questions })
+      // Budget state theo TOKEN (khong phai ky tu): 60k tokens ~= 240KB.
+      // Slice 4000 ky tu se cat sach fileContext => model khong doc duoc file.
+      // Do thuc te 2026-10-21: 240KB -> HTTP 200 trong ~1.7s (duoi timeout 8s).
+      body: JSON.stringify({ model, state: maskSecrets(String(state || '')).slice(0, MAX_STATE_CHARS), questions })
     });
-    if (!res.ok) throw new Error('systemone http ' + res.status);
+    if (!res.ok) {
+      const err = new Error('systemone http ' + res.status);
+      err.status = res.status;
+      throw err;
+    }
     const data = await res.json();
     if (data && data.usage && typeof data.usage.cost === 'number') stats.cost += data.usage.cost;
+    lastLiveState = true;
+    lastError = null;
     return data;
+  } catch (e) {
+    lastLiveState = false;
+    lastError = (e && e.message) ? e.message : String(e);
+    throw e;
   } finally {
     clearTimeout(t);
   }
@@ -120,25 +139,38 @@ async function decideRouter({ taskCode = '', step = '', candidates = [], preferr
 async function decideTriage({ taskCode = '', prompt = '', jobId = '' } = {}) {
   const route = 'triage';
   const payload = { taskCode, prompt: String(prompt || '').slice(0, 2000), jobId };
+  // Heuristic regex TUC THI (0 network call) khi prompt RO RANG:
+  // - task de (ngan, khong phai sua bug)  -> quick
+  // - task phuc tap (migrate/refactor)   -> full
+  // Chi goi model khi heuristic MO HO (prompt trung binh) - do lon,
+  // noi dung nho, can phan loai chinh xac hon regex.
+  const sig = policy.triageSignals({ prompt });
+  if (sig.quick) {
+    return { complexity: 'S', track: 'quick', needBrowser: sig.needBrowser, confidence: 0.9, cached: false, source: 'heuristic-fast' };
+  }
+  if (sig.large) {
+    return { complexity: 'L', track: 'full', needBrowser: sig.needBrowser, confidence: 0.9, cached: false, source: 'heuristic-fast' };
+  }
   if (!isEnabled()) { stats.fallbacks += 1; return policy.triageHeuristic({ prompt }); }
   const cached = getCache(route, payload);
   if (cached) return cached;
+  // Chi 2 cau hoi: is_quick + is_large. `need_browser` da bi bo - ket qua chi
+  // duoc ghi vao log, khong quyet dinh gi => hoi model la ton call thua.
   const questions = {
     is_quick: { type: 'noul', question: 'Is this task quick (single small fix, no planning)?', instructions: 'High only for trivial check/small fix under one file' },
-    is_large: { type: 'noul', question: 'Is this task large (migrate/refactor/multi-module)?', instructions: 'High for migrate, refactor, multi-module work' },
-    need_browser: { type: 'noul', question: 'Does this need browser evidence?', instructions: 'High if mentions screenshot, UI, browser, visual check' }
+    is_large: { type: 'noul', question: 'Is this task large (migrate/refactor/multi-module)?', instructions: 'High for migrate, refactor, multi-module work' }
   };
   try {
     const data = await postJev({ state: `Task ${taskCode}: ${String(prompt || '').slice(0, 2000)}`, questions });
     const answers = (data && data.answers) || {};
     const q = noulOf(answers, 'is_quick');
     const l = noulOf(answers, 'is_large');
-    const b = noulOf(answers, 'need_browser');
-    if (![q, l, b].every(Number.isFinite)) { stats.fallbacks += 1; return policy.triageHeuristic({ prompt }); }
-    let out;
-    if (q >= THRESHOLD) out = { complexity: 'S', track: 'quick', needBrowser: b >= THRESHOLD, confidence: q, cached: false };
-    else if (l >= THRESHOLD) out = { complexity: 'L', track: 'full', needBrowser: b >= THRESHOLD, confidence: l, cached: false };
-    else out = { complexity: 'M', track: 'full', needBrowser: b >= THRESHOLD, confidence: Math.max(q, l), cached: false };
+    if (![q, l].every(Number.isFinite)) { stats.fallbacks += 1; return policy.triageHeuristic({ prompt }); }
+    const out = q >= THRESHOLD
+      ? { complexity: 'S', track: 'quick', needBrowser: sig.needBrowser, confidence: q, cached: false }
+      : (l >= THRESHOLD
+        ? { complexity: 'L', track: 'full', needBrowser: sig.needBrowser, confidence: l, cached: false }
+        : { complexity: 'M', track: 'full', needBrowser: sig.needBrowser, confidence: Math.max(q, l), cached: false });
     setCache(route, payload, out);
     return { ...out };
   } catch (e) {
@@ -147,9 +179,15 @@ async function decideTriage({ taskCode = '', prompt = '', jobId = '' } = {}) {
   }
 }
 
-async function decideFixGate({ jobId = '', attempt = 0, maxRetries = 3, failures = {}, files = [] } = {}) {
+async function decideFixGate({ jobId = '', attempt = 0, maxRetries = 3, failures = {}, files = [], fileContext = '' } = {}) {
   const route = 'fixgate';
-  const payload = { jobId, attempt, maxRetries, failures, files: (files || []).slice(0, 20) };
+  // fileContext la noi dung file da gom (xem fileContext.js) - gateway chi doc `state`,
+  // nen noi dung file phai nhung vao state de model thuc su "doc" duoc.
+  // Cache key phai phan biet NOI DUNG file khac nhau. Slice 2000 ky tu dau se
+  // gop 2 bo file khac nhau vao cung cache key => tra quyet dinh cu cho noi dung moi.
+  // Dung hash sha256 cua toan bo fileContext.
+  const fileContextHash = crypto.createHash('sha256').update(String(fileContext || '')).digest('hex').slice(0, 16);
+  const payload = { jobId, attempt, maxRetries, failures, files: (files || []).slice(0, 20), fileContextHash };
   if (Number(attempt) >= Number(maxRetries)) return { retry: false, p_success: 0, fixScope: 'scoped', confidence: 1, cached: false };
   if (!isEnabled()) { stats.fallbacks += 1; return policy.fixGateHeuristic({ attempt, maxRetries }); }
   const cached = getCache(route, payload);
@@ -161,7 +199,10 @@ async function decideFixGate({ jobId = '', attempt = 0, maxRetries = 3, failures
     is_tiny_fix: { type: 'noul', question: 'Is this a tiny one-spot fix?', instructions: 'High for single-line or single-file fix' }
   };
   try {
-    const data = await postJev({ state: `Job ${jobId} fix attempt ${attempt}/${maxRetries}. Failures: ${maskSecrets(JSON.stringify(failures || {})).slice(0, 1500)}. Files: ${(files || []).slice(0, 10).join(', ')}`, questions });
+    const state = `Job ${jobId} fix attempt ${attempt}/${maxRetries}. Failures: ${maskSecrets(JSON.stringify(failures || {})).slice(0, 1500)}. Files: ${(files || []).slice(0, 10).join(', ')}`;
+    // Noi dung file (neu co) duoc nhung vao state - gateway chi doc `state`.
+    const fullState = fileContext ? mergeStateWithFiles(state, fileContext) : state;
+    const data = await postJev({ state: fullState, questions });
     const answers = (data && data.answers) || {};
     const r = noulOf(answers, 'should_retry');
     const p = noulOf(answers, 'will_succeed');
@@ -263,8 +304,73 @@ function addCliSaved(n) {
   stats.cliSaved += Number(n) || 0;
 }
 
+// ---- Tracker SystemOne THEO TUNG JOB ----
+// Badge "CHƯA GỌI" phai la du lieu cua TUNG task, khong phai trang thai global cua server.
+// Mỗi job ghi rieng: so lan goi model that, so lan fallback heuristic, loi cuoi cung.
+const jobTrackers = new Map(); // jobId -> { calls, fallbacks, live, lastError, updatedAt }
+
+/**
+ * Ghi nhan 1 lan quyet dinh SystemOne cho 1 job.
+ * @param {string} jobId
+ * @param {object} decision Ket qua quyet dinh (co `fallback` => true neu dung heuristic)
+ * @param {string} route Ten buoc (guard/triage/fixgate/...)
+ */
+function trackJobDecision(jobId, decision, route) {
+  if (!jobId) return;
+  // `heuristic-fast` = quyet dinh TUC THI bang regex, KHONG goi model.
+  // => khong phai quyet dinh tu model thật => khong dem vao calls, khong doi badge.
+  if (decision && decision.source === 'heuristic-fast') return;
+  const prev = jobTrackers.get(jobId) || { calls: 0, fallbacks: 0, live: null, lastError: null, updatedAt: null, routes: {} };
+  const fallback = !!(decision && decision.fallback === true);
+  prev.calls += 1;
+  if (fallback) prev.fallbacks += 1;
+  // "live" = lan goi gan nhat co dung model that hay khong.
+  prev.live = !fallback;
+  if (fallback && prev.lastError === null) {
+    prev.lastError = 'model khong phan hoi - dung heuristic offline';
+  }
+  if (!fallback) prev.lastError = null;
+  try {
+    prev.routes[route] = prev.routes[route] || { calls: 0, fallbacks: 0 };
+    prev.routes[route].calls += 1;
+    if (fallback) prev.routes[route].fallbacks += 1;
+  } catch (e) {}
+  prev.updatedAt = new Date().toISOString();
+  jobTrackers.set(jobId, prev);
+}
+
+/**
+ * Lay trang thai SystemOne cua 1 job.
+ * @param {string} jobId
+ * @returns {{live: boolean|null, calls: number, fallbacks: number, lastError: string|null, updatedAt: string|null, routes: object}}
+ */
+function getJobStatus(jobId) {
+  if (!jobId) return { live: null, calls: 0, fallbacks: 0, lastError: null, updatedAt: null, routes: {} };
+  const t = jobTrackers.get(jobId);
+  if (!t) return { live: null, calls: 0, fallbacks: 0, lastError: null, updatedAt: null, routes: {} };
+  return {
+    live: t.live,
+    calls: t.calls,
+    fallbacks: t.fallbacks,
+    lastError: t.lastError,
+    updatedAt: t.updatedAt,
+    routes: t.routes || {}
+  };
+}
+
 function getStats() {
   return { ...stats };
+}
+
+/**
+ * Dedup LOCAL (hash SHA16) - khong goi mang.
+ * Dung khi chi can bucketId de gan nhan trong log; goi model chi ton mot
+ * network call ma khong doi quyet dinh nao.
+ * @param {object} args { taskCode, prompt }
+ * @returns {{bucketId: string, confidence: number, cached: boolean, isDuplicate: boolean, isNoise: boolean}}
+ */
+function localDedup({ taskCode = '', prompt = '' } = {}) {
+  return policy.dedupHeuristic({ taskCode, prompt });
 }
 
 // ---- Pipeline wire (gộp từ wire.js theo dev_plan: chỉ client.js + policy.js) ----
@@ -282,76 +388,138 @@ function candidatesFromRegistry(runnerRegistry, preferred) {
 async function pickRunner({ runnerRegistry, preferredName, taskCode, step, jobId }) {
   const fallbackName = preferredName || 'claude-code';
   try {
-    if (!isEnabled()) return { name: fallbackName, decision: policy.routerHeuristic({ preferredName: fallbackName }), saved: 0 };
+    if (!isEnabled()) {
+      const d = policy.routerHeuristic({ preferredName: fallbackName });
+      trackJobDecision(jobId, d, 'router');
+      return { name: fallbackName, decision: d, saved: 0 };
+    }
     const candidates = candidatesFromRegistry(runnerRegistry, fallbackName);
     const decision = await decideRouter({ taskCode, step, candidates, preferredName: fallbackName, jobId });
     if (decision && decision.runner && decision.confidence >= 0.5) {
+      trackJobDecision(jobId, decision, 'router');
       return { name: decision.runner, decision, saved: 0 };
     }
+    trackJobDecision(jobId, decision, 'router');
     return { name: fallbackName, decision, saved: 0 };
   } catch (e) {
-    return { name: fallbackName, decision: policy.routerHeuristic({ preferredName: fallbackName }), saved: 0 };
+    const d = policy.routerHeuristic({ preferredName: fallbackName });
+    trackJobDecision(jobId, d, 'router');
+    return { name: fallbackName, decision: d, saved: 0 };
   }
 }
-async function checkGuard({ taskCode, prompt }) {
+async function checkGuard({ taskCode, prompt, jobId }) {
   const original = String(prompt || '');
   const scrubbed = maskSecrets(original);
   try {
-    if (!isEnabled()) return { action: 'scrub', promptToUse: original, decision: policy.guardHeuristic(), blocked: false };
+    // Heuristic offline: fail-closed => luon scrub (khong dung prompt goc).
+    if (!isEnabled()) {
+      const d = policy.guardHeuristic();
+      trackJobDecision(jobId, d, 'guard');
+      return { action: 'scrub', promptToUse: scrubbed, decision: d, blocked: false };
+    }
     const decision = await decideGuard({ taskCode, prompt });
-    if (!decision) return { action: 'scrub', promptToUse: original, decision: policy.guardHeuristic(), blocked: false };
+    if (!decision) {
+      const d = policy.guardHeuristic();
+      trackJobDecision(jobId, d, 'guard');
+      return { action: 'scrub', promptToUse: scrubbed, decision: d, blocked: false };
+    }
+    trackJobDecision(jobId, decision, 'guard');
     if (decision.action === 'block' || decision.action === 'warn') {
       addCliSaved(1);
-      console.warn(`[SYSTEMONE-GUARD] warn action=${decision.action} confidence=${decision.confidence} hasSecret=${decision.hasSecret} hasInjection=${decision.hasInjection} task=${taskCode} promptLog=${scrubbed.slice(0, 200)} -> tiep tuc bang prompt goc, khong FAILED job.`);
-      return { action: 'warn', promptToUse: original, decision, blocked: false, warned: true };
+      console.warn(`[SYSTEMONE-GUARD] warn action=${decision.action} confidence=${decision.confidence} hasSecret=${decision.hasSecret} hasInjection=${decision.hasInjection} task=${taskCode} promptLog=${scrubbed.slice(0, 200)} -> tiep tuc bang prompt da scrub, khong FAILED job.`);
+      return { action: 'warn', promptToUse: scrubbed, decision, blocked: false, warned: true };
     }
     if ((decision.action || 'scrub') === 'allow' && decision.hasSecret === false && decision.hasInjection === false) {
       return { action: 'allow', promptToUse: original, decision, blocked: false };
     }
-    return { action: decision.action || 'scrub', promptToUse: original, decision, blocked: false };
+    // action='scrub' => PHẢI dùng prompt đã scrub. Trước đây trả `original`
+    // khiến SecretScrubber không có tác dụng gì cả.
+    return { action: decision.action || 'scrub', promptToUse: scrubbed, decision, blocked: false };
   } catch (e) {
-    return { action: 'scrub', promptToUse: original, decision: policy.guardHeuristic(), blocked: false };
+    return { action: 'scrub', promptToUse: scrubbed, decision: policy.guardHeuristic(), blocked: false };
   }
 }
 async function checkTriage({ taskCode, prompt, jobId }) {
   try {
-    if (!isEnabled()) return policy.triageHeuristic({ prompt });
-    return await decideTriage({ taskCode, prompt, jobId });
+    if (!isEnabled()) {
+      const d = policy.triageHeuristic({ prompt });
+      trackJobDecision(jobId, d, 'triage');
+      return d;
+    }
+    const d = await decideTriage({ taskCode, prompt, jobId });
+    trackJobDecision(jobId, d, 'triage');
+    return d;
   } catch (e) {
-    return policy.triageHeuristic({ prompt });
+    const d = policy.triageHeuristic({ prompt });
+    trackJobDecision(jobId, d, 'triage');
+    return d;
   }
 }
-async function checkFixGate({ jobId, attempt, maxRetries, failures, files }) {
+async function checkFixGate({ jobId, attempt, maxRetries, failures, files, fileContext }) {
+  // Het so lan retry that => dung, bat ke model co hoat dong hay khong.
+  if (Number(attempt) >= Number(maxRetries)) {
+    return { retry: false, p_success: 0, fixScope: 'scoped', confidence: 1, cached: false, source: 'attempt-limit' };
+  }
   try {
-    if (Number(attempt) >= Number(maxRetries)) {
-      return { retry: false, p_success: 0, fixScope: 'scoped', confidence: 1, cached: false };
+    if (!isEnabled()) {
+      const d = policy.fixGateHeuristic({ attempt, maxRetries });
+      trackJobDecision(jobId, d, 'fixgate');
+      return d;
     }
-    if (!isEnabled()) return policy.fixGateHeuristic({ attempt, maxRetries });
-    const decision = await decideFixGate({ jobId, attempt, maxRetries, failures, files });
-    if (decision && decision.retry && Number(decision.p_success) < 0.3 && decision.fixScope === 'full') {
+    const decision = await decideFixGate({ jobId, attempt, maxRetries, failures, files, fileContext });
+    if (!decision) {
+      const d = policy.fixGateHeuristic({ attempt, maxRetries });
+      trackJobDecision(jobId, d, 'fixgate');
+      return d;
+    }
+    // Heuristic offline KHONG duoc phep chan retry bang so lieu gia.
+    // Task bd88ae0a that bai o attempt 3/3 chi vi p_success=0.3 cua heuristic.
+    trackJobDecision(jobId, decision, 'fixgate');
+    if (decision.fallback === true) {
+      return { ...decision, retry: true, source: 'heuristic' };
+    }
+    if (decision.retry && Number(decision.p_success) < 0.3 && decision.fixScope === 'full') {
       addCliSaved(1);
       return { ...decision, retry: false };
     }
-    if (decision && decision.retry === false) addCliSaved(1);
+    if (decision.retry === false) addCliSaved(1);
     return decision;
   } catch (e) {
-    return policy.fixGateHeuristic({ attempt, maxRetries });
+    const d = policy.fixGateHeuristic({ attempt, maxRetries });
+    trackJobDecision(jobId, d, 'fixgate');
+    return d;
   }
 }
 async function checkPreJudge({ jobId, taskCode, summary }) {
   try {
-    if (!isEnabled()) return policy.preJudgeHeuristic();
-    return await decidePreJudge({ jobId, taskCode, summary });
+    if (!isEnabled()) {
+      const d = policy.preJudgeHeuristic();
+      trackJobDecision(jobId, d, 'prejudge');
+      return d;
+    }
+    const d = await decidePreJudge({ jobId, taskCode, summary });
+    trackJobDecision(jobId, d, 'prejudge');
+    return d;
   } catch (e) {
-    return policy.preJudgeHeuristic();
+    const d = policy.preJudgeHeuristic();
+    trackJobDecision(jobId, d, 'prejudge');
+    return d;
   }
 }
-async function checkDedup({ taskCode, prompt }) {
+async function checkDedup({ taskCode, prompt, jobId }) {
   try {
-    if (!isEnabled()) return policy.dedupHeuristic({ taskCode, prompt });
-    return await decideDedup({ taskCode, prompt });
+    if (!isEnabled()) {
+      const d = policy.dedupHeuristic({ taskCode, prompt });
+      trackJobDecision(jobId, d, 'dedup');
+      return d;
+    }
+    const d = await decideDedup({ taskCode, prompt });
+    trackJobDecision(jobId, d, 'dedup');
+    return d;
   } catch (e) {
-    return policy.dedupHeuristic({ taskCode, prompt });
+    const d = policy.dedupHeuristic({ taskCode, prompt });
+    trackJobDecision(jobId, d, 'dedup');
+    return d;
   }
 }
 function getFixAttempt(job) {
@@ -374,6 +542,54 @@ function withFixAttempt(job, attempt) {
     return { fix_attempt: attempt };
   }
 }
+
+/**
+ * Probe trực tiếp model SystemOne (1 request noul tối thiểu).
+ * Dùng để verify đúng endpoint/key/model đang nạp — không đi qua cache.
+ * @returns {Promise<{live: boolean, model: string, baseUrl: string, error: string|null, noul: number|null}>}
+ */
+async function probe() {
+  const baseUrl = config.SYSTEMONE_BASE_URL;
+  const model = config.SYSTEMONE_MODEL || 'openrouter/typesafe/jev-1.13';
+  if (!isEnabled()) {
+    return { live: false, model, baseUrl, error: 'SYSTEMONE_ENABLED=false', noul: null };
+  }
+  try {
+    const data = await postJev({
+      state: 'Health probe: is the typed-decision model reachable?',
+      questions: {
+        is_alive: { type: 'noul', question: 'Is the model reachable?', instructions: 'High if the model responds coherently' }
+      }
+    });
+    const noul = noulOf((data && data.answers) || {}, 'is_alive');
+    // Gateway tra 200 nhung answers rong (schema/model lech) => khong co noul hop le
+    // thi KHONG duoc bao "live": chinh probe nay de phat hien loi do.
+    if (!Number.isFinite(noul)) {
+      return { live: false, model: (data && data.model) || model, baseUrl, error: 'response khong co answers.is_alive.noul hop le', noul: null };
+    }
+    return { live: true, model: (data && data.model) || model, baseUrl, error: null, noul };
+  } catch (e) {
+    return { live: false, model, baseUrl, error: (e && e.message) ? e.message : String(e), noul: null };
+  }
+}
+
+/**
+ * Trang thái SystemOne: model that co hoat dong hay khong.
+ * Dung cho API/UI hien thi "Fallback heuristic" thay vi gia nhu model that.
+ */
+function getStatus() {
+  return {
+    enabled: isEnabled(),
+    baseUrl: config.SYSTEMONE_BASE_URL,
+    model: config.SYSTEMONE_MODEL || 'openrouter/typesafe/jev-1.13',
+    // null = chua goi lan nao; true = goi thanh cong; false = fail gan nhat
+    live: lastLiveState,
+    lastError: lastError,
+    fallbackCount: stats.fallbacks,
+    calls: stats.calls,
+    cacheTtlMs: config.SYSTEMONE_CACHE_TTL_MS
+  };
+}
 module.exports = {
   THRESHOLD,
   decideRouter,
@@ -392,5 +608,10 @@ module.exports = {
   checkPreJudge,
   checkDedup,
   getFixAttempt,
-  withFixAttempt
+  withFixAttempt,
+  probe,
+  getStatus,
+  getJobStatus,
+  trackJobDecision,
+  localDedup
 };

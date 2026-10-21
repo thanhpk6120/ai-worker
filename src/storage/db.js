@@ -68,6 +68,11 @@ function initDb() {
     if (!colNames.includes('had_pending')) {
       dbInstance.exec('ALTER TABLE jobs ADD COLUMN had_pending INTEGER DEFAULT 0;');
     }
+    // Trang thai SystemOne THEO TUNG JOB (JSON): { live, calls, fallbacks, lastError, model, updatedAt }.
+    // Badge "CHƯA GỌI" phai la du lieu cua task, khong phai trang thai global cua server.
+    if (!colNames.includes('systemone_state')) {
+      dbInstance.exec('ALTER TABLE jobs ADD COLUMN systemone_state TEXT;');
+    }
   } catch (err) {
     // Bỏ qua nếu lỗi migration
   }
@@ -585,8 +590,10 @@ function getEvidenceByJobId(jobId) {
       type: r.type,
       evidence_type: parsed.evidence_type || parsed.evidenceType || r.type,
       channel: parsed.channel || (r.type === 'UI_SCREENSHOT' ? 'ui' : r.type === 'API_TEST' ? 'api' : r.type === 'DB_QUERY' || r.type === 'DB_ASSERT' ? 'db' : r.type === 'LOG_TRACE' || r.type === 'SERVICE_LOG' ? 'log' : null),
-      verdict: r.verdict === 'FAIL' ? 'FAIL' : 'PASS',
-      status: parsed.status || (r.verdict === 'FAIL' ? 'FAIL' : 'PASSED'),
+      // Vong doi 3 gia tri: verdict cu ra 'FAIL'/'PASS' nhung evidence chua verify
+      // phai la 'NOT VERIFY' — truoc day mac dinh 'PASS' khi verdict rong.
+      verdict: r.verdict === 'FAIL' ? 'FAIL' : (r.verdict === 'PASS' ? 'PASS' : null),
+      status: parsed.status || (r.verdict === 'FAIL' ? 'FAILED' : (r.verdict === 'PASS' ? 'PASS' : 'NOT VERIFY')),
       file_path: parsed.file_path || (r.type === 'UI_SCREENSHOT' ? `/evidence/${r.id}.png` : null),
       url: parsed.url || parsed.file_path || (r.type === 'UI_SCREENSHOT' ? `/evidence/${r.id}.png` : null)
     };

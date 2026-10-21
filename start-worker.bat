@@ -32,13 +32,15 @@ if %errorlevel% neq 0 (
 
 echo [*] Node.js runtime ready!
 echo [*] Opening Web UI Dashboard at http://localhost:3000...
-start "" cmd /c "timeout /t 2 /nobreak >nul && start http://localhost:3000"
+start "" cmd /c "ping -n 3 127.0.0.1 >nul && start http://localhost:3000"
 
 echo.
 echo [*] Server is running on port 3000...
 echo [*] Press Ctrl + C to stop the server.
 echo.
 
+REM Xoa bien SystemOne ke thua tu shell cha truoc khi chay node (gia tri cu se che do .env).
+call "%~dp0clear-systemone-env.bat"
 %NODE_CMD% src/index.js
 
 if %errorlevel% neq 0 (

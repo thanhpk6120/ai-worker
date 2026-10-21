@@ -12,8 +12,8 @@ updated_at: 2026-10-16
 
 ## 0. Transport Jev (áp dụng mọi task)
 
-- `SYSTEMONE_BASE_URL` mặc định `http://127.0.0.1:20128/v1/systemone` (gồm cả base path `/v1/systemone`, cấm nối thêm path thừa); client `POST` thẳng vào `BASE_URL` với header `Authorization: Bearer <SYSTEMONE_API_KEY>`.
-- Request bắt buộc (đã verify live): `{model: "oc/jev-1.13-free", state: string, questions: {<name>: {type: "noul", question, instructions}}}`. Thiếu `state` → `400`; question thiếu `instructions/criteria` → `400`.
+- `SYSTEMONE_BASE_URL` **mặc định trong code = `http://127.0.0.1:20128/v1/systemone`** (self-host local, cấm hardcode domain; `.env` trỏ tới `https://9router.thanhpk.io.vn/v1/systemone`); gồm cả base path `/v1/systemone`, cấm nối thêm path thừa; client `POST` thẳng vào `BASE_URL` với header `Authorization: Bearer <SYSTEMONE_API_KEY>`.
+- Request bắt buộc (đã verify live 2026-10-21): `{model: "openrouter/typesafe/jev-1.13", state: string, questions: {<name>: {type: "noul", question, instructions}}}`. Thiếu `state` → `400`; question thiếu `instructions/criteria` → `400`; bỏ prefix `openrouter/` → `400 No credentials for provider: typesafe`.
 - Response live: `{model, answers: {<name>: {type: "noul", noul}}, usage: {input_tokens, output_tokens}}`; không bắt buộc `cost/id/provider`. Ưu tiên `instructions` vì `criteria` đôi khi `422 Endpoint is unavailable`.
 Ví dụ response Jev (mẫu thật):
 ```json

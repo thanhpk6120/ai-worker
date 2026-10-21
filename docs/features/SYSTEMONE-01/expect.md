@@ -50,12 +50,12 @@ Kết luận: xóa toàn bộ 6 UC cũ. Viết lại 6 UC dưới đây theo typ
 
 ## 3. Sáu UC đúng Jev typed-decision (schema bắt buộc)
 
-- Contract vận chuyển (áp dụng mọi UC, đã verify live 2026-10-16): `SYSTEMONE_BASE_URL` mặc định `http://127.0.0.1:20128/v1/systemone`; client `POST` thẳng vào `BASE_URL`, cấm nối thêm path thừa. Header `Authorization: Bearer <SYSTEMONE_API_KEY>`, `Content-Type: application/json`.
-- Request bắt buộc: `{model, state, questions}`. `model` dùng `oc/jev-1.13-free` (đã gọi live OK). `state` là string ngữ cảnh (thiếu → `400 Missing required field: state`). Mỗi question `noul` bắt buộc có `question` + (`instructions` hoặc `criteria`); thiếu → `400 Noul question must have criteria or instructions`.
+- Contract vận chuyển (áp dụng mọi UC, đã verify live 2026-10-21): `SYSTEMONE_BASE_URL` **mặc định trong code = `http://127.0.0.1:20128/v1/systemone`** (self-host local, cấm hardcode domain); `.env` trỏ tới `https://9router.thanhpk.io.vn/v1/systemone`. Client `POST` thẳng vào `BASE_URL`, cấm nối thêm path thừa. Header `Authorization: Bearer <SYSTEMONE_API_KEY>`, `Content-Type: application/json`.
+- Request bắt buộc: `{model, state, questions}`. `model` dùng `openrouter/typesafe/jev-1.13` (đã gọi live OK 2026-10-21, provider `TypeSafe`; **bỏ prefix `openrouter/` sẽ ra 400 "No credentials for provider: typesafe"**). `state` là string ngữ cảnh (thiếu → `400 Missing required field: state`). Mỗi question `noul` bắt buộc có `question` + (`instructions` hoặc `criteria`); thiếu → `400 Noul question must have criteria or instructions`.
 - Response live: `{model, answers: {<name>: {type: "noul", noul: number}}, usage: {input_tokens, output_tokens}}` (`cost/id/provider` có thể vắng, không validator bắt buộc). Field `noul: number [0,1]` là calibrated probability, dùng làm `confidence`.
-- Ví dụ gọi live thành công (`HTTP 200`, `model: oc/jev-1.13-free`):
+- Ví dụ gọi live thành công (`HTTP 200`, `model: openrouter/typesafe/jev-1.13` → provider `TypeSafe`, model thực `typesafe/jev-1.13-20260917`):
 ```json
-{"model": "jev-1.13-free", "answers": {"is_quick": {"type": "noul", "noul": 0.38}, "need_browser": {"type": "noul", "noul": 0.91}, "has_secret": {"type": "noul", "noul": 0.95}}, "usage": {"input_tokens": 328, "output_tokens": 56}}
+{"model": "typesafe/jev-1.13-20260917", "answers": {"is_urgent": {"type": "noul", "noul": 0.96}}, "usage": {"input_tokens": 290, "output_tokens": 23, "cost": 0.00001218}, "id": "gen-dec-...", "provider": "TypeSafe"}
 ```
 - Map 6 UC: mỗi UC = 1 request POST với NHIỀU question `noul` trong `questions:{...}` (vì mỗi answer `noul` chỉ trả 1 số thực [0,1]); client ánh xạ ngưỡng `noul` sang object typed. Thiếu field = miss → fallback đường cũ. Ngưỡng mặc định `0.5`, hiệu chỉnh ở dev_plan.
 - Không sinh markdown tự do ở bất kỳ UC nào.

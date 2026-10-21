@@ -98,6 +98,12 @@
         <span class="text-slate-500">/</span>
         <span id="maxConcurrency" class="text-slate-400 font-mono">3</span>
       </div>
+      <span class="text-slate-600">|</span>
+      <div class="flex items-center gap-1.5 text-slate-400" id="systemOneBadgeWrap" title="Trạng thái model SystemOne (SystemOne / Jev)">
+        <i class="fa-solid fa-brain text-slate-500"></i>
+        <span>SystemOne:</span>
+        <span id="systemOneStatus" class="text-slate-300 font-mono">—</span>
+      </div>
     </div>
 
     <!-- Header Actions -->
@@ -217,6 +223,7 @@
                 <span id="activeJobIdBadge" class="font-mono text-xs px-2 py-0.5 rounded bg-slate-800 text-brand-400 border border-slate-700">job_id</span>
                 <span id="activeJobStatusBadge" class="status-badge status-todo">TO DO</span>
                 <span id="activeJobRunnerBadge" class="text-xs px-2 py-0.5 rounded bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 font-mono">claude</span>
+                <span id="activeJobSystemOneBadge" class="text-xs px-2 py-0.5 rounded bg-slate-700/60 text-slate-400 border border-slate-600/30 font-mono" title="SystemOne của task này">CHƯA GỌI</span>
                 <span id="activeJobFixingBadge" class="hidden text-xs px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 font-mono animate-pulse">Fixing: 1/3</span>
               </div>
               <h2 id="activeJobTitle" class="text-base sm:text-lg font-bold text-white truncate">Job Title Here</h2>

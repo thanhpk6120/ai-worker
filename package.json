@@ -6,7 +6,10 @@
   "scripts": {
     "start": "node src/index.js",
     "test": "node --test tests/**/*.test.js",
-    "test:pipeline": "node scripts/verify-subprocess-pipeline.js"
+    "test:pipeline": "node scripts/verify-subprocess-pipeline.js",
+    "test:verify-fix": "node scripts/verify-task-pipeline-fix.js",
+    "test:systemone": "node scripts/verify-systemone-live.js",
+    "test:badge": "node scripts/verify-systemone-badge.js"
   },
   "repository": {
     "type": "git",

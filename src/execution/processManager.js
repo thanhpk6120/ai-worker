@@ -117,8 +117,12 @@ class ProcessManager extends EventEmitter {
       OMP_MCP_TIMEOUT_MS: mcpHandshakeTimeoutMs,
       ENABLE_TOOL_SEARCH: mcpToolSearchFlag
     } : {};
+    // Giu key SystemOne khoi moi tien trinh agent CLI con: agent co the in env
+    // vao log/evidence => lo ro secret. Xoa sau khi copy, khong gan rong
+    // (chuoi rong van bi process.env doc nhung vo hai).
+    const { SYSTEMONE_API_KEY: _soKey, ...parentEnv } = process.env;
     const mergedEnv = {
-      ...process.env,
+      ...parentEnv,
       PYTHONUNBUFFERED: '1',
       PYTHONIOENCODING: 'utf-8',
       FORCE_COLOR: '1',

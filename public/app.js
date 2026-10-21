@@ -501,12 +501,26 @@
       if (e.target.id === 'evidenceDetailModal') closeEvidenceDetailModal();
     });
 
-    // Global Escape key to close modals
+    // Global Escape key to close modals + Left/Right to switch evidence image
     window.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
         closeLightboxModal();
         closeEvidenceDetailModal();
+        return;
       }
+      // Chuyen anh trong modal evidence (UI channel) bang phim <- / ->
+      const modalEl = document.getElementById('evidenceDetailModal');
+      if (!modalEl || modalEl.classList.contains('hidden')) return;
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      const list = (state._evidenceCache && state._evidenceCache.ui) ? state._evidenceCache.ui : [];
+      if (list.length < 2) return;
+      const cur = state._evidenceModalIndex;
+      const base = (typeof cur === 'number' && cur >= 0) ? cur : 0;
+      const next = (e.key === 'ArrowRight')
+        ? (base + 1) % list.length
+        : (base - 1 + list.length) % list.length;
+      e.preventDefault();
+      showEvidenceDetailModal('ui', next);
     });
 
     // Window Resize for Terminal
@@ -664,7 +678,9 @@
         online: true,
         uptimeSeconds: data.uptime || data.uptimeSeconds || 0,
         activeWorkers: data.activeWorkers !== undefined ? data.activeWorkers : (data.runningJobs || 0),
-        maxConcurrency: data.concurrency || data.maxConcurrency || 3
+        maxConcurrency: data.concurrency || data.maxConcurrency || 3,
+        // Trang thai model SystemOne: live / fallback / disabled.
+        systemoneStatus: data.systemoneStatus || null
       };
       renderSystemStatus();
     } catch (err) {
@@ -765,6 +781,34 @@
       }
     });
 
+    // Custom Named Event: systemone (trang thai SystemOne CUA TASK NAY)
+    state.eventSource.addEventListener('systemone', (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        if (!payload || !payload.jobId) return;
+        // Cap nhat ca job dang xem va job trong danh sach (badge per-task).
+        const st = {
+          live: payload.live === true ? true : (payload.live === false ? false : null),
+          calls: Number(payload.calls) || 0,
+          fallbacks: Number(payload.fallbacks) || 0,
+          lastError: payload.lastError || null,
+          model: payload.model || null,
+          updatedAt: payload.updatedAt || null
+        };
+        const inList = state.jobs.find((j) => j.id === payload.jobId);
+        if (inList) {
+          inList.systemone_state = st;
+        }
+        if (state.activeJob && state.activeJob.id === payload.jobId) {
+          state.activeJob.systemone_state = st;
+          renderActiveJobDetail();
+        }
+        renderJobsList(true);
+      } catch (e) {
+        console.warn('SystemOne event error:', e);
+      }
+    });
+
     // Custom Named Event: question (Human-in-the-Loop Clarification)
     state.eventSource.addEventListener('question', (event) => {
       try {
@@ -786,7 +830,21 @@
       try {
         const raw = JSON.parse(event.data);
         const evidenceData = (raw && raw.evidence) ? raw.evidence : raw;
-        state.evidences.push(evidenceData);
+        if (!evidenceData) return;
+        // UPSERT theo filename: watcher realtime gui lai file da co (doi trang thai)
+        // => push se tao ban trung. Chi them neu chua co.
+        const key = String(evidenceData.filename || evidenceData.fileName || evidenceData.id || '').toLowerCase();
+        if (key) {
+          const existingIdx = state.evidences.findIndex((e) =>
+            String(e.filename || e.fileName || e.id || '').toLowerCase() === key);
+          if (existingIdx >= 0) {
+            state.evidences[existingIdx] = { ...state.evidences[existingIdx], ...evidenceData };
+          } else {
+            state.evidences.push(evidenceData);
+          }
+        } else {
+          state.evidences.push(evidenceData);
+        }
         renderEvidenceHub();
       } catch (e) {
         console.warn('Evidence event parse error:', e);
@@ -836,6 +894,31 @@
   // --- Render Jobs List in Left Sidebar với Smart Signature Caching ---
   let lastJobsRenderSignature = '';
 
+  /**
+   * Render badge SystemOne cho MOT TASK (du lieu trong job.systemone_state).
+   * - null / chua goi  -> "CHƯA GỌI"
+   * - live === true    -> "LIVE"       (da goi model that)
+   * - live === false   -> "FALLBACK"   (roi ve heuristic offline)
+   * @param {object|null} soState Trang thai SystemOne cua task (khong dung ten `state` - tranh nham voi state toan cuc)
+   * @returns {string} HTML
+   */
+  function renderSystemOneBadge(soState) {
+    const s = soState && typeof soState === 'object' ? soState : null;
+    if (!s) {
+      return `<span class="px-1.5 py-0.5 rounded bg-slate-800/60 text-slate-400 border border-slate-600/30 text-[9px] font-mono tracking-tight inline-block align-middle" title="SystemOne: CHƯA GỌI - task này chưa có quyết định nào từ SystemOne">CHƯA GỌI</span>`;
+    }
+    const live = s.live === true ? true : (s.live === false ? false : null);
+    if (live === true) {
+      const tip = `SystemOne: LIVE\nSố lần gọi model thật: ${s.calls || 0}\nModel: ${s.model || '—'}${s.updatedAt ? '\nCập nhật: ' + s.updatedAt : ''}`;
+      return `<span class="px-1.5 py-0.5 rounded bg-emerald-900/40 text-emerald-300 border border-emerald-500/30 text-[9px] font-mono font-semibold tracking-tight inline-block align-middle" title="${escapeHtml(tip)}">LIVE</span>`;
+    }
+    if (live === false) {
+      const tip = `SystemOne: FALLBACK\nRơi về heuristic offline (không phải model thật).\nSố lần fallback: ${s.fallbacks || 0}/${s.calls || 0}\nLỗi: ${s.lastError || '—'}${s.updatedAt ? '\nCập nhật: ' + s.updatedAt : ''}`;
+      return `<span class="px-1.5 py-0.5 rounded bg-amber-900/40 text-amber-300 border border-amber-500/30 text-[9px] font-mono font-semibold tracking-tight inline-block align-middle" title="${escapeHtml(tip)}">FALLBACK</span>`;
+    }
+    return `<span class="px-1.5 py-0.5 rounded bg-slate-800/60 text-slate-400 border border-slate-600/30 text-[9px] font-mono tracking-tight inline-block align-middle" title="SystemOne: CHƯA GỌI">CHƯA GỌI</span>`;
+  }
+
   function renderJobsList(force = false) {
     const container = document.getElementById('jobsListContainer');
     if (!container) return;
@@ -844,7 +927,8 @@
 
     // Kiểm tra nhanh chữ ký dữ liệu để tránh phá hủy và render lại DOM vô ích
     const currentSignature = `${state.activeJobId}_${state.statusFilter}_${state.searchQuery}_` +
-      filtered.map(j => `${j.id}:${j.status}:${j.updated_at || ''}`).join('|');
+      // systemone_state phai vao chu ky: badge per-task doi khi chi trang thai SystemOne thay doi.
+      filtered.map(j => `${j.id}:${j.status}:${j.updated_at || ''}:${(j.systemone_state && j.systemone_state.updatedAt) || ''}`).join('|');
 
     if (!force && currentSignature === lastJobsRenderSignature) {
       return; // Dữ liệu không thay đổi -> Giữ nguyên DOM, CPU 0%
@@ -894,6 +978,8 @@
           : '';
         const isArchived = status === 'ARCHIVED';
         const canDelete = ['TO DO', 'DONE', 'CANCELLED', 'FAILED', 'ARCHIVED'].includes(status);
+        // Badge SystemOne THEO TASK: du lieu cua chinh job nay, khong phai trang thai global server.
+        const soBadge = renderSystemOneBadge(job.systemone_state);
 
         return `
           <div class="job-card ${isActive ? 'active' : ''} p-2.5 rounded-lg border transition cursor-pointer relative group" data-job-id="${job.id}">
@@ -901,6 +987,7 @@
               <div class="flex items-center gap-1 min-w-0">
                 ${taskCodeDisplay}
                 <span class="font-mono text-[11px] text-slate-400 truncate">#${job.id.substring(0, 8)}</span>
+                ${soBadge}
               </div>
               <div class="flex items-center gap-1 shrink-0">
                 <span class="status-badge ${statusClass}">${status === 'PENDING' ? 'Chờ giải đáp' : status}</span>
@@ -992,6 +1079,26 @@
       runnerBadge.title = `Agent hiện tại: ${currentRunner} (cho bước ${job.status || 'TO DO'})`;
     }
 
+    // Badge SystemOne CUA TASK NAY (du lieu job.systemone_state, khong phai global).
+    const soBadgeEl = document.getElementById('activeJobSystemOneBadge');
+    if (soBadgeEl) {
+      const st = job.systemone_state;
+      const live = st && typeof st === 'object' ? (st.live === true ? true : (st.live === false ? false : null)) : null;
+      if (live === true) {
+        soBadgeEl.textContent = 'LIVE';
+        soBadgeEl.className = 'text-xs px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-mono font-semibold';
+        soBadgeEl.title = `SystemOne: LIVE — ${st.calls || 0} quyết định từ model thật (${st.model || '—'})`;
+      } else if (live === false) {
+        soBadgeEl.textContent = 'FALLBACK';
+        soBadgeEl.className = 'text-xs px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 font-mono font-semibold';
+        soBadgeEl.title = `SystemOne: FALLBACK — ${st.fallbacks || 0}/${st.calls || 0} quyết định rơi về heuristic offline. ${st.lastError || ''}`;
+      } else {
+        soBadgeEl.textContent = 'CHƯA GỌI';
+        soBadgeEl.className = 'text-xs px-2 py-0.5 rounded bg-slate-700/60 text-slate-400 border border-slate-600/30 font-mono';
+        soBadgeEl.title = 'SystemOne: CHƯA GỌI — task này chưa có quyết định nào từ SystemOne';
+      }
+    }
+
     const titleEl = document.getElementById('activeJobTitle');
     if (titleEl) {
       titleEl.textContent = job.title || job.prompt || 'Untitled Job';
@@ -1049,8 +1156,18 @@
     if (fixingBadge) {
       if (job.status === 'FIXING') {
         const retryCount = job.fixing_retries !== undefined ? job.fixing_retries : 1;
-        const maxRetries = job.max_retries || 3;
-        fixingBadge.textContent = `Fixing: ${retryCount}/${maxRetries}`;
+        // job.max_retries KHONG ton tai trong schema jobs -> phai doc tu pipeline_config.
+        let pipeCfg = job.pipeline_config;
+        if (typeof pipeCfg === 'string') { try { pipeCfg = JSON.parse(pipeCfg); } catch (e) { pipeCfg = {}; } }
+        pipeCfg = (pipeCfg && typeof pipeCfg === 'object') ? pipeCfg : {};
+        const rawMax = pipeCfg.max_retries !== undefined ? pipeCfg.max_retries
+          : pipeCfg.maxRetries !== undefined ? pipeCfg.maxRetries
+          : pipeCfg.max_fixing_retries !== undefined ? pipeCfg.max_fixing_retries
+          : job.max_retries;
+        const maxRetries = Number(rawMax) || 3;
+        const fixAttempt = (pipeCfg.fix_attempt !== undefined ? pipeCfg.fix_attempt
+          : pipeCfg.fixAttempt !== undefined ? pipeCfg.fixAttempt : 0) || 0;
+        fixingBadge.textContent = `Fixing: ${fixAttempt}/${maxRetries}`;
         fixingBadge.classList.remove('hidden');
       } else {
         fixingBadge.classList.add('hidden');
@@ -1429,15 +1546,23 @@
         uiGallery.innerHTML = uiEvidences
           .map((item, idx) => {
             const imgSrc = item.url || item.file_path || '';
-            const isPass = item.status === 'PASSED' || item.status === 'PASS' || item.verdict === 'PASS' || (!item.verdict && item.status !== 'FAILED');
-            const caption = escapeHtml(item.description || item.title || item.caption || item.filename || `Bằng chứng UI #${idx + 1}`);
+            const status = evidenceStatus(item);
+            const badge = evidenceStatusBadge(status);
+            const isPass = status === EVIDENCE_STATUS.PASS;
+            // Ten evidence (khong phai ten file) + mo ta.
+            const nameText = escapeHtml(item.name || item.title || item.stepName || item.filename || `Bằng chứng UI #${idx + 1}`);
+            const descText = item.description ? escapeHtml(item.description) : '';
+            const caption = descText || nameText;
             const filename = item.filename ? escapeHtml(item.filename) : (item.file_path ? escapeHtml(item.file_path.split('/').pop()) : 'Verified');
+            const stepLabel = (item.order !== null && item.order !== undefined)
+              ? `Bước ${escapeHtml(String(item.order))}`
+              : (item.stepIndex !== null && item.stepIndex !== undefined ? `Bước ${escapeHtml(String(item.stepIndex))}` : '');
             return `
               <div class="evidence-card cursor-pointer group flex flex-col relative aspect-video bg-surface-950 rounded-xl overflow-hidden border border-slate-800 hover:border-sky-500/60 transition shadow-sm"
                    onclick="window.aiWorker.showEvidenceDetailModal('ui', ${idx})"
                    data-src="${escapeHtml(imgSrc)}"
                    data-caption="${caption}">
-                <img src="${escapeHtml(imgSrc)}" alt="${caption}" class="w-full h-full object-cover group-hover:scale-105 transition duration-300" loading="lazy" onerror="this.classList.add('hidden'); this.nextElementSibling.classList.remove('hidden');" />
+                <img src="${escapeHtml(imgSrc)}" alt="${nameText}" class="w-full h-full object-cover group-hover:scale-105 transition duration-300" loading="lazy" onerror="this.classList.add('hidden'); this.nextElementSibling.classList.remove('hidden');" />
                 <div class="hidden absolute inset-0 flex flex-col items-center justify-center p-4 text-center text-slate-500 text-[11px] bg-surface-950">
                   <i class="fa-regular fa-image text-slate-600 text-xl mb-1"></i>
                   <span>Ảnh chưa sẵn sàng</span>
@@ -1448,7 +1573,7 @@
                   <button onclick="event.stopPropagation(); window.aiWorker.deleteEvidence('${escapeHtml(item.filename)}')" class="bg-slate-900/80 hover:bg-rose-500 text-white w-6 h-6 rounded flex items-center justify-center backdrop-blur-sm transition shadow" title="Xóa ảnh">
                     <i class="fa-solid fa-trash-can text-[10px]"></i>
                   </button>
-                  <button onclick="event.stopPropagation(); window.aiWorker.toggleEvidenceStatus('${escapeHtml(item.filename)}', ${isPass})" class="bg-slate-900/80 hover:bg-brand-500 text-white w-6 h-6 rounded flex items-center justify-center backdrop-blur-sm transition shadow" title="Đổi trạng thái PASS/FAIL">
+                  <button onclick="event.stopPropagation(); window.aiWorker.toggleEvidenceStatus('${escapeHtml(item.filename)}', '${status}')" class="bg-slate-900/80 hover:bg-brand-500 text-white w-6 h-6 rounded flex items-center justify-center backdrop-blur-sm transition shadow" title="Đổi trạng thái evidence">
                     <i class="fa-solid fa-retweet text-[10px]"></i>
                   </button>
                   <button onclick="event.stopPropagation(); window.aiWorker.showEvidenceDetailModal('ui', ${idx})" class="bg-slate-900/80 hover:bg-sky-500 text-white w-6 h-6 rounded flex items-center justify-center backdrop-blur-sm transition shadow" title="Phóng to xem chi tiết">
@@ -1456,17 +1581,15 @@
                   </button>
                 </div>
 
-                <!-- Status Badge -->
-                <span class="absolute top-2 right-2 z-10 text-[10px] font-bold px-2 py-0.5 rounded shadow ${
-                  isPass ? 'bg-emerald-500 text-slate-950' : 'bg-rose-500 text-white'
-                }">${isPass ? 'PASS' : 'FAIL'}</span>
+                <!-- Status Badge: NOT VERIFY | PASS | FAILED -->
+                <span class="absolute top-2 right-2 z-10 text-[10px] font-bold px-2 py-0.5 rounded shadow ${badge.cls}">${badge.text}</span>
 
                 <!-- Bottom overlay with title & filename neatly enclosed -->
                 <div class="absolute bottom-0 left-0 right-0 p-2.5 bg-gradient-to-t from-black/90 via-black/60 to-transparent z-10 pointer-events-none">
-                  <p class="text-xs font-semibold text-white truncate drop-shadow" title="${caption}">${caption}</p>
+                  <p class="text-xs font-semibold text-white truncate drop-shadow" title="${nameText}">${nameText}</p>
                   <div class="flex items-center justify-between mt-0.5">
                     <span class="text-[10px] text-slate-300 font-mono truncate max-w-[70%]">${filename}</span>
-                    <span class="text-[10px] text-sky-300 flex items-center gap-1 group-hover:underline"><i class="fa-solid fa-expand text-[9px]"></i> Phóng to</span>
+                    <span class="text-[10px] text-sky-300 flex items-center gap-1 group-hover:underline">${stepLabel ? escapeHtml(stepLabel) + ' · ' : ''}<i class="fa-solid fa-expand text-[9px]"></i> Phóng to</span>
                   </div>
                 </div>
               </div>
@@ -1491,9 +1614,14 @@
           .map((api, idx) => {
             const method = ((api.method || (api.request && api.request.method)) || 'GET').toUpperCase();
             const endpoint = api.endpoint || api.path || (api.request && api.request.path) || '/';
-            const statusCode = api.status_code || api.actualStatus || api.status || (api.response && api.response.status) || 200;
+            // KHONG doc `api.status` o day: sau khi chuan hoa 3 trang thai, `status` la
+            // 'PASS'/'NOT VERIFY'/'FAILED' - KHONG phai HTTP status code.
+            const statusCode = api.statusCode || api.status_code || api.actualStatus || (api.response && api.response.status) || 200;
             const latency = api.duration_ms || api.durationMs || api.latency_ms || api.latency || 12;
-            const isPass = api.verdict === 'PASS' || api.status === 'PASSED' || api.passed === true || (statusCode >= 200 && statusCode < 400 && !api.error);
+            const hasExplicitStatus = (api.status !== undefined && api.status !== null && api.status !== '') || (api.verdict !== undefined && api.verdict !== null && api.verdict !== '');
+            const apiStatus = hasExplicitStatus ? evidenceStatus(api) : ((api.verdict === 'PASS' || api.status === 'PASSED' || api.passed === true || (statusCode >= 200 && statusCode < 400 && !api.error)) ? EVIDENCE_STATUS.PASS : EVIDENCE_STATUS.FAILED);
+            const apiBadge = evidenceStatusBadge(apiStatus);
+            const isPass = apiStatus === EVIDENCE_STATUS.PASS;
             const methodClass = getMethodBadgeClass(method);
             const apiFilename = api.filename || (api.file_path ? String(api.file_path).split('/').pop() : '') || '';
             const apiStep = api.stepName || api.step || api.stepId || '';
@@ -1508,7 +1636,7 @@
                     <span class="${methodClass}">${escapeHtml(method)}</span>
                     <span class="text-xs font-mono text-slate-200 font-medium truncate" title="${escapeHtml(endpoint)}">${escapeHtml(endpoint)}</span>
                   </div>
-                  <span class="evidence-badge ${isPass ? 'evidence-pass' : 'evidence-fail'} shrink-0">${isPass ? 'PASS' : 'FAIL'}</span>
+                  <span class="evidence-badge shrink-0 ${apiStatus === EVIDENCE_STATUS.PASS ? 'evidence-pass' : (apiStatus === EVIDENCE_STATUS.FAILED ? 'evidence-fail' : 'bg-slate-700 text-slate-100')}">${apiBadge.text}</span>
                 </div>
                 <div class="min-w-0 space-y-0.5">
                   <p class="text-xs font-semibold text-slate-100 truncate" title="${escapeHtml(apiDesc || apiFilename || endpoint)}">${escapeHtml(apiDesc || endpoint)}</p>
@@ -1566,6 +1694,9 @@
               : isWarn
               ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
               : 'bg-sky-500/20 text-sky-400 border border-sky-500/30';
+            // Badge trang thai verify 3 gia tri (NOT VERIFY | PASS | FAILED)
+            const logStatus = evidenceStatus(item);
+            const logBadge = evidenceStatusBadge(logStatus);
 
             return `
               <div class="p-3 rounded-xl bg-surface-900 border ${isError ? 'border-rose-500/30 bg-rose-500/5' : isWarn ? 'border-amber-500/30 bg-amber-500/5' : 'border-slate-800'} transition shadow-sm space-y-2">
@@ -1576,6 +1707,7 @@
                       <i class="fa-solid ${isError ? 'fa-triangle-exclamation text-rose-400' : isWarn ? 'fa-circle-exclamation text-amber-400' : 'fa-circle-info text-sky-400'}"></i>
                       <span>${escapeHtml(serviceName)}</span>
                     </span>
+                    <span class="text-[10px] font-bold px-2 py-0.5 rounded shadow ${logBadge.cls}">${logBadge.text}</span>
                   </div>
                   <span class="text-[10px] font-mono text-slate-400">${escapeHtml(timestamp)}</span>
                 </div>
@@ -1620,7 +1752,13 @@
           .map((db, idx) => {
             const tableName = db.table || db.tableName || db.target || 'Database Table';
             const query = db.query || db.sql || 'SELECT * FROM ...';
-            const isMatch = db.matched === true || db.passed === true || db.verdict === 'PASS' || (!db.error && db.status !== 'FAILED');
+            // `db.status` la trang thai evidence 3 gia tri. NOT VERIFY => CHUA biet
+            // ket qua => KHONG coi la MATCH.
+            const hasDbStatus = (db.status !== undefined && db.status !== null && db.status !== '') || (db.verdict !== undefined && db.verdict !== null && db.verdict !== '');
+            const dbStatus = hasDbStatus ? evidenceStatus(db) : (db.matched === true || db.passed === true || db.verdict === 'PASS' || (!db.error && db.status !== 'FAILED') ? EVIDENCE_STATUS.PASS : EVIDENCE_STATUS.FAILED);
+            const isMatch = dbStatus === EVIDENCE_STATUS.PASS;
+            const dbBadgeText = dbStatus === EVIDENCE_STATUS.NOT_VERIFY ? 'NOT VERIFY' : (isMatch ? 'MATCH' : 'DIFF');
+            const dbBadgeCls = dbStatus === EVIDENCE_STATUS.NOT_VERIFY ? 'bg-slate-700 text-slate-100' : (isMatch ? 'evidence-match' : 'evidence-diff');
             const expectedStr = db.expected !== undefined ? (typeof db.expected === 'object' ? JSON.stringify(db.expected) : String(db.expected)) : (db.expectedValues ? JSON.stringify(db.expectedValues) : 'Khớp tiêu chí');
             const actualStr = db.actual !== undefined ? (typeof db.actual === 'object' ? JSON.stringify(db.actual) : String(db.actual)) : (db.rowCount !== undefined ? `${db.rowCount} rows` : (db.rows ? `${db.rows.length} rows` : 'Khớp thực tế'));
 
@@ -1633,8 +1771,8 @@
                     </div>
                     <span class="font-semibold text-xs text-slate-200">${escapeHtml(tableName)}</span>
                   </div>
-                  <span class="evidence-badge ${isMatch ? 'evidence-match' : 'evidence-diff'} font-bold">
-                    ${isMatch ? 'MATCH' : 'DIFF'}
+                  <span class="evidence-badge ${dbBadgeCls} font-bold">
+                    ${dbBadgeText}
                   </span>
                 </div>
 
@@ -1702,6 +1840,36 @@
 
     if (maxConc) {
       maxConc.textContent = state.systemStatus.maxConcurrency;
+    }
+
+    // Badge SystemOne: LIVE (model that) | FALLBACK (heuristic offline) | OFF
+    const soStatus = document.getElementById('systemOneStatus');
+    const soWrap = document.getElementById('systemOneBadgeWrap');
+    if (soStatus) {
+      const s = state.systemStatus.systemoneStatus;
+      if (!s) {
+        soStatus.textContent = '—';
+        soStatus.className = 'text-slate-300 font-mono';
+      } else if (s.enabled === false) {
+        soStatus.textContent = 'OFF';
+        soStatus.className = 'text-slate-500 font-mono';
+      } else if (s.live === true) {
+        soStatus.textContent = 'LIVE';
+        soStatus.className = 'text-emerald-400 font-mono font-semibold';
+      } else if (s.live === false) {
+        soStatus.textContent = 'FALLBACK';
+        soStatus.className = 'text-amber-400 font-mono font-semibold';
+      } else {
+        soStatus.textContent = 'CHƯA GỌI';
+        soStatus.className = 'text-slate-400 font-mono';
+      }
+    }
+    if (soWrap) {
+      const s = state.systemStatus.systemoneStatus;
+      const tip = s
+        ? `SystemOne ${s.model} @ ${s.baseUrl}\nTrạng thái: ${s.enabled === false ? 'tắt' : (s.live === true ? 'đang gọi model thật' : (s.live === false ? 'rơi về heuristic offline' : 'chưa gọi'))}\n${s.lastError ? 'Lỗi: ' + s.lastError : ''}\nFallback: ${s.fallbackCount} lần`
+        : 'Trạng thái SystemOne chưa tải';
+      soWrap.setAttribute('title', tip);
     }
   }
 
@@ -2200,6 +2368,8 @@
       type = (item.type || item.evidence_type || 'ui').toLowerCase();
     }
     if (!item) return;
+    // Luu index hien tai de phim <- / -> chuyen anh dung thu tu.
+    state._evidenceModalIndex = (typeof index === 'number' && index >= 0) ? index : 0;
 
     const modal = document.getElementById('evidenceDetailModal');
     const typeIcon = document.getElementById('evidenceModalTypeIcon');
@@ -2221,19 +2391,30 @@
       const imgSrc = item.url || item.file_path || '';
       const dupReason = item.duplicateReason || item.reason || item.error || item.note || '';
       const isDuplicate = item.duplicate === true || /duplicate|md5|trùng/i.test(String(dupReason || ''));
-      let isPass = item.status === 'PASSED' || item.status === 'PASS' || item.verdict === 'PASS' || (!item.verdict && item.status !== 'FAILED');
+      const status = evidenceStatus(item);
+      const badge = evidenceStatusBadge(status);
+      let isPass = status === EVIDENCE_STATUS.PASS;
       if (isDuplicate) isPass = false;
-      const caption = item.description || item.title || item.caption || item.filename || 'Ảnh chụp màn hình kiểm thử UI';
+      const nameText = item.name || item.title || item.stepName || item.filename || 'Ảnh chụp màn hình kiểm thử UI';
+      const caption = item.description || nameText;
       const filename = item.filename || (item.file_path ? item.file_path.split('/').pop() : 'screenshot.png');
+      const passCriteria = item.passCriteria || item.pass_criteria || item.criteria || item.expected || null;
+      const stepLabel = (item.order !== null && item.order !== undefined)
+        ? `Bước ${item.order}`
+        : (item.stepIndex !== null && item.stepIndex !== undefined ? `Bước ${item.stepIndex}` : (item.stepName || '—'));
+      const testCaseText = item.testCase || item.caseName || item.case || null;
+      const uiList = (state._evidenceCache && state._evidenceCache.ui) ? state._evidenceCache.ui : [];
+      const uiIndex = uiList.findIndex((e) => String(e.filename || '') === String(item.filename || ''));
+      const uiTotal = uiList.length;
 
       if (typeIcon) typeIcon.innerHTML = '<i class="fa-regular fa-image text-sky-400"></i>';
       if (typeBadge) typeBadge.textContent = 'UI Screenshot';
       if (statusBadge) {
-        statusBadge.textContent = isPass ? 'PASS' : 'FAIL';
-        statusBadge.className = isPass ? 'text-[10px] font-bold px-2 py-0.5 rounded shadow bg-emerald-500 text-slate-950' : 'text-[10px] font-bold px-2 py-0.5 rounded shadow bg-rose-500 text-white';
+        statusBadge.textContent = badge.text;
+        statusBadge.className = `text-[10px] font-bold px-2 py-0.5 rounded shadow ${badge.cls}`;
       }
-      if (titleElem) titleElem.textContent = caption;
-      if (metaInfo) metaInfo.textContent = `Tệp: ${filename} | Trạng thái: ${isPass ? 'PASSED' : 'FAILED'}`;
+      if (titleElem) titleElem.textContent = nameText;
+      if (metaInfo) metaInfo.textContent = `Tệp: ${filename} | Trạng thái: ${badge.text}`;
 
       if (btnOpenFile && imgSrc) {
         btnOpenFile.classList.remove('hidden');
@@ -2245,41 +2426,61 @@
       bodyElem.innerHTML = `
         <div class="flex flex-col space-y-4">
           <div class="bg-black/90 rounded-xl p-2 sm:p-3 border border-slate-800 flex items-center justify-center max-h-[58vh] overflow-hidden group relative shadow-inner">
-            <img src="${escapeHtml(imgSrc)}" alt="${escapeHtml(caption)}" class="max-w-full max-h-[54vh] object-contain rounded-lg shadow-2xl transition duration-200" onerror="this.classList.add('hidden'); this.nextElementSibling.classList.remove('hidden');" />
+            <img src="${escapeHtml(imgSrc)}" alt="${escapeHtml(nameText)}" class="max-w-full max-h-[54vh] object-contain rounded-lg shadow-2xl transition duration-200" onerror="this.classList.add('hidden'); this.nextElementSibling.classList.remove('hidden');" />
             <div class="hidden text-center py-16 text-slate-500 text-xs">
               <i class="fa-regular fa-image text-4xl mb-2 text-slate-600 block"></i>
               <span>Không thể tải trước hình ảnh (${escapeHtml(filename)})</span>
             </div>
+            ${uiTotal > 1 ? `
+              <button onclick="event.stopPropagation(); window.aiWorker.showEvidenceDetailModal('ui', ${uiIndex - 1})" class="absolute left-2 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-slate-900/85 hover:bg-brand-500 text-white flex items-center justify-center backdrop-blur-sm transition shadow" title="Ảnh trước (←)">
+                <i class="fa-solid fa-chevron-left text-xs"></i>
+              </button>
+              <button onclick="event.stopPropagation(); window.aiWorker.showEvidenceDetailModal('ui', ${uiIndex + 1})" class="absolute right-2 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-slate-900/85 hover:bg-brand-500 text-white flex items-center justify-center backdrop-blur-sm transition shadow" title="Ảnh tiếp theo (→)">
+                <i class="fa-solid fa-chevron-right text-xs"></i>
+              </button>
+              <div class="absolute bottom-2 left-1/2 -translate-x-1/2 px-2.5 py-1 rounded-full bg-slate-900/85 text-slate-200 text-[10px] font-mono backdrop-blur-sm">
+                ${uiIndex + 1} / ${uiTotal}
+              </div>
+            ` : ''}
+          </div>
+
+          <div class="p-3 rounded-lg bg-surface-900 border border-slate-800/80 text-xs">
+            <span class="text-[10px] text-slate-500 uppercase tracking-wider block mb-1 font-semibold">Tên evidence</span>
+            <p class="text-slate-200 font-semibold">${escapeHtml(nameText)}</p>
+            ${caption && caption !== nameText ? `
+              <span class="text-[10px] text-slate-500 uppercase tracking-wider block mt-2 mb-1 font-semibold">Mô tả evidence này là gì</span>
+              <p class="text-slate-300">${escapeHtml(caption)}</p>
+            ` : ''}
           </div>
 
           <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
             <div class="p-2.5 rounded-lg bg-surface-900 border border-slate-800/80">
-              <span class="text-[10px] text-slate-500 uppercase tracking-wider block font-medium">Tên tệp</span>
-              <span class="font-mono text-slate-200 font-semibold truncate block mt-0.5" title="${escapeHtml(filename)}">${escapeHtml(filename)}</span>
+              <span class="text-[10px] text-slate-500 uppercase tracking-wider block font-medium">Bước kiểm thử</span>
+              <span class="text-slate-200 font-semibold truncate block mt-0.5" title="${escapeHtml(String(stepLabel))}">${escapeHtml(String(stepLabel))}</span>
             </div>
             <div class="p-2.5 rounded-lg bg-surface-900 border border-slate-800/80">
-              <span class="text-[10px] text-slate-500 uppercase tracking-wider block font-medium">Checkpoint</span>
-              <span class="text-slate-200 font-semibold truncate block mt-0.5">${escapeHtml(item.checkpoint || 'TESTING')}</span>
+              <span class="text-[10px] text-slate-500 uppercase tracking-wider block font-medium">Test case</span>
+              <span class="text-slate-200 font-semibold truncate block mt-0.5" title="${escapeHtml(String(testCaseText || '—'))}">${escapeHtml(String(testCaseText || '—'))}</span>
             </div>
             <div class="p-2.5 rounded-lg bg-surface-900 border border-slate-800/80">
               <span class="text-[10px] text-slate-500 uppercase tracking-wider block font-medium">Trạng thái</span>
-              <span class="font-semibold block mt-0.5 ${isPass ? 'text-emerald-400' : 'text-rose-400'}">${isPass ? 'ĐẠT (PASS)' : 'KHÔNG ĐẠT (FAIL)'}</span>
+              <span class="font-semibold block mt-0.5 ${status === EVIDENCE_STATUS.PASS ? 'text-emerald-400' : (status === EVIDENCE_STATUS.FAILED ? 'text-rose-400' : 'text-slate-300')}">${badge.text}</span>
             </div>
             <div class="p-2.5 rounded-lg bg-surface-900 border border-slate-800/80">
-              <span class="text-[10px] text-slate-500 uppercase tracking-wider block font-medium">Thời gian ghi</span>
-              <span class="font-mono text-slate-300 block mt-0.5">${escapeHtml(item.created_at || item.timestamp || 'Gần đây')}</span>
+              <span class="text-[10px] text-slate-500 uppercase tracking-wider block font-medium">Tên tệp</span>
+              <span class="font-mono text-slate-200 font-semibold truncate block mt-0.5" title="${escapeHtml(filename)}">${escapeHtml(filename)}</span>
             </div>
           </div>
+
+          <div class="p-3 rounded-lg border text-xs ${status === EVIDENCE_STATUS.PASS ? 'bg-emerald-500/10 border-emerald-500/30' : (status === EVIDENCE_STATUS.FAILED ? 'bg-rose-500/10 border-rose-500/30' : 'bg-slate-500/10 border-slate-500/30')}">
+            <span class="text-[10px] text-slate-400 uppercase tracking-wider block mb-1 font-semibold">Ảnh này được coi là PASS khi nào</span>
+            <p class="text-slate-300">${passCriteria ? escapeHtml(passCriteria) : 'Chưa khai báo tiêu chí PASS. Ảnh chỉ đạt khi verify xác nhận nội dung khớp yêu cầu của test case tương ứng.'}</p>
+          </div>
+
           ${isDuplicate ? `
             <div class="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 font-mono text-xs">
               <div class="font-bold flex items-center gap-1.5 mb-1"><i class="fa-solid fa-triangle-exclamation"></i> Ảnh trùng lặp (DUPLICATE):</div>
               <div>${escapeHtml(String(dupReason || 'Ảnh trùng (duplicate/md5) — không tính là bằng chứng PASS.'))}</div>
-            </div>
-          ` : ''}
-          ${item.description ? `
-            <div class="p-3 rounded-lg bg-surface-900 border border-slate-800/80 text-xs text-slate-300">
-              <span class="text-[10px] text-slate-500 uppercase tracking-wider block mb-1 font-semibold">Mô tả / Ghi chú kiểm thử</span>
-              <p>${escapeHtml(item.description)}</p>
             </div>
           ` : ''}
         </div>
@@ -2290,19 +2491,23 @@
     else if (type === 'api' || type === 'api_test') {
       const method = ((item.method || (item.request && item.request.method)) || 'GET').toUpperCase();
       const endpoint = item.endpoint || item.path || (item.request && item.request.path) || '/';
-      const statusCode = item.status_code || item.actualStatus || item.status || (item.response && item.response.status) || 200;
+      // `item.status` la trang thai evidence 3 gia tri, KHONG phai HTTP status code.
+      const statusCode = item.statusCode || item.status_code || item.actualStatus || (item.response && item.response.status) || 200;
       const expectedStatus = item.expectedStatus || item.expected_status || 200;
       const latency = item.duration_ms || item.durationMs || item.latency_ms || item.latency || 12;
-      const isPass = item.verdict === 'PASS' || item.status === 'PASSED' || item.passed === true || (statusCode >= 200 && statusCode < 400 && !item.error);
+      const hasExplicitStatus = (item.status !== undefined && item.status !== null && item.status !== '') || (item.verdict !== undefined && item.verdict !== null && item.verdict !== '');
+      const apiStatus = hasExplicitStatus ? evidenceStatus(item) : ((item.verdict === 'PASS' || item.status === 'PASSED' || item.passed === true || (statusCode >= 200 && statusCode < 400 && !item.error)) ? EVIDENCE_STATUS.PASS : EVIDENCE_STATUS.FAILED);
+      const apiBadge = evidenceStatusBadge(apiStatus);
+      const isPass = apiStatus === EVIDENCE_STATUS.PASS;
 
       if (typeIcon) typeIcon.innerHTML = '<i class="fa-solid fa-network-wired text-indigo-400"></i>';
       if (typeBadge) typeBadge.textContent = 'API Test';
       if (statusBadge) {
-        statusBadge.textContent = isPass ? 'PASS' : 'FAIL';
-        statusBadge.className = isPass ? 'text-[10px] font-bold px-2 py-0.5 rounded shadow bg-emerald-500 text-slate-950' : 'text-[10px] font-bold px-2 py-0.5 rounded shadow bg-rose-500 text-white';
+        statusBadge.textContent = apiBadge.text;
+        statusBadge.className = `text-[10px] font-bold px-2 py-0.5 rounded shadow ${apiBadge.cls}`;
       }
       if (titleElem) titleElem.textContent = `${method} ${endpoint}`;
-      if (metaInfo) metaInfo.textContent = `Status: ${statusCode} | Độ trễ: ${latency}ms | Kết quả: ${isPass ? 'PASS' : 'FAIL'}`;
+      if (metaInfo) metaInfo.textContent = `Status: ${statusCode} | Độ trễ: ${latency}ms | Kết quả: ${apiBadge.text}`;
       if (copyBtnText) copyBtnText.textContent = 'Sao chép JSON';
 
       // Không tự bịa dummy data nếu file chưa có dữ liệu thật
@@ -2322,7 +2527,7 @@
       }
       state.currentEvidenceModalData = {
         testCase: item.name || `${method} ${endpoint}`,
-        verdict: isPass ? 'PASS' : 'FAIL',
+        verdict: apiStatus === EVIDENCE_STATUS.NOT_VERIFY ? null : (isPass ? 'PASS' : 'FAIL'),
         request: requestPayload,
         response: responsePayload,
         error: item.error || null
@@ -2349,7 +2554,7 @@
             </div>
             <div class="p-2.5 rounded-lg bg-surface-900 border border-slate-800/80">
               <span class="text-[10px] text-slate-500 uppercase tracking-wider block font-medium">Kết quả đối soát</span>
-              <span class="font-bold mt-0.5 block ${isPass ? 'text-emerald-400' : 'text-rose-400'}">${isPass ? 'PASSED (200 PASS)' : 'FAILED'}</span>
+              <span class="font-bold mt-0.5 block ${apiStatus === EVIDENCE_STATUS.PASS ? 'text-emerald-400' : (apiStatus === EVIDENCE_STATUS.FAILED ? 'text-rose-400' : 'text-slate-300')}">${apiStatus === EVIDENCE_STATUS.PASS ? `PASSED (${statusCode} PASS)` : (apiStatus === EVIDENCE_STATUS.NOT_VERIFY ? 'NOT VERIFY (chưa verify)' : 'FAILED')}</span>
             </div>
           </div>
 
@@ -2464,19 +2669,20 @@
     else if (type === 'db' || type === 'db_query' || type === 'db_assert') {
       const tableName = item.table || item.tableName || item.target || 'Database Table';
       const query = item.query || item.sql || 'SELECT * FROM ...';
-      const isMatch = item.matched === true || item.passed === true || item.verdict === 'PASS' || (!item.error && item.status !== 'FAILED');
+      const hasExplicitStatus = (item.status !== undefined && item.status !== null && item.status !== '') || (item.verdict !== undefined && item.verdict !== null && item.verdict !== '');
+      const dbStatus = hasExplicitStatus ? evidenceStatus(item) : (item.matched === true || item.passed === true || item.verdict === 'PASS' || (!item.error && item.status !== 'FAILED') ? EVIDENCE_STATUS.PASS : EVIDENCE_STATUS.FAILED);
+      const dbBadge = evidenceStatusBadge(dbStatus);
+      const isMatch = dbStatus === EVIDENCE_STATUS.PASS;
       const diffReason = item.error || item.diffReason || item.diff || null;
 
       if (typeIcon) typeIcon.innerHTML = '<i class="fa-solid fa-database text-purple-400"></i>';
       if (typeBadge) typeBadge.textContent = 'Database Assertion';
       if (statusBadge) {
-        statusBadge.textContent = isMatch ? 'MATCH' : 'DIFF';
-        statusBadge.className = isMatch
-          ? 'text-[10px] font-bold px-2 py-0.5 rounded shadow bg-emerald-500 text-slate-950'
-          : 'text-[10px] font-bold px-2 py-0.5 rounded shadow bg-rose-500 text-white';
+        statusBadge.textContent = dbStatus === EVIDENCE_STATUS.NOT_VERIFY ? dbBadge.text : (isMatch ? 'MATCH' : 'DIFF');
+        statusBadge.className = `text-[10px] font-bold px-2 py-0.5 rounded shadow ${dbBadge.cls}`;
       }
       if (titleElem) titleElem.textContent = `DB Assertion - ${tableName}`;
-      if (metaInfo) metaInfo.textContent = `Bảng: ${tableName} | Trạng thái: ${isMatch ? 'Khớp (MATCH)' : 'Lệch (DIFF)'}`;
+      if (metaInfo) metaInfo.textContent = `Bảng: ${tableName} | Trạng thái: ${dbStatus === EVIDENCE_STATUS.NOT_VERIFY ? 'Chưa verify' : (isMatch ? 'Khớp (MATCH)' : 'Lệch (DIFF)')}`;
       if (copyBtnText) copyBtnText.textContent = 'Sao chép dữ liệu SQL';
 
       state.currentEvidenceModalData = {
@@ -2584,7 +2790,9 @@
 
     const expectedStr = item.expected !== undefined ? (typeof item.expected === 'object' ? JSON.stringify(item.expected) : String(item.expected)) : (item.expectedRowCount !== undefined ? `${item.expectedRowCount} rows` : 'Khớp tiêu chí');
     const actualStr = item.actual !== undefined ? (typeof item.actual === 'object' ? JSON.stringify(item.actual) : String(item.actual)) : (item.rowCount !== undefined ? `${item.rowCount} rows` : (item.rows ? `${item.rows.length} rows` : 'Khớp thực tế'));
-    const isMatch = item.matched === true || item.passed === true || item.verdict === 'PASS' || (!item.error && item.status !== 'FAILED');
+    // `item.status` la trang thai evidence 3 gia tri: NOT VERIFY => chua co ket qua.
+    const isMatch = evidenceStatus(item) === EVIDENCE_STATUS.PASS
+      || (item.matched === true || item.passed === true || item.verdict === 'PASS');
 
     return `
       <tr>
@@ -2631,12 +2839,19 @@
     `;
   }
   // --- Evidence Toggle & Delete ---
-  async function toggleEvidenceStatus(filename, currentPass) {
+  async function toggleEvidenceStatus(filename, currentStatus) {
     const jobId = state.activeJobId || (state.activeJob && state.activeJob.id);
     if (!jobId || !filename) return;
-    
-    const newVerdict = currentPass ? 'FAIL' : 'PASS';
-    const newStatus = currentPass ? 'FAILED' : 'PASSED';
+
+    // Vong doi 3 gia tri: NOT VERIFY -> PASS -> FAILED -> NOT VERIFY.
+    // currentStatus co the la chuoi ('PASS'/'FAILED'/'NOT VERIFY') hoac boolean (cu).
+    const cur = (typeof currentStatus === 'string')
+      ? evidenceStatus({ status: currentStatus })
+      : (currentStatus ? EVIDENCE_STATUS.PASS : EVIDENCE_STATUS.NOT_VERIFY);
+    const nextStatus = (cur === EVIDENCE_STATUS.NOT_VERIFY) ? EVIDENCE_STATUS.PASS
+      : (cur === EVIDENCE_STATUS.PASS ? EVIDENCE_STATUS.FAILED : EVIDENCE_STATUS.NOT_VERIFY);
+    const newVerdict = nextStatus === EVIDENCE_STATUS.PASS ? 'PASS' : (nextStatus === EVIDENCE_STATUS.FAILED ? 'FAIL' : null);
+    const newStatus = nextStatus;
     
     // 1. Fallback update local state immediately for snappy UI
     const evidenceIdx = state.evidences.findIndex(e => e.filename === filename || (e.file_path && e.file_path.includes(filename)));
@@ -2840,13 +3055,40 @@
   }
 
   function escapeHtml(str) {
-    if (!str) return '';
-    return str
+    if (str === null || str === undefined || str === '') return '';
+    // Chuoi hoa ve String truoc: number/boolean/object deu phai hoat dong.
+    return String(str)
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#039;');
+  }
+
+  // Vong doi trang thai evidence: NOT VERIFY (chua verify) | PASS | FAILED.
+  // Server da chuan hoa; ham nay la fallback cho du lieu cu.
+  const EVIDENCE_STATUS = { NOT_VERIFY: 'NOT VERIFY', PASS: 'PASS', FAILED: 'FAILED' };
+
+  function evidenceStatus(item) {
+    if (!item) return EVIDENCE_STATUS.NOT_VERIFY;
+    const raw = item.status !== undefined && item.status !== null && item.status !== ''
+      ? item.status
+      : item.verdict;
+    if (raw === undefined || raw === null || raw === '') return EVIDENCE_STATUS.NOT_VERIFY;
+    const v = String(raw).trim().toUpperCase();
+    if (v === 'PASS' || v === 'PASSED' || v === 'OK' || v === 'SUCCESS') return EVIDENCE_STATUS.PASS;
+    if (v === 'FAIL' || v === 'FAILED' || v === 'ERROR') return EVIDENCE_STATUS.FAILED;
+    return EVIDENCE_STATUS.NOT_VERIFY;
+  }
+
+  function evidenceStatusBadge(status) {
+    if (status === EVIDENCE_STATUS.PASS) {
+      return { text: 'PASS', cls: 'bg-emerald-500 text-slate-950' };
+    }
+    if (status === EVIDENCE_STATUS.FAILED) {
+      return { text: 'FAILED', cls: 'bg-rose-500 text-white' };
+    }
+    return { text: 'NOT VERIFY', cls: 'bg-slate-600 text-slate-100' };
   }
 
   function getEffectiveAgentForJob(job) {

@@ -19,6 +19,19 @@ const { JOB_STATUSES, transition, canTransition } = require('./state/stateMachin
 const { runnerRegistry } = require('./runners/runnerRegistry');
 const { ensureGitWorkspace } = require('./utils/gitWorkspaceHelper');
 const systemone = require('./systemone/client');
+const jobPolicy = require('./execution/jobPolicy');
+const fileContext = require('./systemone/fileContext');
+const { guardPrompt } = require('./execution/promptGuard');
+const evidenceStore = require('./verification/evidenceStore');
+const { EvidenceWatcher } = require('./verification/evidenceWatcher');
+
+// === Evidence realtime (TASK-PIPELINE-FIX C-1..C-3) ===
+// Theo doi thu muc evidence cua job dang chay => day evidence moi len SSE ngay
+// khi agent vua tao file, thay vi chi hien thi sau khi VERIFY pass.
+// Khai bao TRUOC class JobEventBus de emitJobStatus co the goi stopEvidenceWatcher
+// ma khong gap TDZ (const).
+const evidenceWatchers = new Map();
+
 // Quản lý event bus tập trung cho SSE Realtime Logs & Events
 class JobEventBus extends EventEmitter {
   constructor() {
@@ -39,7 +52,13 @@ class JobEventBus extends EventEmitter {
     if (jobId && normalized.text) {
       try {
         const logFilePath = path.join(config.LOG_DIR, `${jobId}.log`);
-        fs.appendFileSync(logFilePath, normalized.text, 'utf8');
+        // Prefix timestamp cho TUNG dong: khong co timestamp thi khong do duoc
+        // thoi gian thuoc tung buoc (task bd88ae0a ton ~4h, khong phan biet duoc).
+        const stamped = String(normalized.text)
+          .split('\n')
+          .map((line) => (line.length ? `[${normalized.timestamp}] ${line}\n` : ''))
+          .join('');
+        fs.appendFileSync(logFilePath, stamped, 'utf8');
       } catch (err) {}
     }
   }
@@ -66,6 +85,28 @@ class JobEventBus extends EventEmitter {
     };
     this.emit(`job:${jobId}:status`, normalized);
     this.emit('status', normalized);
+    // Job terminal => dung watcher evidence realtime (C-3) va dong step timeline.
+    if (normalized.status && ['DONE', 'FAILED', 'CANCELLED', 'TIMED_OUT'].includes(normalized.status)) {
+      try { stopEvidenceWatcher(jobId); } catch (e) {}
+      try { endStepTimeline(jobId, { status: normalized.status }); } catch (e) {}
+    }
+  }
+
+  /**
+   * Emit trang thai SystemOne CUA 1 JOB (SSE) - de UI hien badge per-task realtime.
+   * @param {string} jobId
+   * @param {object} state { live, calls, fallbacks, lastError, updatedAt, routes }
+   */
+  emitJobSystemOne(jobId, state) {
+    if (!jobId || !state) return;
+    const normalized = {
+      type: 'systemone',
+      jobId,
+      timestamp: new Date().toISOString(),
+      ...state
+    };
+    this.emit(`job:${jobId}:systemone`, normalized);
+    this.emit('systemone', normalized);
   }
 
   emitJobQuestion(jobId, payload) {
@@ -99,6 +140,7 @@ class JobEventBus extends EventEmitter {
     };
     this.emit(`job:${jobId}:done`, normalized);
     this.emit('done', normalized);
+    try { stopEvidenceWatcher(jobId); } catch (e) {}
   }
 
   emitJobError(jobId, payload) {
@@ -295,7 +337,16 @@ function getEvidenceFileMeta(metadata, filename) {
   const caseName = strOrNull(raw.caseName) || strOrNull(raw.case_name) || testCase || null;
   const actionType = strOrNull(raw.actionType) || strOrNull(raw.action_type) || strOrNull(raw.action) || null;
   const currentUrl = strOrNull(raw.currentUrl) || strOrNull(raw.current_url) || strOrNull(raw.pageUrl) || strOrNull(raw.page_url) || null;
-  return { ...raw, stepId, stepName, step, evidenceId, timestamp, description, testCase, testcase: strOrNull(raw.testcase) || testCase, case: raw.case != null ? raw.case : (caseName || null), caseName, actionType, currentUrl };
+  const name = strOrNull(raw.name) || strOrNull(raw.title) || null;
+  const passCriteria = strOrNull(raw.passCriteria) || strOrNull(raw.pass_criteria) || strOrNull(raw.criteria) || strOrNull(raw.expected) || null;
+  const numOrNull = (v) => {
+    if (v === undefined || v === null || v === '') return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const stepIndex = numOrNull(raw.stepIndex !== undefined ? raw.stepIndex : raw.step_index);
+  const order = numOrNull(raw.order !== undefined ? raw.order : raw.sequence);
+  return { ...raw, stepId, stepName, step, evidenceId, timestamp, description, name, passCriteria, stepIndex, order, testCase, testcase: strOrNull(raw.testcase) || testCase, case: raw.case != null ? raw.case : (caseName || null), caseName, actionType, currentUrl };
 }
 // Chuan phan loai evidence (log vs api): uu tien metadata ghi ro, suy luan cu de tuong thich.
 // Noi ghi (BrowserRunner/agent) co the gan meta.type|evidence_type|channel; noi doc dung helper nay.
@@ -476,7 +527,9 @@ function handleHealthCheck(req, res) {
     const queuedJobs = taskQueue.getQueuedJobs();
     const runners = runnerRegistry.detectAll();
     let systemoneStats = { calls: 0, hits: 0, misses: 0, fallbacks: 0, cliSaved: 0, cost: 0 };
+    let systemoneStatus = null;
     try { systemoneStats = systemone.getStats(); } catch (e) {}
+    try { systemoneStatus = systemone.getStatus(); } catch (e) {}
     return res.json({
       status: 'ok',
       online: true,
@@ -489,7 +542,8 @@ function handleHealthCheck(req, res) {
       concurrency: config.CONCURRENCY,
       maxConcurrency: config.CONCURRENCY,
       runners,
-      systemone: systemoneStats
+      systemone: systemoneStats,
+      systemoneStatus
     });
   } catch (err) {
     return res.status(500).json({ status: 'error', error: err.message });
@@ -500,9 +554,92 @@ app.get('/api/v1/health', handleHealthCheck);
 app.get('/api/v1/status', handleHealthCheck);
 
 /**
+ * GET /api/v1/systemone/status
+ * Trang thai model SystemOne: live (goi model that) hay fallback (heuristic offline).
+ */
+app.get('/api/v1/systemone/status', (req, res) => {
+  try {
+    let status = null;
+    let stats = null;
+    try { status = systemone.getStatus(); } catch (e) {}
+    try { stats = systemone.getStats(); } catch (e) {}
+    return res.json({ success: true, status, stats });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * GET /api/v1/systemone/probe
+ * Gọi thẳng 1 request noul tối thiểu để kiểm tra endpoint/key/model đang nạp có thật không.
+ * Không đi qua cache, không cần tạo job.
+ */
+app.get('/api/v1/systemone/probe', async (req, res) => {
+  try {
+    if (typeof systemone.probe !== 'function') {
+      return res.status(501).json({ success: false, error: 'probe khong ho tro' });
+    }
+    const result = await systemone.probe();
+    return res.json({ success: result.live === true, ...result, status: systemone.getStatus() });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
  * GET /api/v1/runners
  * Trả về danh sách 5 runners (claude, opencode, omp, codex, antigravity) kèm availability
  */
+
+// Canh bao SystemOne rơi về heuristic offline. Chi log 1 lan moi job de tranh spam.
+const systemoneFallbackWarned = new Set();
+function logSystemOneFallback(jobId, route, decision) {
+  if (!jobId || !decision || decision.fallback !== true) return;
+  if (systemoneFallbackWarned.has(jobId)) return;
+  systemoneFallbackWarned.add(jobId);
+  const live = (() => { try { return systemone.getStatus().live; } catch (e) { return null; } })();
+  const reason = live === false ? 'model khong phan hoi' : 'model bi vo hieu hoa';
+  jobEventBus.emitJobLog(jobId, {
+    text: `\n[SYSTEMONE-FALLBACK] ⚠ SystemOne ${route} rơi về heuristic offline (${reason}). Quyet dinh nay KHONG phai tu model that.\n`
+  });
+}
+
+/**
+ * Ghi nhan trang thai SystemOne CUA 1 JOB vao DB + emit SSE.
+ * Badge "CHƯA GỌI"/"LIVE"/"FALLBACK" phai la du lieu cua TUNG task.
+ * - `cached: true` hoac `source: 'attempt-limit'`: khong goi model => KHONG tinh vao calls.
+ * - `checkGuard`/`pickRunner` boc ket qua trong `.decision` => dung `result.decision || result`.
+ *
+ * @param {string} jobId
+ * @param {object} result Ket qua tu systemone.checkXacDinh / pickRunner
+ * @param {string} route
+ */
+function recordSystemOne(jobId, result, route) {
+  if (!jobId) return;
+  const d = (result && result.decision) || result || {};
+  if (!d || typeof d !== 'object') return;
+  // Khong goi model that (ket qua tu cache, chua het so lan retry, hoac quyet dinh
+  // TUC THI bang regex `heuristic-fast`) => bo qua. Badge phai phan anh
+  // "model thật đã quyết định" chứ không phải "co quyet dinh nao".
+  if (d.cached === true || d.source === 'attempt-limit' || d.source === 'heuristic-fast') return;
+
+  let prev = null;
+  try {
+    const job = db.getJobById(jobId);
+    prev = job && job.systemone_state ? JSON.parse(job.systemone_state) : null;
+  } catch (e) { prev = null; }
+  const fallback = d.fallback === true;
+  const state = {
+    live: !fallback,
+    calls: ((prev && prev.calls) || 0) + 1,
+    fallbacks: ((prev && prev.fallbacks) || 0) + (fallback ? 1 : 0),
+    lastError: fallback ? ((prev && prev.lastError) || 'model khong phan hoi - dung heuristic offline') : null,
+    model: (() => { try { return systemone.getStatus().model; } catch (e) { return null; } })(),
+    updatedAt: new Date().toISOString()
+  };
+  try { db.updateJob(jobId, { systemone_state: state }); } catch (e) {}
+  try { jobEventBus.emitJobSystemOne(jobId, state); } catch (e) {}
+}
 app.get('/api/v1/runners', (req, res) => {
   try {
     const runners = runnerRegistry.detectAll();
@@ -788,6 +925,8 @@ app.post('/api/v1/jobs', (req, res) => {
         timeout: timeout
       }, null);
       if (uiTimeoutMs !== null && uiTimeoutMs !== undefined) mergedPipelineConfig.timeout = uiTimeoutMs;
+      // mergedPipelineConfig.timeout tới đây là giá trị RAW từ pipeline_config.
+      // normalizeTimeoutMs giữ nguyên số >= 10000 (đã là ms) nên không nhân đôi.
       else if (mergedPipelineConfig.timeout !== undefined) mergedPipelineConfig.timeout = config.normalizeTimeoutMs(mergedPipelineConfig.timeout, config.DEFAULT_TIMEOUT_MS);
     }
     if (model) mergedPipelineConfig.model = model;
@@ -964,6 +1103,30 @@ app.post('/api/v1/jobs', (req, res) => {
  * GET /api/v1/jobs
  * Danh sách jobs kèm bộ lọc status, runner, pagination
  */
+/**
+ * Parse `systemone_state` (JSON string trong SQLite) thanh object cho API.
+ * Parse loi => null (coi nhu CHUA goi model).
+ * @param {object} job
+ * @returns {object|null}
+ */
+function parseSystemOneState(job) {
+  if (!job || !job.systemone_state) return null;
+  try {
+    const v = typeof job.systemone_state === 'string' ? JSON.parse(job.systemone_state) : job.systemone_state;
+    if (!v || typeof v !== 'object') return null;
+    return {
+      live: v.live === true ? true : (v.live === false ? false : null),
+      calls: Number(v.calls) || 0,
+      fallbacks: Number(v.fallbacks) || 0,
+      lastError: v.lastError || null,
+      model: v.model || null,
+      updatedAt: v.updatedAt || null
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
 app.get('/api/v1/jobs', (req, res) => {
   try {
     const { status, runner, limit = 100, offset = 0, search } = req.query;
@@ -984,10 +1147,13 @@ app.get('/api/v1/jobs', (req, res) => {
       );
     }
 
+    // Badge SystemOne per-task: tra `systemone_state` da parse (object, khong phai string).
+    const jobsWithSo = jobs.map((j) => ({ ...j, systemone_state: parseSystemOneState(j) }));
+
     return res.json({
       success: true,
-      jobs,
-      total: jobs.length
+      jobs: jobsWithSo,
+      total: jobsWithSo.length
     });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
@@ -1020,6 +1186,12 @@ function getTaskEvidences(job) {
   if (fs.existsSync(metadataPath)) {
     try { metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8')); } catch(e){}
   }
+  // evidenceStore hieu ca 3 shape (array / map / tests[]); getEvidenceFileMeta chi doc duoc 2.
+  const storeMeta = evidenceStore.readMetadata(taskEvidenceDir);
+  const storeByFile = new Map();
+  for (const rec of storeMeta.records) {
+    storeByFile.set(String(rec.fileName || '').toLowerCase(), rec);
+  }
 
 
   const list = [];
@@ -1047,7 +1219,8 @@ function getTaskEvidences(job) {
         } catch (e) { return; }
       }
 
-      const meta = getEvidenceFileMeta(metadata, file);
+      const storeRec = storeByFile.get(file.toLowerCase());
+      const meta = storeRec ? storeRec : getEvidenceFileMeta(metadata, file);
       const evidenceHashes = buildEvidenceHashes(fullFilePath, stat);
       let fileContent = '';
       let parsedData = null;
@@ -1063,20 +1236,27 @@ function getTaskEvidences(job) {
 
       const taskCode = job.task_code || job.id;
       const fallbackTitle1 = file.replace(ext, '').replace(/^[0-9]+_/, '').replace(/[-_]/g, ' ');
-      const evidenceTitle1 = meta.stepName || meta.description || meta.title || fallbackTitle1;
+      const evidenceTitle1 = meta.name || meta.stepName || meta.description || meta.title || fallbackTitle1;
       const evidenceStep1 = meta.stepName || meta.step || meta.stepId || null;
       const evidenceCase1 = meta.caseName || meta.testCase || meta.testcase || (typeof meta.case === 'string' ? meta.case : null) || null;
       const evidenceCapturedAt1 = meta.timestamp || meta.capturedAt || meta.captured_at || meta.created_at || meta.createdAt || meta.time || null;
+      // Vong doi trang thai 3 gia tri: NOT VERIFY (chua verify) -> PASS | FAILED.
+      const evStatus1 = evidenceStore.normalizeStatus(meta.status !== undefined ? meta.status : meta.verdict);
+      const evVerdict1 = evidenceStore.verdictOf(evStatus1);
       const itemObj = {
         id: `${job.id}-ev-${idx}`,
         job_id: job.id,
         type,
         evidence_type: type,
         channel: evidenceChannelOf(type),
-        verdict: meta.verdict || (meta.status === 'FAILED' ? 'FAIL' : 'PASS'),
+        verdict: evVerdict1,
         file_path: `/api/v1/jobs/${job.id}/evidence/files/${encodeURIComponent(file)}`,
         url: `/api/v1/jobs/${job.id}/evidence/files/${encodeURIComponent(file)}`,
-        status: meta.status || (meta.verdict === 'FAIL' ? 'FAILED' : 'PASSED'),
+        status: evStatus1,
+        name: meta.name || evidenceTitle1,
+        passCriteria: meta.passCriteria || meta.pass_criteria || meta.criteria || meta.expected || null,
+        order: (meta.order !== undefined && meta.order !== null) ? meta.order : (meta.stepIndex !== undefined && meta.stepIndex !== null ? meta.stepIndex : null),
+        stepIndex: (meta.stepIndex !== undefined && meta.stepIndex !== null) ? meta.stepIndex : null,
         title: evidenceTitle1,
         displayName: evidenceTitle1,
         filename: file,
@@ -1127,6 +1307,20 @@ function getTaskEvidences(job) {
     });
   }
 
+  // Sap xep theo thu tu step test: order -> stepIndex -> timestamp -> ten file.
+  list.sort((a, b) => {
+    const ao = (a.order === null || a.order === undefined) ? null : Number(a.order);
+    const bo = (b.order === null || b.order === undefined) ? null : Number(b.order);
+    if (ao !== null && bo !== null && ao !== bo) return ao - bo;
+    if (ao !== null && bo === null) return -1;
+    if (ao === null && bo !== null) return 1;
+    const at = Date.parse(a.timestamp || '') || 0;
+    const bt = Date.parse(b.timestamp || '') || 0;
+    if (at !== bt) return at - bt;
+    return String(a.filename || '').localeCompare(String(b.filename || ''));
+  });
+  list.forEach((e, idx) => { e.id = `${job.id}-ev-${idx}`; });
+
   // Giữ toàn bộ evidence (không cắt 2 loại) để tab API/Log không mất mục cũ.
   return list;
 }
@@ -1151,6 +1345,7 @@ app.get('/api/v1/jobs/:id', (req, res) => {
     const evidence = getTaskEvidences(job);
     const fullJobData = {
       ...job,
+      systemone_state: parseSystemOneState(job),
       steps,
       dual_plan: dualPlan,
       dualPlan,
@@ -1434,6 +1629,14 @@ app.get(['/api/v1/jobs/:id/evidence', '/api/v1/jobs/:id/evidences', '/api/v1/tas
     if (fs.existsSync(metadataPath)) {
       try { metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8')); } catch (e) {}
     }
+    // evidenceStore hieu ca 3 shape metadata.json (array / map / tests[]).
+    // getEvidenceFileMeta chi doc duoc shape array+map => voi shape tests[] se
+    // tra meta={} => mat ten/mo ta/testCase va moi evidence ra NOT VERIFY.
+    const storeMeta = evidenceStore.readMetadata(taskEvidenceDir);
+    const storeByFile = new Map();
+    for (const rec of storeMeta.records) {
+      storeByFile.set(String(rec.fileName || '').toLowerCase(), rec);
+    }
 
     const realEvidenceList = [];
     if (fs.existsSync(taskEvidenceDir)) {
@@ -1467,7 +1670,8 @@ app.get(['/api/v1/jobs/:id/evidence', '/api/v1/jobs/:id/evidences', '/api/v1/tas
           } catch (e) { continue; }
         }
 
-      const meta = getEvidenceFileMeta(metadata, file);
+      const storeRec = storeByFile.get(file.toLowerCase());
+      const meta = storeRec ? storeRec : getEvidenceFileMeta(metadata, file);
       const evidenceHashes = buildEvidenceHashes(fullFilePath, stat);
       let fileContent = '';
       let parsedData = null;
@@ -1480,20 +1684,28 @@ app.get(['/api/v1/jobs/:id/evidence', '/api/v1/jobs/:id/evidences', '/api/v1/tas
       let type = resolveEvidenceType({ filename: file, ext, meta, parsedData });
 
         const fallbackTitle2 = file.replace(ext, '').replace(/^[0-9]+_/, '').replace(/[-_]/g, ' ');
-        const evidenceTitle2 = meta.stepName || meta.description || meta.title || fallbackTitle2;
+        const evidenceTitle2 = meta.name || meta.stepName || meta.description || meta.title || fallbackTitle2;
         const evidenceStep2 = meta.stepName || meta.step || meta.stepId || null;
         const evidenceCase2 = meta.caseName || meta.testCase || meta.testcase || (typeof meta.case === 'string' ? meta.case : null) || null;
         const evidenceCapturedAt2 = meta.timestamp || meta.capturedAt || meta.captured_at || meta.created_at || meta.createdAt || meta.time || null;
+        // Vong doi trang thai 3 gia tri: NOT VERIFY (chua verify) -> PASS | FAILED.
+        // Truoc day: meta.status !== 'FAILED' => 'PASS' => evidence chua verify cung hien PASS.
+        const evStatus = evidenceStore.normalizeStatus(meta.status !== undefined ? meta.status : meta.verdict);
+        const evVerdict = evidenceStore.verdictOf(evStatus);
         const itemObj = {
           id: `${id}-ev-${idx}`,
           job_id: id,
           type,
           evidence_type: type,
           channel: evidenceChannelOf(type),
-          verdict: meta.verdict || (meta.status === 'FAILED' ? 'FAIL' : 'PASS'),
+          verdict: evVerdict,
           file_path: `/api/v1/jobs/${id}/evidence/files/${encodeURIComponent(file)}`,
           url: `/api/v1/jobs/${id}/evidence/files/${encodeURIComponent(file)}`,
-          status: meta.status || (meta.verdict === 'FAIL' ? 'FAILED' : 'PASSED'),
+          status: evStatus,
+          name: meta.name || evidenceTitle2,
+          passCriteria: meta.passCriteria || meta.pass_criteria || meta.criteria || meta.expected || null,
+          order: (meta.order !== undefined && meta.order !== null) ? meta.order : (meta.stepIndex !== undefined && meta.stepIndex !== null ? meta.stepIndex : null),
+          stepIndex: (meta.stepIndex !== undefined && meta.stepIndex !== null) ? meta.stepIndex : null,
           title: evidenceTitle2,
           displayName: evidenceTitle2,
           filename: file,
@@ -1545,6 +1757,21 @@ app.get(['/api/v1/jobs/:id/evidence', '/api/v1/jobs/:id/evidences', '/api/v1/tas
         realEvidenceList.push(itemObj);
       }
     }
+
+    // Sap xep theo thu tu step test: order -> stepIndex -> timestamp -> ten file.
+    realEvidenceList.sort((a, b) => {
+      const ao = (a.order === null || a.order === undefined) ? null : Number(a.order);
+      const bo = (b.order === null || b.order === undefined) ? null : Number(b.order);
+      if (ao !== null && bo !== null && ao !== bo) return ao - bo;
+      if (ao !== null && bo === null) return -1;
+      if (ao === null && bo !== null) return 1;
+      const at = Date.parse(a.timestamp || '') || 0;
+      const bt = Date.parse(b.timestamp || '') || 0;
+      if (at !== bt) return at - bt;
+      return String(a.filename || '').localeCompare(String(b.filename || ''));
+    });
+    // Cap nhat id sau khi sap xep de id phai dung thu tu hien thi.
+    realEvidenceList.forEach((e, idx) => { e.id = `${id}-ev-${idx}`; });
 
     // Giữ toàn bộ evidence (không cắt 2 loại) để tab API/Log không mất mục cũ.
     const filteredEvidenceList = realEvidenceList;
@@ -1679,27 +1906,45 @@ const handleUpdateEvidenceStatus = (req, res) => {
     }
 
     const body = req.body || {};
-    const verdict = body.verdict || (body.status === 'PASSED' ? 'PASS' : (body.status === 'FAILED' ? 'FAIL' : undefined));
-    const status = body.status || (body.verdict === 'PASS' ? 'PASSED' : (body.verdict === 'FAIL' ? 'FAILED' : undefined));
+    // Vong doi 3 gia tri: NOT VERIFY | PASS | FAILED. 'PASSED'/'PASS'/'FAIL'/'FAILED' deu hop le.
+    const rawStatus = body.status !== undefined ? body.status : body.verdict;
+    if (rawStatus === undefined || rawStatus === null || rawStatus === '') {
+      return res.status(400).json({ success: false, error: 'Thiếu trạng thái (status: NOT VERIFY | PASS | FAILED)' });
+    }
+    const status = evidenceStore.normalizeStatus(rawStatus);
+    const verdict = evidenceStore.verdictOf(status);
 
-    metadata[safeFilename] = {
-      ...(metadata[safeFilename] || {}),
-      ...(verdict ? { verdict } : {}),
-      ...(status ? { status } : {}),
-      ...(() => {
+    // Giu nguyen shape metadata.json hien co (array / map / tests[]) - evidenceStore lo phan nay.
+    const applied = evidenceStore.setStatuses(taskEvidenceDir, { [safeFilename]: status });
+    if (!applied) {
+      // File chua co trong metadata -> them moi record (shape rong).
+      try {
+        const created = evidenceStore.readMetadata(taskEvidenceDir);
+        const rec = evidenceStore.normalizeRecord({
+          fileName: safeFilename,
+          status,
+          timestamp: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        });
         const hint = normalizeEvidenceTypeHint({ type: body.type, evidence_type: body.evidence_type, channel: body.channel });
-        if (!hint) return {};
-        return { type: hint, evidence_type: hint, channel: evidenceChannelOf(hint) };
-      })(),
-      updated_at: new Date().toISOString()
-    };
-
-    fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2), 'utf8');
+        if (hint) {
+          rec.type = hint;
+          rec.evidence_type = hint;
+          rec.channel = evidenceChannelOf(hint);
+        }
+        created.records.push(rec);
+        evidenceStore.writeMetadata(taskEvidenceDir, created.shape, created.raw, created.records);
+      } catch (writeErr) {
+        return res.status(500).json({ success: false, error: writeErr.message });
+      }
+    }
 
     return res.json({
       success: true,
       filename: safeFilename,
-      metadata: metadata[safeFilename]
+      status,
+      verdict,
+      metadata: { status, verdict }
     });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
@@ -1724,6 +1969,11 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
   const id = jobId;
   let agentFailed = false;
   const reasons = [];
+  // File evidence bi xac dinh loi trong qua verify -> danh dau FAILED.
+  const failedEvidenceFiles = new Set();
+  // Khai bao o scope ngoai inner try: khoi ghi trang thai chay SAU inner catch
+  // nen `validFiles` khai trong inner try se bi ReferenceError.
+  let validFiles = [];
   const originalEmit = jobEventBus.emitJobLog;
   jobEventBus.emitJobLog = (targetId, payload) => {
     if (payload && typeof payload.text === 'string') {
@@ -1778,7 +2028,7 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
             || /Kịch Bản Kiểm Thử Giao Diện/i.test(testPlanText)
             || /UI\/E2E/i.test(testPlanText);
   
-          const validFiles = getValidEvidenceFiles();
+          validFiles = getValidEvidenceFiles();
           let metadataObj = {};
           const metaPath = path.join(evidenceDir, 'metadata.json');
           if (fs.existsSync(metaPath)) {
@@ -1903,6 +2153,7 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
                 const undeclared = validFiles.filter(f => f !== 'metadata.json' && ![...declared].some(d => d.includes(f) || f.includes(d)));
                 if (undeclared.length > 0) {
                   agentFailed = true;
+                  undeclared.forEach((f) => failedEvidenceFiles.add(f));
                   jobEventBus.emitJobLog(id, {
                     text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: File evidence chưa được khai trong metadata.json nên không chứng minh cho test case nào: ${undeclared.join(', ')}. Agent phải mapping mỗi file với đúng test case trong plan!\n`
                   });
@@ -2010,6 +2261,7 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
               const st = fs.statSync(path.join(evidenceDir, img));
               if (st.size < 5120) {
                 agentFailed = true;
+                failedEvidenceFiles.add(img);
                 jobEventBus.emitJobLog(id, {
                   text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: ${img} quá nhỏ (${st.size} bytes), nghi là ảnh trắng/placeholder. Agent phải chụp lại giao diện thật có dữ liệu!\n`
                 });
@@ -2025,6 +2277,7 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
               const md5 = crypto.createHash('md5').update(buf).digest('hex');
               if (seen.has(md5)) {
                 agentFailed = true;
+                failedEvidenceFiles.add(img);
                 jobEventBus.emitJobLog(id, {
                   text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: ${img} trùng nội dung (MD5 ${md5}) với ${seen.get(md5)} — không chứng minh được test case riêng biệt. Agent phải chụp lại từng kịch bản thật!\n`
                 });
@@ -2046,6 +2299,7 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
                                           (Array.isArray(dbContent.diffs) && dbContent.diffs.length > 0);
                   if (isDbFailed || hasDiscrepancies) {
                     agentFailed = true;
+                    failedEvidenceFiles.add(dbFile);
                     jobEventBus.emitJobLog(id, {
                       text: `\n[TESTING-VERIFY] ❌ ĐỐI SOÁT THẤT BẠI: File ${dbFile} ghi nhận kết quả không khớp (matched: false hoặc có discrepancies/inconsistencies). Chuyển sang FIXING để xử lý triệt để!\n`
                     });
@@ -2083,11 +2337,148 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
         } catch (evWriteErr) {
           console.warn('Ghi bằng chứng cảnh báo:', evWriteErr.message);
         }
+
+        // Vong doi trang thai evidence: verify thanh cong -> PASS, verify loi -> FAILED.
+        // File chua duoc verify (khong con trong validFiles) giu 'NOT VERIFY'.
+        try {
+          const statusMap = {};
+          const validSet = new Set(validFiles.map((f) => String(f).toLowerCase()));
+          const storeMeta = evidenceStore.readMetadata(evidenceDir);
+          const allFiles = [];
+          try {
+            for (const f of fs.readdirSync(evidenceDir)) {
+              if (f === 'metadata.json' || f.startsWith('.')) continue;
+              allFiles.push(f);
+            }
+          } catch (e) {}
+          for (const f of allFiles) {
+            const key = String(f).toLowerCase();
+            if (failedEvidenceFiles.has(f) || failedEvidenceFiles.has(key)) {
+              statusMap[f] = evidenceStore.STATUS.FAILED;
+            } else if (validSet.has(key)) {
+              statusMap[f] = evidenceStore.STATUS.PASS;
+            }
+          }
+          // File co trong metadata nhung khong con tren dia -> FAILED (khong chung minh duoc)
+          for (const rec of storeMeta.records) {
+            if (!rec.fileName) continue;
+            if (statusMap[rec.fileName] === undefined && !validSet.has(String(rec.fileName).toLowerCase())) {
+              statusMap[rec.fileName] = evidenceStore.STATUS.FAILED;
+            }
+          }
+          if (Object.keys(statusMap).length > 0) {
+            evidenceStore.setStatuses(evidenceDir, statusMap);
+            const passCount = Object.values(statusMap).filter((s) => s === evidenceStore.STATUS.PASS).length;
+            const failCount = Object.values(statusMap).filter((s) => s === evidenceStore.STATUS.FAILED).length;
+            jobEventBus.emitJobLog(id, {
+              text: `\n[TESTING-VERIFY] 📋 Trạng thái evidence sau verify: ${passCount} PASS, ${failCount} FAILED${failCount > 0 ? ` (${[...failedEvidenceFiles].slice(0, 10).join(', ')})` : ''}.\n`
+            });
+          }
+        } catch (statusErr) {
+          console.warn('Ghi trạng thái evidence:', statusErr.message);
+        }
     } finally {
       jobEventBus.emitJobLog = originalEmit;
     }
     return { failed: agentFailed, reasons };
 };
+
+// === Evidence realtime (TASK-PIPELINE-FIX C-1..C-3) ===
+// (evidenceWatchers da khai bao o dau file, truoc class JobEventBus)
+
+function buildEvidenceSnapshot(jobId, evidenceDir) {
+  return evidenceStore.listEvidence(evidenceDir, ({ filename, ext, meta, parsedData }) => {
+    try {
+      return resolveEvidenceType({ filename, ext, meta, parsedData });
+    } catch (e) {
+      return 'UI_SCREENSHOT';
+    }
+  }).map((item) => {
+    const type = item.type || 'UI_SCREENSHOT';
+    return {
+      ...item,
+      id: `${jobId}-ev-${item.fileName}`,
+      job_id: jobId,
+      type,
+      evidence_type: type,
+      channel: evidenceChannelOf(type),
+      file_path: `/api/v1/jobs/${jobId}/evidence/files/${encodeURIComponent(item.fileName)}`,
+      url: `/api/v1/jobs/${jobId}/evidence/files/${encodeURIComponent(item.fileName)}`,
+      title: item.name || item.stepName || item.description || item.fileName,
+      displayName: item.name || item.stepName || item.description || item.fileName,
+      filename: item.fileName
+    };
+  });
+}
+
+function startEvidenceWatcher(jobId, evidenceDir) {
+  stopEvidenceWatcher(jobId);
+  const watcher = new EvidenceWatcher({
+    evidenceDir,
+    snapshot: () => buildEvidenceSnapshot(jobId, evidenceDir),
+    onChange: (item) => {
+      jobEventBus.emitJobEvidence(jobId, { evidence: item, realtime: true });
+    }
+  });
+  watcher.start();
+  evidenceWatchers.set(jobId, watcher);
+  return watcher;
+}
+
+function stopEvidenceWatcher(jobId) {
+  const w = evidenceWatchers.get(jobId);
+  if (w) {
+    w.stop();
+    evidenceWatchers.delete(jobId);
+  }
+}
+
+function stopAllEvidenceWatchers() {
+  for (const jobId of Array.from(evidenceWatchers.keys())) stopEvidenceWatcher(jobId);
+}
+
+// Ghi timeline tung phase vao bang `steps` (started_at / finished_at / exit_code).
+// Truoc day chi co 1 step PENDING lau duoc tao luc tao job, `updateStep` khong co
+// caller nao => KHONG do duoc thoi gian tung buoc (task bd88ae0a ton ~4h, khong
+// phan biet duoc buoc nao an het thoi gian).
+const stepTimeline = new Map(); // jobId -> { stepId, phase, startedAt }
+
+function beginStepTimeline(jobId, phase, runner) {
+  if (!jobId || !phase) return;
+  try {
+    const prev = stepTimeline.get(jobId);
+    if (prev && prev.phase === phase) return; // da bat dau phase nay roi
+    if (prev) endStepTimeline(jobId, { exitCode: null });
+    const steps = db.getStepsByJobId(jobId) || [];
+    const created = db.createStep({
+      job_id: jobId,
+      step_type: phase,
+      step_index: steps.length + 1,
+      status: 'RUNNING',
+      runner: runner || null,
+      started_at: new Date().toISOString()
+    });
+    stepTimeline.set(jobId, { stepId: created && created.id, phase, startedAt: Date.now() });
+  } catch (e) {
+    console.warn('[STEP-TIMELINE] Khong ghi duoc step:', e.message);
+  }
+}
+
+function endStepTimeline(jobId, { exitCode, status } = {}) {
+  if (!jobId) return;
+  const cur = stepTimeline.get(jobId);
+  if (!cur || !cur.stepId) return;
+  try {
+    db.updateStep(cur.stepId, {
+      status: status || 'COMPLETED',
+      finished_at: new Date().toISOString(),
+      exit_code: exitCode === undefined ? null : exitCode
+    });
+  } catch (e) {
+    console.warn('[STEP-TIMELINE] Khong cap nhat duoc step:', e.message);
+  }
+  stepTimeline.delete(jobId);
+}
 
 const executeStep = async (id, opts) => {
   const job = db.getJobById(id);
@@ -2101,8 +2492,48 @@ const executeStep = async (id, opts) => {
     if (ws && ws.features_dir) wsFeaturesDir = ws.features_dir;
   } catch (e) {}
   const { dir: featureDir, evidenceDir } = fileManager.ensureFeatureDirectory(workspacePath, taskCode, { allowExisting: true, featuresDir: wsFeaturesDir });
+  // Bat watcher evidence realtime cho job dang chay.
+  if (!['DONE', 'FAILED', 'CANCELLED', 'TIMED_OUT'].includes(job.status)) {
+    startEvidenceWatcher(id, evidenceDir);
+  }
   const jobTimeoutMs = config.resolveJobTimeoutMs(job, null)
     ?? ((opts && opts.timeoutMs) || config.DEFAULT_TIMEOUT_MS);
+  // Tong ngan sach thoi gian cho job (job_deadline_ms trong pipeline_config).
+  // Timeout PER STEP khong phai ngan sach cho job: 5 step x N retry x 1h => nhieu gio.
+  // Deadline phai TUYET DOI: lan dau tinh roi giu vao pipeline_config.deadline_at,
+  // cac lan sau (executeStep chay lai moi lan chuyen step) doc lai gia tri da luu.
+  const deadlineInfo = jobPolicy.resolveDeadlineAt(job);
+  const jobDeadlineAt = deadlineInfo.deadlineAt;
+  if (deadlineInfo.isNew && jobDeadlineAt) {
+    try {
+      const pipe = jobPolicy.parsePipelineConfig(job);
+      pipe.deadline_at = jobDeadlineAt;
+      db.updateJob(id, { pipeline_config: pipe });
+      job.pipeline_config = pipe;
+    } catch (e) {
+      console.warn('[DEADLINE] Khong luu duoc deadline_at:', e.message);
+    }
+  }
+  const effective = jobPolicy.resolveEffectiveTimeout({ stepTimeoutMs: jobTimeoutMs, deadlineAt: jobDeadlineAt });
+  if (effective.expired) {
+    const msg = `Job da vuot tong ngan sach thoi gian (deadline). Dung pipeline de tranh ton tai tham.`;
+    jobEventBus.emitJobLog(id, { text: `\n[DEADLINE] ${msg}\n` });
+    db.updateJob(id, { status: 'TIMED_OUT', current_step: job.current_step || null, error_message: msg });
+    jobEventBus.emitJobStatus(id, { status: 'TIMED_OUT' });
+    jobEventBus.emitJobError(id, { error: msg });
+    return;
+  }
+
+  // Che do NHANH (task nhe): dung ngan sach thoi gian ngan hon cho tung step.
+  // Task de khong nen chay 15-60 phut/step - uu tien lam nhanh, VERIFY se kiem tra lai.
+  let stepTimeoutMs = effective.timeoutMs;
+  if (isQuickTrack(job)) {
+    const quickCap = jobPolicy.resolveQuickStepTimeoutMs(job, effective.timeoutMs);
+    if (quickCap && quickCap < stepTimeoutMs) {
+      jobEventBus.emitJobLog(id, { text: `\n[TIMEOUT] Chế độ NHANH: giới hạn step ${Math.round(stepTimeoutMs / 1000)}s → ${Math.round(quickCap / 1000)}s (task nhẹ, ưu tiên tốc độ).\n` });
+      stepTimeoutMs = quickCap;
+    }
+  }
   let agentMapping = { PLANNING: 'claude-code', IMPLEMENT: 'claude-code', TESTING: 'claude-code', VERIFY: 'verify-gate', FIXING: 'claude-code' };
   try {
     if (typeof db.getSetting === 'function') {
@@ -2117,6 +2548,7 @@ const executeStep = async (id, opts) => {
   try {
     if (job.status === 'PLANNING') {
       const planningAgent = agentMapping.PLANNING || 'claude-code';
+      beginStepTimeline(id, 'PLANNING', planningAgent);
       db.updateJob(id, { runner: planningAgent });
       const answeredQuestions = (db.getQuestionsByJobId(id) || []).filter(q => q.status === 'ANSWERED');
       let clarificationContext = '';
@@ -2124,13 +2556,21 @@ const executeStep = async (id, opts) => {
         clarificationContext = '\n## CÁC YÊU CẦU ĐÃ ĐƯỢC NGƯỜI DÙNG GIẢI ĐÁP (CLARIFICATION ANSWERS):\n' +
           answeredQuestions.map((q, idx) => `Câu hỏi ${idx+1}: ${q.question}\nCâu trả lời của người dùng: ${q.answer}\n`).join('\n');
       }
+      // Task nhe -> dung template planning-quick.md (plan ngan, it khao sat).
+      const quickTrack = isQuickTrack(job);
+      const planningStep = quickTrack ? 'planning-quick' : 'planning';
       const planningPrompt = promptTemplateManager.buildPrompt({
-        step: 'planning', taskCode, userPrompt: (job.prompt || '') + clarificationContext, workspacePath, featureDir,
+        step: planningStep, taskCode, userPrompt: (job.prompt || '') + clarificationContext, workspacePath, featureDir,
         previousContext: fileManager.loadPreviousContext(workspacePath, taskCode, 'planning')
       });
-      const planningGuard = await systemone.checkGuard({ taskCode, prompt: planningPrompt });
-      if (planningGuard.blocked || planningGuard.warned || planningGuard.action === 'warn') {
-        jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-GUARD] ⚠ Prompt PLANNING cảnh báo (action ${planningGuard.action} confidence ${planningGuard.decision.confidence}). Tiếp tục bằng prompt đã scrub, không FAILED job.\n` });
+      if (quickTrack) {
+        jobEventBus.emitJobLog(id, { text: `\n[PLANNING] Chế độ NHANH: dùng template planning-quick.md (kế hoạch ngắn, khảo sát tối đa).\n` });
+      }
+      // Scrub prompt LOCAL (nhanh, mien phi, khong cat du lieu). Khong goi SystemOne:
+      // prompt 10-14KB la input lon, goi model de kiem tra 'co secret' la lam dung.
+      const planningGuard = guardPrompt(planningPrompt);
+      if (planningGuard.scrubbed || planningGuard.injection) {
+        jobEventBus.emitJobLog(id, { text: `\n[GUARD] ⚠ Prompt PLANNING: secret=${planningGuard.hasSecret ? 'có' : 'không'} injection=${planningGuard.injection ? 'có' : 'không'}. Tiếp tục bằng prompt đã scrub, không FAILED job.\n` });
       }
       jobEventBus.emitJobLog(id, { text: `\n[1/5] >>> 🤖 [PLANNING] Kích hoạt lập kế hoạch song song (Dual Planning) với Agent: ${planningAgent}\n[PLANNING] Nạp template prompt planning.md...\n[PLANNING] Agent đang phân tích mã nguồn và thiết lập Kế hoạch (Vui lòng đợi khoảng 15-30 giây)...\n` });
       const planStartTime = Date.now();
@@ -2149,7 +2589,7 @@ const executeStep = async (id, opts) => {
         try {
           await runner.execute({
             prompt: planningGuard.promptToUse, cwd: workspacePath, jobId: id,
-            timeoutMs: jobTimeoutMs,
+            timeoutMs: stepTimeoutMs,
             onStdout: (text) => { outBuffer += text; jobEventBus.emitJobLog(id, { text }); },
             onStderr: (text) => { outBuffer += text; jobEventBus.emitJobLog(id, { text }); }
           });
@@ -2256,6 +2696,7 @@ const executeStep = async (id, opts) => {
     }
 
     if (job.status === 'IMPLEMENT') {
+      beginStepTimeline(id, 'IMPLEMENT', agentMapping.IMPLEMENT || 'claude-code');
       const prevContext = fileManager.loadPreviousContext(workspacePath, taskCode, 'implement');
       const planFiles = fileManager.readPlanFiles(workspacePath, taskCode);
       const devPlanText = (planFiles && planFiles.devPlan) || (typeof prevContext === 'string' ? prevContext : '');
@@ -2275,13 +2716,14 @@ const executeStep = async (id, opts) => {
       }
 
       const implementAgent = agentMapping.IMPLEMENT || 'claude-code';
+      // Task nhe -> dung template implement-quick.md (sua toi thieu, khong khao sat lai).
       const implementPrompt = promptTemplateManager.buildPrompt({
-        step: 'implement', taskCode, userPrompt: job.prompt || '', workspacePath, featureDir,
+        step: isQuickTrack(job) ? 'implement-quick' : 'implement', taskCode, userPrompt: job.prompt || '', workspacePath, featureDir,
         previousContext: prevContext
       });
-      const implementGuard = await systemone.checkGuard({ taskCode, prompt: implementPrompt });
-      if (implementGuard.blocked || implementGuard.warned || implementGuard.action === 'warn') {
-        jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-GUARD] ⚠ Prompt IMPLEMENT cảnh báo (action ${implementGuard.action} confidence ${implementGuard.decision.confidence}). Tiếp tục bằng prompt đã scrub, không FAILED job.\n` });
+      const implementGuard = guardPrompt(implementPrompt);
+      if (implementGuard.scrubbed || implementGuard.injection) {
+        jobEventBus.emitJobLog(id, { text: `\n[GUARD] ⚠ Prompt IMPLEMENT: secret=${implementGuard.hasSecret ? 'có' : 'không'} injection=${implementGuard.injection ? 'có' : 'không'}. Tiếp tục bằng prompt đã scrub, không FAILED job.\n` });
       }
       db.updateJob(id, { runner: implementAgent });
       const impProgressTimer = setInterval(() => {
@@ -2298,7 +2740,7 @@ const executeStep = async (id, opts) => {
         try {
           implementResult = await runner.execute({
             prompt: implementGuard.promptToUse, cwd: workspacePath, jobId: id,
-            timeoutMs: jobTimeoutMs,
+            timeoutMs: stepTimeoutMs,
             onStdout: (text) => jobEventBus.emitJobLog(id, { text }),
             onStderr: (text) => jobEventBus.emitJobLog(id, { text })
           });
@@ -2317,12 +2759,15 @@ const executeStep = async (id, opts) => {
         }
         // IMPLEMENT that bai (timeout hoac exit code != 0) thi DUNG pipeline, khong tu dong sang TESTING
         if (!implementResult || implementResult.timedOut || implementResult.exitCode !== 0) {
-          const failReason = implementResult && implementResult.timedOut
-            ? `vuot qua gioi han thoi gian (${implementResult.timeoutMs || jobTimeoutMs}ms)`
+          const isTimeout = !!(implementResult && implementResult.timedOut);
+          const failReason = isTimeout
+            ? `vuot qua gioi han thoi gian (${implementResult.timeoutMs || stepTimeoutMs}ms)`
             : `exit code ${implementResult ? implementResult.exitCode : 'khong xac dinh'}`;
+          // Timeout la trang thai rieng (TIMED_OUT), khong gop voi loi thuoc.
+          const failStatus = isTimeout ? 'TIMED_OUT' : 'FAILED';
           jobEventBus.emitJobLog(id, { text: `\n[IMPLEMENT-FAILED] Trien khai that bai (${failReason}). Pipeline DUNG tai IMPLEMENT, vui long kiem tra log va chay lai.\n` });
-          db.updateJob(id, { status: 'FAILED', current_step: 'IMPLEMENT', error_message: `IMPLEMENT that bai: ${failReason}` });
-          jobEventBus.emitJobStatus(id, { status: 'FAILED' });
+          db.updateJob(id, { status: failStatus, current_step: 'IMPLEMENT', error_message: `IMPLEMENT that bai: ${failReason}` });
+          jobEventBus.emitJobStatus(id, { status: failStatus });
           jobEventBus.emitJobError(id, { error: `IMPLEMENT that bai: ${failReason}` });
           throw new Error(`IMPLEMENT that bai: ${failReason}`);
         }
@@ -2338,6 +2783,7 @@ const executeStep = async (id, opts) => {
     }
 
     if (job.status === 'TESTING') {
+      beginStepTimeline(id, 'TESTING', agentMapping.TESTING || 'claude-code');
       const checkBeforeTest = db.getJobById(id);
       if (checkBeforeTest && checkBeforeTest.status === 'CANCELLED') return;
 
@@ -2347,9 +2793,9 @@ const executeStep = async (id, opts) => {
         previousContext: fileManager.loadPreviousContext(workspacePath, taskCode, 'testing'),
         errorLogs: ''
       });
-      const testingGuard = await systemone.checkGuard({ taskCode, prompt: testingPrompt });
-      if (testingGuard.blocked || testingGuard.warned || testingGuard.action === 'warn') {
-        jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-GUARD] ⚠ Prompt TESTING cảnh báo (action ${testingGuard.action} confidence ${testingGuard.decision.confidence}). Tiếp tục bằng prompt đã scrub, không FAILED job.\n` });
+      const testingGuard = guardPrompt(testingPrompt);
+      if (testingGuard.scrubbed || testingGuard.injection) {
+        jobEventBus.emitJobLog(id, { text: `\n[GUARD] ⚠ Prompt TESTING: secret=${testingGuard.hasSecret ? 'có' : 'không'} injection=${testingGuard.injection ? 'có' : 'không'}. Tiếp tục bằng prompt đã scrub, không FAILED job.\n` });
       }
       db.updateJob(id, { runner: testAgent });
       jobEventBus.emitJobLog(id, { text: `\n[3/5] >>> 🤖 [TESTING] Bắt đầu kiểm thử thật với Runner/Agent: ${testAgent}...\n` });
@@ -2371,7 +2817,7 @@ const executeStep = async (id, opts) => {
         try {
           testingResult = await runner.execute({
             prompt: testingGuard.promptToUse, cwd: workspacePath, jobId: id,
-            timeoutMs: jobTimeoutMs,
+            timeoutMs: stepTimeoutMs,
             onStdout: (text) => jobEventBus.emitJobLog(id, { text }),
             onStderr: (text) => jobEventBus.emitJobLog(id, { text })
           });
@@ -2410,8 +2856,31 @@ const executeStep = async (id, opts) => {
       // TESTING that bai (timeout/exit!=0/thieu runner): chuyen thang sang FIXING, KHONG qua VERIFY.
       if (agentFailed) {
         const fixAgentAfterTest = agentMapping.FIXING || 'claude-code';
-        const failReasonText = !testingResult ? 'khong co ket qua kiem thu' : (testingResult.timedOut ? ('vuot qua gioi han thoi gian ('+(testingResult.timeoutMs || jobTimeoutMs)+'ms)') : ('exit code '+testingResult.exitCode));
+        const failReasonText = !testingResult ? 'khong co ket qua kiem thu' : (testingResult.timedOut ? ('vuot qua gioi han thoi gian ('+(testingResult.timeoutMs || stepTimeoutMs)+'ms)') : ('exit code '+testingResult.exitCode));
         const failGate = { passed: false, error: 'Kiem thu that bai ('+failReasonText+')', timeout: !!(testingResult && testingResult.timedOut), decided_at: new Date().toISOString(), mapped_from: 'TESTING', source: 'pipeline-testing-failed' };
+        // Rate-limit provider: retry vong FIXING sau chi lai lai mot vong ~1h vô ich.
+        // runner.execute() tra { stdout, stderr } (khong phai `output`); log 429 cua CLI
+        // nam trong stderr => phai gom ca hai.
+        const testRateLimit = jobPolicy.detectRateLimit(jobPolicy.collectAgentOutput(testingResult));
+        if (testRateLimit.limited) {
+          const retryAfter = testRateLimit.retryAfterMs ? ` (retry-after ${Math.round(testRateLimit.retryAfterMs / 1000)}s)` : '';
+          const msg = `Provider rate-limit${retryAfter}. Dung pipeline, khong retry lai.`;
+          jobEventBus.emitJobLog(id, { text: `\n[RATE-LIMIT] ${msg}\n` });
+          db.updateJob(id, { status: 'FAILED', current_step: 'TESTING', error_message: msg, gate_result: failGate });
+          jobEventBus.emitJobStatus(id, { status: 'FAILED' });
+          jobEventBus.emitJobError(id, { error: msg });
+          return;
+        }
+        // Het tong ngan sach thoi gian cua job: dung, khong vao vong FIXING moi.
+        const remainingNow = jobPolicy.resolveEffectiveTimeout({ stepTimeoutMs, deadlineAt: jobDeadlineAt });
+        if (remainingNow.expired) {
+          const msg = 'Job da vuot tong ngan sach thoi gian (deadline). Dung pipeline de tranh ton tai tham.';
+          jobEventBus.emitJobLog(id, { text: `\n[DEADLINE] ${msg}\n` });
+          db.updateJob(id, { status: 'TIMED_OUT', current_step: 'TESTING', error_message: msg, gate_result: failGate });
+          jobEventBus.emitJobStatus(id, { status: 'TIMED_OUT' });
+          jobEventBus.emitJobError(id, { error: msg });
+          return;
+        }
         jobEventBus.emitJobLog(id, { text: `\n[TESTING] Agent kiem thu bao loi ('+failReasonText+'), chuyen sang [FIXING]...` });
         db.updateJob(id, { status: 'FIXING', current_step: 'FIXING', runner: fixAgentAfterTest, error_message: 'Kiem thu that bai ('+failReasonText+').', gate_result: failGate });
         jobEventBus.emitJobStatus(id, { status: 'FIXING', runner: fixAgentAfterTest });
@@ -2428,16 +2897,11 @@ const executeStep = async (id, opts) => {
     }
 
     if (job.status === 'VERIFY') {
+      beginStepTimeline(id, 'VERIFY', 'verify-gate');
       const checkVerify = db.getJobById(id);
       if (checkVerify && checkVerify.status === 'CANCELLED') return;
-      const preJudge = await systemone.checkPreJudge({ jobId: id, taskCode, summary: String(job.error_message || '').slice(0, 1000) });
-      jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-PREJUDGE] pass=${preJudge.pass} failed=[${(preJudge.failedFields || []).join(',')}] confidence=${preJudge.confidence}${preJudge.cached ? ' (cache)' : ''}.\n` });
-      // PreJudge chỉ gợi ý lọc kênh, TUYỆT ĐỐI KHÔNG bypass verifyTaskEvidence (quy tắc server.js: buộc đối soát file evidence thật).
-      if (preJudge && preJudge.pass === true && Number(preJudge.confidence) >= 0.5) {
-        jobEventBus.emitJobLog(id, { text: `\n[VERIFY] SystemOne pre-judge PASS — vẫn đối soát evidence thật bằng code, chỉ ưu tiên thứ tự kênh kiểm tra.\n` });
-      } else if (preJudge && Array.isArray(preJudge.failedFields) && preJudge.failedFields.length > 0) {
-        jobEventBus.emitJobLog(id, { text: `\n[VERIFY] SystemOne gợi ý tập trung kênh: [${preJudge.failedFields.join(',')}].\n` });
-      }
+      // PreJudge: BO - chi ghi log, khong quyet dinh gi (verifyTaskEvidence la nguon su that).
+      // Ton 1 network call moi vong FIXING ma khong doi hanh vi gi => ton tai, cham.
       const { failed: verifyFailed, reasons: verifyReasons } = verifyTaskEvidence({
         jobId: id, evidenceDir, featureDir, taskCode,
         emit: (text) => jobEventBus.emitJobLog(id, { text })
@@ -2473,35 +2937,91 @@ const executeStep = async (id, opts) => {
 
     if (job.status === 'FIXING') {
       const fixingAgent = agentMapping.FIXING || 'claude-code';
+      beginStepTimeline(id, 'FIXING', fixingAgent);
       const fixingPrompt = promptTemplateManager.buildPrompt({
         step: 'fixing', taskCode, userPrompt: job.prompt || '', workspacePath, featureDir,
         previousContext: fileManager.loadPreviousContext(workspacePath, taskCode, 'fixing'),
         errorLogs: job.error_message || ''
       });
-      const fixingGuard = await systemone.checkGuard({ taskCode, prompt: fixingPrompt });
-      if (fixingGuard.blocked || fixingGuard.warned || fixingGuard.action === 'warn') {
-        jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-GUARD] ⚠ Prompt FIXING cảnh báo (action ${fixingGuard.action} confidence ${fixingGuard.decision.confidence}). Tiếp tục bằng prompt đã scrub, không FAILED job.\n` });
+      const fixingGuard = guardPrompt(fixingPrompt);
+      logSystemOneFallback(id, 'guard/FIXING', fixingGuard.decision);
+      if (fixingGuard.scrubbed || fixingGuard.injection) {
+        jobEventBus.emitJobLog(id, { text: `\n[GUARD] ⚠ Prompt FIXING: secret=${fixingGuard.hasSecret ? 'có' : 'không'} injection=${fixingGuard.injection ? 'có' : 'không'}. Tiếp tục bằng prompt đã scrub, không FAILED job.\n` });
       }
       const attempt = systemone.getFixAttempt(job);
-      const maxRetries = Number(config.MAX_FIXING_RETRIES) || 3;
-      const fixGate = await systemone.checkFixGate({ jobId: id, attempt, maxRetries, failures: { error: String(job.error_message || '').slice(0, 1000) }, files: [] });
-      jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-FIXGATE] attempt=${attempt}/${maxRetries} retry=${fixGate.retry} p_success=${fixGate.p_success} scope=${fixGate.fixScope}.\n` });
+      // max_retries khai trong pipeline_config của job PHẢI được dùng thật.
+      // Trước đây đọc config.MAX_FIXING_RETRIES (env) => job khai 10 vẫn dừng ở 3/3.
+      const retryPolicy = jobPolicy.resolveMaxRetries(job);
+      const maxRetries = retryPolicy.value;
+      // Model SystemOne CHI doc `state` - gateway bo qua field `files` (probe 2026-10-21).
+      // => phai truyen NOI DUNG file that qua state de model doc duoc file dang sua.
+      // Uu tien file lien quan stack trace + file vua sua (mtime), gom ca file untracked.
+      const errorHint = String(job.error_message || '').slice(0, 1000);
+      const changedFiles = await fileContext.listChangedFiles(workspacePath, [], 8, errorHint);
+      const fileCtx = await fileContext.collectFileContext(changedFiles, { workspacePath, maxStateTokens: 60000 });
+      const fixGate = await systemone.checkFixGate({
+        jobId: id, attempt, maxRetries,
+        failures: { error: errorHint },
+        files: changedFiles,
+        fileContext: fileCtx.text
+      });
+      recordSystemOne(id, fixGate, 'fixgate');
+      logSystemOneFallback(id, 'fixgate', fixGate);
+      jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-FIXGATE] attempt=${attempt}/${maxRetries} (source=${retryPolicy.source}) retry=${fixGate.retry} p_success=${fixGate.p_success} scope=${fixGate.fixScope}${fixGate.fallback ? ' [FALLBACK-HEURISTIC]' : ''}. File context: ${fileCtx.files.length} file, ~${fileCtx.tokens} tokens${fileCtx.truncatedFiles.length ? ` (cat: ${fileCtx.truncatedFiles.join(', ')})` : ''}.\n` });
       if (fixGate && fixGate.retry === false) {
-        db.updateJob(id, { status: 'FAILED', current_step: 'FIXING', error_message: `SystemOne fixGate dừng retry (attempt ${attempt}/${maxRetries}, p_success ${fixGate.p_success}).` });
+        const gateReason = fixGate.fallback
+          ? `SystemOne fixGate dừng retry (heuristic offline, attempt ${attempt}/${maxRetries}).`
+          : `SystemOne fixGate dừng retry (attempt ${attempt}/${maxRetries}, p_success ${fixGate.p_success}).`;
+        db.updateJob(id, { status: 'FAILED', current_step: 'FIXING', error_message: gateReason });
         jobEventBus.emitJobStatus(id, { status: 'FAILED' });
-        jobEventBus.emitJobError(id, { error: `SystemOne fixGate dừng retry (p_success ${fixGate.p_success}).` });
+        jobEventBus.emitJobError(id, { error: gateReason });
         return;
       }
       db.updateJob(id, { runner: fixingAgent, pipeline_config: systemone.withFixAttempt(job, attempt + 1) });
       jobEventBus.emitJobLog(id, { text: `\n[ERROR] Phát hiện sự cố. Đang sửa lỗi với 🤖 Agent: ${fixingAgent}...\n` });
+      // Backoff giữa các vòng retry: tránh 3 vòng FIXING dính nhau mỗi vòng ~1h.
+      const backoffMs = jobPolicy.resolveRetryBackoffMs(attempt + 1);
+      if (backoffMs > 0) {
+        jobEventBus.emitJobLog(id, { text: `[RETRY-BACKOFF] Chờ ${backoffMs}ms trước vòng sửa thứ ${attempt + 1}/${maxRetries}.\n` });
+        await new Promise((resolve) => setTimeout(resolve, backoffMs));
+      }
       const runner = runnerRegistry.getAvailableRunner(fixingAgent);
       if (runner) {
-        await runner.execute({
-          prompt: fixingGuard.promptToUse, cwd: workspacePath, jobId: id,
-            timeoutMs: jobTimeoutMs,
-          onStdout: (text) => jobEventBus.emitJobLog(id, { text }),
-          onStderr: (text) => jobEventBus.emitJobLog(id, { text })
-        });
+        let fixingResult = null;
+        try {
+          fixingResult = await runner.execute({
+            prompt: fixingGuard.promptToUse, cwd: workspacePath, jobId: id,
+            timeoutMs: stepTimeoutMs,
+            onStdout: (text) => jobEventBus.emitJobLog(id, { text }),
+            onStderr: (text) => jobEventBus.emitJobLog(id, { text })
+          });
+        } catch (fixExecErr) {
+          jobEventBus.emitJobLog(id, { text: `[FIXING] Lỗi thực thi Agent: ${fixExecErr.message}\n` });
+          fixingResult = { output: fixExecErr.message, exitCode: 1 };
+        }
+        // Rate-limit của provider: retry-after có thể hàng giờ/ngày => mọi vòng retry đều vô nghĩa.
+        const rl = jobPolicy.detectRateLimit(jobPolicy.collectAgentOutput(fixingResult));
+        if (rl.limited) {
+          const retryAfter = rl.retryAfterMs ? ` (retry-after ${Math.round(rl.retryAfterMs / 1000)}s)` : '';
+          const msg = `Provider rate-limit${retryAfter}. Dừng pipeline, không retry lại.`;
+          jobEventBus.emitJobLog(id, { text: `\n[RATE-LIMIT] ${msg}\n` });
+          db.updateJob(id, { status: 'FAILED', current_step: 'FIXING', error_message: msg });
+          jobEventBus.emitJobStatus(id, { status: 'FAILED' });
+          jobEventBus.emitJobError(id, { error: msg });
+          return;
+        }
+        // FIXING timeout/exit!=0 KHÔNG được coi là "Hoàn tất sửa lỗi" rồi chạy tiếp TESTING.
+        if (!fixingResult || fixingResult.timedOut || fixingResult.exitCode !== 0) {
+          const failReason = fixingResult && fixingResult.timedOut
+            ? `vượt quá giới hạn thời gian (${fixingResult.timeoutMs || stepTimeoutMs}ms)`
+            : `exit code ${fixingResult ? fixingResult.exitCode : 'không xác định'}`;
+          const msg = `FIXING thất bại: ${failReason}. Dừng pipeline.`;
+          jobEventBus.emitJobLog(id, { text: `\n[FIXING-FAILED] ${msg}\n` });
+          db.updateJob(id, { status: 'FAILED', current_step: 'FIXING', error_message: msg });
+          jobEventBus.emitJobStatus(id, { status: 'FAILED' });
+          jobEventBus.emitJobError(id, { error: msg });
+          return;
+        }
         jobEventBus.emitJobLog(id, { text: `\n[FIXING] Hoàn tất sửa lỗi.\n` });
         const checkAfterFix = db.getJobById(id);
         if (checkAfterFix && checkAfterFix.status === 'CANCELLED') {
@@ -2596,6 +3116,34 @@ const runJobPipeline = (jobId, opts) => {
   });
 };
 
+/**
+ * Doc/ghi co "che do nhanh" (quick track) cho 1 job trong pipeline_config.
+ * Task nhe (SystemOne triage: S/quick) -> plan rut gon + implement nhanh.
+ * @param {object} job
+ * @returns {boolean}
+ */
+function isQuickTrack(job) {
+  try {
+    const cfg = jobPolicy.parsePipelineConfig(job);
+    return cfg && cfg.quick_track === true;
+  } catch (e) { return false; }
+}
+
+/**
+ * Bat che do nhanh cho 1 job (ghi vao pipeline_config de moi lan chay deu doc duoc).
+ * @param {string} jobId
+ * @param {boolean} enabled
+ */
+function setQuickTrack(jobId, enabled) {
+  try {
+    const job = db.getJobById(jobId);
+    if (!job) return;
+    const cfg = jobPolicy.parsePipelineConfig(job);
+    cfg.quick_track = !!enabled;
+    db.updateJob(jobId, { pipeline_config: cfg });
+  } catch (e) {}
+}
+
 const handleJobStart = async (req, res) => {
   try {
     const { id } = req.params;
@@ -2647,11 +3195,17 @@ const handleJobStart = async (req, res) => {
 
     // 2b. SystemOne Triage + Dedup trước enqueue (fail-open về đường cũ)
     const triage = await systemone.checkTriage({ taskCode, prompt: job.prompt || job.title || '', jobId: id });
-    const dedup = await systemone.checkDedup({ taskCode, prompt: job.prompt || job.title || '' });
+    recordSystemOne(id, triage, 'triage');
+    logSystemOneFallback(id, 'triage', triage);
+    // Dedup: hash LOCAL (bucketId) - khong goi model. Ket qua chi dung de gan nhan,
+    // goi network o day chi ton mot call ma khong doi hanh vi gi.
+    const dedup = systemone.localDedup({ taskCode, prompt: job.prompt || job.title || '' });
     jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-TRIAGE] complexity=${triage.complexity} track=${triage.track} needBrowser=${triage.needBrowser} confidence=${triage.confidence}${triage.cached ? ' (cache)' : ''} bucket=${dedup.bucketId}.\n` });
     if (triage && triage.track === 'quick' && Number(triage.confidence) >= 0.5) {
       systemone.addCliSaved(1);
-      jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-TRIAGE] Task nhẹ (S/quick) — ưu tiên enqueue, planning sẽ rút gọn.\n` });
+      // Bat che do nhanh THUC SU: plan rut gon + implement toi uu, khong chi tang priority.
+      setQuickTrack(id, true);
+      jobEventBus.emitJobLog(id, { text: `\n[SYSTEMONE-TRIAGE] Task nhẹ (S/quick, confidence ${Number(triage.confidence).toFixed(2)}) — chế độ NHANH: plan rút gọn, implement tối ưu tốc độ.\n` });
     }
     // 3. Đưa job vào TaskQueue để quản lý Concurrency & Workspace Queue Lock
     taskQueue.enqueue(job, (queuedJob, queueOpts) => runJobPipeline(id, queueOpts), (triage && triage.track === 'quick' ? (job.priority || 0) + 1 : job.priority || 0));
@@ -3113,6 +3667,27 @@ app.get('/api/v1/jobs/:id/logs/stream', (req, res) => {
     return res.status(404).json({ error: `Job with ID '${id}' not found` });
   }
 
+  // Bat watcher evidence realtime neu job dang chay (dam bao SSE luon nhan
+  // evidence moi du pipeline co chay executeStep hay khong).
+  try {
+    const jobStatus = ((job.status || '') + '').toUpperCase();
+    if (!['DONE', 'FAILED', 'CANCELLED', 'TIMED_OUT'].includes(jobStatus)) {
+      const wsPath = job.repo_path || job.worktree_path || './';
+      let wsFeaturesDir = 'docs/features';
+      try {
+        const ws = job.workspace_id ? db.getWorkspaceById(job.workspace_id)
+          : (db.listWorkspaces ? db.listWorkspaces().find(w => path.resolve(w.path) === path.resolve(wsPath)) : null);
+        if (ws && ws.features_dir) wsFeaturesDir = ws.features_dir;
+      } catch (e) {}
+      const tCode = job.task_code || job.id;
+      const fDir = fileManager.getFeatureDirectory(wsPath, tCode, wsFeaturesDir);
+      const eDir = path.join(fDir, 'evidence');
+      startEvidenceWatcher(id, eDir);
+    }
+  } catch (e) {
+    console.warn('[EVIDENCE-WATCHER] Khong bat duoc watcher:', e.message);
+  }
+
   // Cấu hình SSE Headers
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -3144,6 +3719,25 @@ app.get('/api/v1/jobs/:id/logs/stream', (req, res) => {
     current_step: job.current_step
   });
 
+  // 1b. Gui snapshot evidence hien tai (de UI co du lieu ngay, khong phai reload).
+  try {
+    const wsPath0 = job.repo_path || job.worktree_path || './';
+    let wsFeatDir0 = 'docs/features';
+    try {
+      const ws0 = job.workspace_id ? db.getWorkspaceById(job.workspace_id)
+        : (db.listWorkspaces ? db.listWorkspaces().find(w => path.resolve(w.path) === path.resolve(wsPath0)) : null);
+      if (ws0 && ws0.features_dir) wsFeatDir0 = ws0.features_dir;
+    } catch (e) {}
+    const tCode0 = job.task_code || job.id;
+    const fDir0 = fileManager.getFeatureDirectory(wsPath0, tCode0, wsFeatDir0);
+    const eDir0 = path.join(fDir0, 'evidence');
+    for (const item of buildEvidenceSnapshot(id, eDir0)) {
+      sendEvent('evidence', { type: 'evidence', jobId: id, evidence: item });
+    }
+  } catch (e) {
+    console.warn('[EVIDENCE-SNAPSHOT] Khong gui duoc snapshot:', e.message);
+  }
+
   // 2. Gửi câu hỏi đang pending nếu có
   const pendingQ = db.getPendingQuestionByJobId(id);
   if (pendingQ) {
@@ -3162,6 +3756,19 @@ app.get('/api/v1/jobs/:id/logs/stream', (req, res) => {
       status: pendingQ.status
     });
   }
+
+  // 2b. Gửi trạng thái SystemOne hiện tại của task (badge per-task ngay khi mở).
+  const soState = parseSystemOneState(job);
+  sendEvent('systemone', {
+    type: 'systemone',
+    jobId: id,
+    live: soState ? soState.live : null,
+    calls: soState ? soState.calls : 0,
+    fallbacks: soState ? soState.fallbacks : 0,
+    lastError: soState ? soState.lastError : null,
+    model: soState ? soState.model : null,
+    updatedAt: soState ? soState.updatedAt : null
+  });
 
   // 3. Đọc log đã lưu trước đó nếu có file log
   const logFilePath = path.join(config.LOG_DIR, `${id}.log`);
@@ -3188,6 +3795,7 @@ app.get('/api/v1/jobs/:id/logs/stream', (req, res) => {
   const evidenceListener = (data) => sendEvent('evidence', data);
   const doneListener = (data) => sendEvent('done', data);
   const errorListener = (data) => sendEvent('error', data);
+  const systemOneListener = (data) => sendEvent('systemone', data);
 
   jobEventBus.on(`job:${id}:log`, logListener);
   jobEventBus.on(`job:${id}:step`, stepListener);
@@ -3196,6 +3804,7 @@ app.get('/api/v1/jobs/:id/logs/stream', (req, res) => {
   jobEventBus.on(`job:${id}:evidence`, evidenceListener);
   jobEventBus.on(`job:${id}:done`, doneListener);
   jobEventBus.on(`job:${id}:error`, errorListener);
+  jobEventBus.on(`job:${id}:systemone`, systemOneListener);
   // 5. Heartbeat Ping giữ kết nối không bị timeout
   const keepAliveInterval = setInterval(() => {
     try {
@@ -3218,6 +3827,7 @@ app.get('/api/v1/jobs/:id/logs/stream', (req, res) => {
     jobEventBus.removeListener(`job:${id}:evidence`, evidenceListener);
     jobEventBus.removeListener(`job:${id}:done`, doneListener);
     jobEventBus.removeListener(`job:${id}:error`, errorListener);
+    jobEventBus.removeListener(`job:${id}:systemone`, systemOneListener);
   });
 });
 
@@ -3256,5 +3866,9 @@ module.exports = {
   normalizeEvidenceTypeHint,
   hasApiRuntimeShape,
   hasDbShape,
-  evidenceChannelOf
+  evidenceChannelOf,
+  startEvidenceWatcher,
+  stopEvidenceWatcher,
+  stopAllEvidenceWatchers,
+  buildEvidenceSnapshot
 };

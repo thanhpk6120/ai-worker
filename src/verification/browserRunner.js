@@ -732,7 +732,13 @@ class BrowserRunner extends EventEmitter {
     const safeFeature = featureName.trim();
     const safeStep = (stepName || 'step').replace(/[^a-zA-Z0-9_-]/g, '_');
     const timestamp = Date.now();
-    const fileName = `${timestamp}_${safeStep}.png`;
+    // Ten file co so thu tu step test: 01_..., 02_... (khi co stepIndex).
+    // Timestamp epoch khong phai thu tu step => anh khong sap xep dung thu tu kiem thu.
+    const stepIndexNum = Number(options.stepIndex);
+    const hasStepIndex = Number.isFinite(stepIndexNum) && stepIndexNum > 0;
+    const fileName = hasStepIndex
+      ? `${String(Math.floor(stepIndexNum)).padStart(2, '0')}_${safeStep}.png`
+      : `${timestamp}_${safeStep}.png`;
 
     // Định vị thư mục lưu trữ: feature/<featureName>/evidence/
     const evidenceDir = path.resolve(this.evidenceBaseDir, safeFeature, 'evidence');
@@ -796,6 +802,15 @@ class BrowserRunner extends EventEmitter {
       evidenceId: `ev_${timestamp}_${Math.random().toString(36).substring(2, 7)}`,
       stepId: safeStep,
       stepName: stepName || safeStep,
+      // Ten + mo ta + tieu chi PASS (yeu cau: evidence phai duoc dat ten va mo ta).
+      name: options.name || stepName || safeStep,
+      description: options.description || null,
+      passCriteria: options.passCriteria || options.pass_criteria || options.expected || null,
+      testCase: options.testCase || options.test_case || null,
+      // Thu tu step test: dung de sap xep anh theo thu tu kiem thu.
+      stepIndex: hasStepIndex ? Math.floor(stepIndexNum) : null,
+      order: hasStepIndex ? Math.floor(stepIndexNum) : (Number.isFinite(Number(options.order)) ? Number(options.order) : null),
+      stepTotal: Number.isFinite(Number(options.stepTotal)) ? Number(options.stepTotal) : null,
       timestamp: new Date(timestamp).toISOString(),
       fileName,
       filePath,
@@ -806,7 +821,10 @@ class BrowserRunner extends EventEmitter {
       selector: options.selector || null,
       actionType: options.actionType || 'screenshot',
       fileSizeBytes: imageBuffer ? imageBuffer.length : 0,
-      status: 'CAPTURED',
+      // Vong doi trang thai: evidence moi sinh = NOT VERIFY.
+      // Chi khi verify thanh cong moi la PASS; verify loi la FAILED.
+      status: 'NOT VERIFY',
+      verdict: null,
       consoleErrors: [...this.consoleErrors]
     };
 
@@ -903,7 +921,14 @@ class BrowserRunner extends EventEmitter {
           const shotName = step.screenshotCheckpointId || step.name || `step_${stepIndex}`;
           const shotRecord = await this.captureScreenshot(featureName, shotName, {
             selector: step.selector,
-            actionType: step.actionType
+            actionType: step.actionType,
+            // Thu tu step test => anh sap xep dung thu tu kiem thu.
+            stepIndex: stepIndex + 1,
+            stepTotal: steps.length,
+            name: step.evidenceName || step.name || shotName,
+            description: step.description || step.expected || null,
+            passCriteria: step.passCriteria || step.expected || null,
+            testCase: step.testCase || step.caseName || step.name || null
           });
           executedScreenshots.push(shotRecord);
         }
@@ -932,7 +957,11 @@ class BrowserRunner extends EventEmitter {
         try {
           const errorShot = await this.captureScreenshot(featureName, `error_step_${stepIndex}`, {
             selector: step.selector,
-            actionType: 'error_fallback'
+            actionType: 'error_fallback',
+            stepIndex: stepIndex + 1,
+            stepTotal: steps.length,
+            name: `Lỗi tại bước ${stepIndex + 1}`,
+            description: `Ảnh chụp fallback khi bước "${step.name || stepIndex}" gặp lỗi: ${err.message}`.slice(0, 500)
           });
           executedScreenshots.push(errorShot);
         } catch {

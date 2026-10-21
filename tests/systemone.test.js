@@ -39,6 +39,33 @@ describe('SystemOne policy heuristic (offline, confidence<=0.4)', () => {
     assert.strictEqual(g.action, 'scrub');
   });
 
+  it('triageSignals: "large" thang "quick" (migrate khong phai task de)', () => {
+    // Bug cu: quick check truoc large => "migrate module sang microservices"
+    // (len < 200, khong chua fix|bug|error) bi phan loai NHAM thanh quick.
+    const sig = policy.triageSignals({ prompt: 'migrate module sang microservices' });
+    assert.strictEqual(sig.large, true);
+    assert.strictEqual(sig.quick, false, 'large phai thang quick');
+    assert.strictEqual(policy.triageHeuristic({ prompt: 'migrate module sang microservices' }).track, 'full');
+  });
+
+  it('triageSignals: prompt tieng Viet co dau va khong deu ra cung ket qua', () => {
+    const withDau = policy.triageSignals({ prompt: 'kiểm tra hệ thống đăng nhập' });
+    const noDau = policy.triageSignals({ prompt: 'kiem tra he thong dang nhap' });
+    assert.strictEqual(withDau.quick, noDau.quick);
+    assert.strictEqual(withDau.large, noDau.large);
+  });
+
+  it('triageSignals: prompt trung binh => khong quick, khong large (mo ho)', () => {
+    const sig = policy.triageSignals({ prompt: 'Can sua loi trong he thong thanh toan, them validation cho input' });
+    assert.strictEqual(sig.quick, false);
+    assert.strictEqual(sig.large, false);
+  });
+
+  it('fold bo dau + lowercase', () => {
+    assert.strictEqual(policy.fold('Xác Minh'), 'xac minh');
+    assert.strictEqual(policy.fold('LỖI'), 'loi');
+  });
+
   it('dedup bucket ổn định 16 hex', () => {
     const d1 = policy.dedupHeuristic({ taskCode: 'T', prompt: 'hello' });
     const d2 = policy.dedupHeuristic({ taskCode: 'T', prompt: 'hello' });
@@ -89,10 +116,96 @@ describe('SystemOne client wire helpers (gộp từ wire.js)', () => {
     assert.strictEqual(f.retry, false);
   });
 
-  it('checkGuard giữ prompt gốc trong promptToUse', async () => {
+  it('checkGuard khi action=scrub phai tra prompt DA scrub (khong loi secret)', async () => {
     const secret = 'password=123456';
     const g = await client.checkGuard({ taskCode: 'T', prompt: `hello ${secret}` });
     assert.strictEqual(g.action, 'scrub');
-    assert.ok(String(g.promptToUse).includes(secret), 'promptToUse phải giữ nguyên secret gốc');
+    // Truoc day tra prompt goc => SecretScrubber khong co tac dung gi.
+    assert.ok(!String(g.promptToUse).includes(secret), 'promptToUse KHONG duoc chua secret goc');
+  });
+
+  it('checkGuard khi action=allow moi giu prompt goc', async () => {
+    const g = await client.checkGuard({ taskCode: 'T', prompt: 'xin chao ban' });
+    assert.ok(['allow', 'scrub', 'warn'].includes(g.action));
+    if (g.action === 'allow') {
+      assert.ok(String(g.promptToUse).includes('xin chao ban'), 'action=allow giu nguyen prompt');
+    }
+  });
+});
+
+describe('SystemOne probe()', () => {
+  // Stub global.fetch de chay logic that cua probe() ma khong goi mang.
+  // systemone/client.js doc config.SYSTEMONE_ENABLED luc require, nen phai
+  // doi config.SYSTEMONE_ENABLED truoc moi require lai module.
+  function withStubbedFetch(impl, fn) {
+    const original = global.fetch;
+    global.fetch = impl;
+    return Promise.resolve()
+      .then(fn)
+      .finally(() => { global.fetch = original; });
+  }
+
+  it('probe tra live=false khi SYSTEMONE_ENABLED=false', async () => {
+    const p = await client.probe();
+    assert.strictEqual(p.live, false);
+    assert.strictEqual(p.error, 'SYSTEMONE_ENABLED=false');
+    assert.strictEqual(p.noul, null);
+  });
+
+  it('probe tra live=true khi gateway tra noul hop le', async () => {
+    const cfg = require('../src/config');
+    const prevEnabled = cfg.SYSTEMONE_ENABLED;
+    cfg.SYSTEMONE_ENABLED = true;
+    try {
+      await withStubbedFetch(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ model: 'typesafe/jev-1.13-20260917', answers: { is_alive: { type: 'noul', noul: 0.77 } } })
+      }), async () => {
+        const p = await client.probe();
+        assert.strictEqual(p.live, true);
+        assert.strictEqual(p.noul, 0.77);
+        assert.strictEqual(p.error, null);
+        assert.strictEqual(p.model, 'typesafe/jev-1.13-20260917');
+      });
+    } finally {
+      cfg.SYSTEMONE_ENABLED = prevEnabled;
+    }
+  });
+
+  it('probe tra live=false khi gateway 200 nhung answers rong (schema lech)', async () => {
+    const cfg = require('../src/config');
+    const prevEnabled = cfg.SYSTEMONE_ENABLED;
+    cfg.SYSTEMONE_ENABLED = true;
+    try {
+      await withStubbedFetch(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ model: 'typesafe/jev-1.13-20260917', answers: {} })
+      }), async () => {
+        const p = await client.probe();
+        // Khong co noul hop le => KHONG duoc bao "live" (che loi do bi che mat).
+        assert.strictEqual(p.live, false);
+        assert.strictEqual(p.noul, null);
+        assert.ok(p.error, 'phai bao loi khi answers rong');
+      });
+    } finally {
+      cfg.SYSTEMONE_ENABLED = prevEnabled;
+    }
+  });
+
+  it('probe tra live=false khi gateway loi HTTP', async () => {
+    const cfg = require('../src/config');
+    const prevEnabled = cfg.SYSTEMONE_ENABLED;
+    cfg.SYSTEMONE_ENABLED = true;
+    try {
+      await withStubbedFetch(async () => ({ ok: false, status: 401, json: async () => ({}) }), async () => {
+        const p = await client.probe();
+        assert.strictEqual(p.live, false);
+        assert.ok(p.error);
+      });
+    } finally {
+      cfg.SYSTEMONE_ENABLED = prevEnabled;
+    }
   });
 });

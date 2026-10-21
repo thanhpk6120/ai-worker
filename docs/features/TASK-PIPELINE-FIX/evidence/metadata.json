@@ -1,0 +1,32 @@
+[
+  {
+    "evidenceId": "ev_fix_01_hub",
+    "fileName": "01_ui_evidence_hub_3_trang_thai.webp",
+    "name": "Evidence Hub - 3 trang thai NOT VERIFY / PASS / FAILED",
+    "description": "Anh chup man hinh Evidence Hub sau khi chuan hoa trang thai 3 gia tri. 3 card anh duoc sap xep theo thu tu step test (Buc 1 -> 2 -> 3), moi card co badge trang thai mau khac nhau: PASS (emerald), NOT VERIFY (slate), FAILED (rose). Ten evidence hien thi thay vi ten file.",
+    "passCriteria": "Moi evidence co badge dung 3 trang thai (PASS xanh / NOT VERIFY xam / FAILED do) va duoc sap xep theo thu tu buoc kiem thu",
+    "stepIndex": 1,
+    "order": 1,
+    "status": "PASS",
+    "verdict": "PASS",
+    "type": "UI_SCREENSHOT",
+    "evidence_type": "UI_SCREENSHOT",
+    "channel": "ui",
+    "timestamp": "2026-10-20T16:05:00.000Z"
+  },
+  {
+    "evidenceId": "ev_fix_02_modal",
+    "fileName": "02_modal_api_not_verify.webp",
+    "name": "Modal evidence API - trang thai NOT VERIFY nhat quan",
+    "description": "Anh chup modal chi tiet evidence kenh API. Badge dau modal hien 'NOT VERIFY' (nen slate), dong 'STATUS CODE' hien 200 (dung HTTP status code), va 'KET QUA DOI SOAT' hien 'NOT VERIFY (chua verify)' - nhat quan ba tri, khong con hien FAILED do.",
+    "passCriteria": "Badge dau modal, dong Status Code va Ket qua doi soat deu nhat quan voi trang thai NOT VERIFY; Status Code phai la ma HTTP chu khong phai chu 'PASS'",
+    "stepIndex": 2,
+    "order": 2,
+    "status": "PASS",
+    "verdict": "PASS",
+    "type": "UI_SCREENSHOT",
+    "evidence_type": "UI_SCREENSHOT",
+    "channel": "ui",
+    "timestamp": "2026-10-20T16:10:00.000Z"
+  }
+]

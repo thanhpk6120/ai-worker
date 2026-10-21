@@ -92,7 +92,7 @@ const LOG_DIR = process.env.LOG_DIR || path.resolve(process.cwd(), 'logs');
 const EVIDENCE_DIR = process.env.EVIDENCE_DIR || path.resolve(process.cwd(), 'evidence');
 const SYSTEMONE_ENABLED = process.env.SYSTEMONE_ENABLED !== 'false';
 const SYSTEMONE_BASE_URL = process.env.SYSTEMONE_BASE_URL || 'http://127.0.0.1:20128/v1/systemone';
-const SYSTEMONE_MODEL = process.env.SYSTEMONE_MODEL || 'oc/jev-1.13-free';
+const SYSTEMONE_MODEL = process.env.SYSTEMONE_MODEL || 'openrouter/typesafe/jev-1.13';
 const SYSTEMONE_TIMEOUT_MS = process.env.SYSTEMONE_TIMEOUT_MS ? parseInt(process.env.SYSTEMONE_TIMEOUT_MS, 10) : 8000;
 const SYSTEMONE_CACHE_TTL_MS = process.env.SYSTEMONE_CACHE_TTL_MS ? parseInt(process.env.SYSTEMONE_CACHE_TTL_MS, 10) : 3600000;
 const SYSTEMONE_API_KEY = process.env.SYSTEMONE_API_KEY || '';
