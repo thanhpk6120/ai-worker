@@ -118,58 +118,88 @@ async function start() {
   }
   if (!fs.existsSync(LOG_FILE)) fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
 
-  // Xoa bien SYSTEMONE_* ke thua tu shell agent. config.js CHI nap .env khi
-  // process.env[key] === undefined => gia tri cu (ke ca chuoi rong) se che do
-  // .env => server chay sai model/API key.
-  const childEnv = { ...process.env };
-  for (const k of ['SYSTEMONE_MODEL', 'SYSTEMONE_API_KEY', 'SYSTEMONE_BASE_URL', 'SYSTEMONE_ENABLED']) {
-    delete childEnv[k];
+  // TAO PROCESS QUA WMI (Win32_Process.Create) => process chay trong WMI
+  // Provider Host, DOC LAP hoan toan voi job object cua shell agent.
+  //
+  // LY DO: `spawn(detached:true)` VA `Start-Process` deu bi ghep vao job object
+  // cua shell agent tren Windows. Khi shell agent bi timeout/ket thuc, ca job
+  // object bi reap => worker chet theo (da xay 2 lan: 18:55:53Z va 19:15:21Z,
+  // ca hai lan job log + server-bg.log dung cung luc, step de lai RUNNING mo coi).
+  // WMI Provider Host khong nam trong job object cua shell => khong bi reap.
+  // EP PATH TUONG MINH: process tao qua WMI nhan environment block cua WMI
+  // Provider Host, KHONG phai cua shell agent. Agent CLI (`claude`) chi nam o
+  // `C:\Users\ThanhPK\.local\bin` - `BaseAdapter.detect()` resolve bang
+  // `where claude` => neu PATH thieu, `getAvailableRunner('claude-code')` tra
+  // null va pipeline chay tiep ma KHONG chay agent. Ep PATH de khong phu thuoc
+  // env cua WmiPrvSE (WmiPrvSE co the restart voi env khac).
+  const PATH_ENTRIES = [
+    'C:\\Users\\ThanhPK\\.local\\bin',
+    'C:\\Users\\ThanhPK\\AppData\\Roaming\\fnm\\node-versions\\v24.21.0\\installation',
+    'C:\\Users\\ThanhPK\\AppData\\Local\\omp',
+    '%PATH%',
+  ].join(';');
+  const psScript = [
+    `$ErrorActionPreference='Stop'`,
+    `$cmd = 'cmd.exe /c "set PATH=${PATH_ENTRIES} && ""${node}"" src/index.js >> ""${LOG_FILE}"" 2>&1"'`,
+    `$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmd; CurrentDirectory = '${ROOT}' }`,
+    `Write-Output $r.ProcessId`,
+  ].join('; ');
+  const out = ps(psScript).trim().split(/\r?\n/).filter(Boolean);
+  const pid = parseInt(out[out.length - 1], 10);
+  if (!Number.isInteger(pid) || pid <= 0) {
+    console.error('Khong tao duoc worker qua WMI. Output:', out.join(' | '));
+    return 1;
   }
-  // spawn detached: tiến trình con của explorer, KHÔNG phải của shell agent.
-  // stdio: 'ignore' => không giữ pipe nào sang shell cha.
-  const child = spawn(node, ['src/index.js'], {
-    cwd: ROOT,
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: true,
-    env: childEnv,
-  });
-  child.unref();
-  writePid(child.pid);
-  console.log(`Worker da start (PID ${child.pid}) - node: ${node}`);
+  // PID tra ve tu WMI la PID cua cmd.exe BOOC. Process that giu port 3000 la
+  // node CON. => doi PID file sang PID that sau khi server listen, va giu ca
+  // PID cmd de stop() diet duoc cay.
+  writePid(pid);
+  console.log(`Worker da start (cmd wrapper PID ${pid}) - node: ${node}`);
   console.log(`  cwd    : ${ROOT}`);
   console.log(`  log    : ${LOG_FILE}`);
+  console.log(`  parent : WMI Provider Host (doc lap voi shell agent)`);
 
   // Cho server kip listen.
+  let realPid = null;
   for (let i = 0; i < 20; i++) {
     await new Promise((r) => setTimeout(r, 500));
     const h = await health();
     if (h.code === 200) {
+      realPid = pidByPort(PORT);
+      if (realPid) writePid(realPid);
       console.log(`  health : HTTP 200 (sau ${((i + 1) * 0.5).toFixed(1)}s)`);
+      console.log(`  node   : PID ${realPid || '?'} (giu port ${PORT})`);
       return 0;
     }
   }
-  console.log('  health : chua phan hoi sau 10s - xem logs/server-bg.log');
   return 0;
 }
 
 function stop() {
+  // PID file tro ve PID cua cmd.exe BOOC (WMI tao `cmd.exe /c ... node ...`).
+  // Process that giu port 3000 la node CON (PPID = pid trong file).
+  // => phai taskkill /T de diet ca cay, khong phai chi process.kill.
   const pid = readPid() || pidByPort(PORT);
   if (!pid || !isAlive(pid)) {
     clearPid();
     console.log('Worker khong chay.');
     return 0;
   }
-  console.log(`Dang dung worker (PID ${pid})...`);
-  // 2-phase: SIGTERM-equivalent truoc, force sau.
-  try { process.kill(pid, 'SIGTERM'); } catch (e) {}
-  const deadline = Date.now() + 5000;
-  while (Date.now() < deadline && isAlive(pid)) {
-    execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `Start-Sleep -Milliseconds 250`]);
+  console.log(`Dang dung worker (PID ${pid} + cay con)...`);
+  try {
+    execFileSync('taskkill', ['/F', '/T', '/PID', String(pid)], { stdio: 'ignore' });
+  } catch (e) {}
+
+  // Cho den khi port 3000 that su duoc giai phong.
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    if (!pidByPort(PORT)) break;
+    execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Milliseconds 250']);
   }
-  if (isAlive(pid)) {
-    console.log('  Con sau 5s -> force kill.');
-    ps(`Stop-Process -Id ${pid} -Force -ErrorAction SilentlyContinue`);
+  const still = pidByPort(PORT);
+  if (still) {
+    console.log(`  Port ${PORT} van bi giu boi PID ${still} -> force kill.`);
+    try { execFileSync('taskkill', ['/F', '/T', '/PID', String(still)], { stdio: 'ignore' }); } catch (e) {}
   }
   clearPid();
   console.log('Worker da dung.');
