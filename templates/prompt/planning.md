@@ -17,17 +17,19 @@ Nhiệm vụ của bạn là khảo sát codebase tại workspace và lập kế
 
 {{PREVIOUS_CONTEXT}}
 
-## ⚠️ QUY TẮC BẮT BUỘC VỀ VỊ TRÍ TỆP TIN (MANDATORY FILE STORAGE RULES):
-1. **MỌI TÀI LIỆU, DATA, ẢNH, BẰNG CHỨNG PHẢI NẰM TRONG FEATURE FOLDER:**
-   - Tất cả các tệp tài liệu kỹ thuật (`dev_plan.md`, `test_plan.md`, `plan.md`, `tasks.md`, `testcase.md`, `impact.md`, `report.md`, `deploy.md`...), các tệp dữ liệu test/mock (`data/`), các tệp ảnh chụp màn hình bằng chứng (`evidence/*.png`, `evidence/*.jpg`), các tệp ghi chú phân tích **BẮT BUỘC PHẢI TẠO BÊN TRONG**:
+## ⚠️ QUY TẮC PHẠM VI BƯỚC PLANNING (MANDATORY PLANNING SCOPE):
+1. **CHỈ PHÂN TÍCH YÊU CẦU & MÃ NGUỒN HIỆN TẠI — LẬP DUAL PLAN & TỰ VERIFY PLAN:**
+   - Mục tiêu duy nhất của bước PLANNING là:
+     a) Phân tích yêu cầu (Prompt/expect.md) và phân tích mã nguồn hiện tại (chỉ đọc).
+     b) Làm rõ các vướng mắc kỹ thuật hoặc nghiệp vụ (hỏi qua PENDING nếu thực sự thiếu thông tin).
+     c) Thiết lập 2 file kế hoạch: `{{FEATURE_DIR}}/dev_plan.md` và `{{FEATURE_DIR}}/test_plan.md`.
+     d) Tự rà soát và verify 2 file plan đấy (đối chiếu tên file, module, hàm, port xem có đúng thực tế codebase không).
+2. **NGHIÊM CẤM LÀM THỪA (STRICT FORBIDDEN ACTIONS IN PLANNING):**
+   - **TUYỆT ĐỐI CẤM SỬA MÃ NGUỒN:** Cấm dùng `Edit` hoặc `Write` để sửa bất kỳ file mã nguồn nào của workspace (chỉ được ghi file tài liệu bên trong `{{FEATURE_DIR}}`).
+   - **TUYỆT ĐỐI CẤM CHẠY TEST / CHẠY SERVICE / TẠO EVIDENCE:** Không chạy test suite, không build code, không khởi động server ngầm, không tạo file trong thư mục `evidence/`.
+3. **MỌI TÀI LIỆU PHẢI NẰM TRONG FEATURE FOLDER:**
+   - Tất cả các tệp tài liệu kỹ thuật (`dev_plan.md`, `test_plan.md`, `expect.md`, `plan.md`...) BẮT BUỘC PHẢI TẠO BÊN TRONG:
      👉 `{{FEATURE_DIR}}`
-   - TUYỆT ĐỐI KHÔNG tạo tệp tài liệu, ảnh hay file bằng chứng rải rác ngoài thư mục gốc workspace hoặc các thư mục khác.
-2. **QUY TẮC MÃ NGUỒN WORKSPACE (NGHIÊM CẤM CODE / TEST / QUERY DB TRONG PLANNING):**
-   - Trong giai đoạn PLANNING, CHỈ đọc và khảo sát cấu trúc dự án bằng các lệnh đọc (`Read`, `Grep`, `Glob`).
-   - **TUYỆT ĐỐI CẤM** dùng `Edit` hoặc `Write` để sửa đổi bất kỳ file mã nguồn nào của workspace (chỉ được phép ghi các file tài liệu bên trong `{{FEATURE_DIR}}`). Việc sửa code hoàn toàn thuộc về phase IMPLEMENT!
-   - **TUYỆT ĐỐI CẤM** chạy các lệnh build hoặc kiểm thử nặng (`mvn test`, `mvn compile`, `mvn test-compile`, `npm test`, `npm run build`...). Việc kiểm thử thuộc về phase TESTING!
-   - **TUYỆT ĐỐI CẤM** kết nối CSDL thật (Oracle, Postgres, MySQL...), CẤM chạy script Java/Python/PowerShell truy vấn dữ liệu DB trực tiếp.
-   - Khi tìm kiếm (`grep`, `find`), BẮT BUỘC bỏ qua các thư mục nặng như `node_modules`, `.git`, `target`, `build`, `dist` để tránh làm đơ/treo tiến trình.
    - Nhiệm vụ duy nhất của PLANNING: định vị module/file cần sửa, viết đủ 2 tệp `dev_plan.md` và `test_plan.md` (kèm `prompts/*.md` nếu phức tạp) rồi kết thúc phản hồi ngay.
 3. **QUY TẮC NGÔN NGỮ TÀI LIỆU:**
    - Mọi tài liệu tạo ra (`.md`, báo cáo, ghi chú...) BẮT BUỘC viết bằng tiếng Việt có dấu, mã hóa UTF-8.

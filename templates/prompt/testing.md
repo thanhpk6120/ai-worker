@@ -76,12 +76,13 @@ Nhiệm vụ của bạn là kiểm thử toàn diện giải pháp của task *
    - **TUYỆT ĐỐI KHÔNG TẠO DỮ LIỆU RỖNG:** Các tệp rỗng, log không có nội dung, hoặc json rỗng (`{}` / `[]` / `null`) KHÔNG ĐƯỢC COI LÀ EVIDENCE và sẽ bị loại bỏ hoặc đánh FAIL!
 5. **TUYỆT ĐỐI KHÔNG BYPASS:** KHÔNG ĐƯỢC sử dụng các lệnh curl, ping HTTP URL giả lập hay mock server để giả mạo trạng thái PASS. Mọi kết quả kiểm thử phải xuất phát từ việc chạy test nội tại của ứng dụng.
 6. Ghi nhận báo cáo kết quả thẩm định thực tế vào `{{FEATURE_DIR}}/test_report.md` (hoặc `testcase.md` theo plan).
-7. **TỰ VERIFY EVIDENCE TRƯỚC KHI KẾT THÚC (BẮT BUỘC CHUNG CHO MỌI LOẠI EVIDENCE):**
-   - Với MỖI file trong `evidence/`, tự đối chiếu với `test_plan.md`: file này chứng minh test case nào, kết quả kỳ vọng là gì, nội dung thực tế có khớp không. Ảnh trắng trang, body trống, modal sai loại (Tạo mới thay vì Sửa), log chỉ có tên lệnh mà `stdout=(empty)`, JSON rỗng đều KHÔNG phải bằng chứng đạt.
-   - Ảnh UI: mở lại file PNG vừa chụp, xác nhận thấy đúng màn hình/kịch bản trong plan (đúng URL, đúng modal, có dữ liệu thật từ API, không phải trang trắng hoặc layout trống). Ghi rõ trong `metadata.json` mỗi ảnh chứng minh cho case nào.
-   - Log test: nội dung phải có lệnh chạy thật, output thật và exit code thật. Log dưới 1KB mà chứa `(empty)` hoặc không có keyword của công cụ test (`browser/capture/screenshot/playwright/puppeteer/navigate/GET /api/POST /api/tsc/pytest/npm test/mvn test/go test`) là log rỗng, phải chạy lại.
-   - API JSON (`02_api_verification.json` nếu plan yêu cầu API): phải có HTTP method, URL thật, status 2xx thật và body thật. Không dùng curl ping giả lập hay mock server để giả mạo PASS.
-   - DB assertion & Data Reconciliation (nếu plan yêu cầu API & DB):
+7. **THU THẬP ĐẦY ĐỦ EVIDENCE THEO ĐÚNG TEST PLAN — KHÔNG CẦN VERIFY Ở BƯỚC NÀY:**
+   - Nhiệm vụ trọng tâm của TESTING: Thực thi chạy các kịch bản test theo `test_plan.md` và thu thập đầy đủ các file evidence tương ứng vào `{{FEATURE_DIR}}/evidence/`.
+   - **Agent KHÔNG CẦN tự verify ở bước này.** Việc thẩm định tính hợp lệ và chấm đạt/không đạt của từng evidence sẽ do bước VERIFY (sử dụng AI Vision & AI Assertion) của hệ thống thực hiện tự động và khách quan.
+   - Ảnh UI: Dùng browser chụp ảnh màn hình giao diện thực tế theo đúng kịch bản test. Đảm bảo ảnh rõ ràng, có tiêu đề và mô tả kỳ vọng đạt được.
+   - Log test: Ghi lại log thực thi lệnh test thực tế (`evidence/01_test_execution.log`).
+   - API JSON: Ghi lại request/response thực tế vào file JSON (`evidence/02_api_verification.json`).
+   - Toàn bộ bằng chứng thu thập được sẽ có trạng thái ban đầu là `NOT VERIFY`. Khi bước VERIFY chạy: evidence nào thẩm định thành công sẽ chuyển thành `PASS`, evidence nào sai lệch/không đạt sẽ bị đánh `FAILED`.
      + **Đồng nhất 100% điều kiện truy vấn giữa API và SQL:**
        1. Đúng cột thời gian nghiệp vụ (ví dụ: `TRANSACTION_TIME` vs `CREATED_AT` — không lấy nhầm thời điểm insert DB thay vì thời điểm phát sinh giao dịch thực tế).
        2. Đúng múi giờ (Timezone offset: nếu API dùng UTC thì SQL phải là UTC, nếu GMT+7 thì SQL phải khớp GMT+7, tránh lệch ngày làm việc).

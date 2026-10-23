@@ -125,7 +125,8 @@ function readMetadata(evidenceDir) {
   if (!evidenceDir || !fs.existsSync(metadataPath)) return empty;
   let parsed;
   try {
-    parsed = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+    const rawText = fs.readFileSync(metadataPath, 'utf8').replace(/^\uFEFF/, '');
+    parsed = JSON.parse(rawText);
   } catch (e) {
     return empty;
   }

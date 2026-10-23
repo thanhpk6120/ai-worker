@@ -38,17 +38,17 @@ Nhiệm vụ của bạn là tiếp nhận toàn bộ ngữ cảnh kiểm thử 
 
 
 ## Hướng dẫn thực thi:
-0. **BƯỚC 0 — KIỂM TRA MCP KHI BẮT ĐẦU (1 lần duy nhất, không lặp lại mỗi turn):** Đọc mục `🔌 DANH SÁCH MCP SERVERS` ở trên một lần ở đầu bước để biết tool khả dụng. Khi thao tác đọc, tìm kiếm, sửa file mã nguồn local: BẮT BUỘC ưu tiên dùng native tool (`read`/`grep`/`edit`), TUYỆT ĐỐI KHÔNG lặp lại suy nghĩ hay log "Không MCP dùng được..." trước mỗi thao tác sửa lỗi.
-1. **PHÂN LOẠI LỖI TRƯỚC KHI SỬA — CẤM SỬA LAN MAN:**
-   - **Trường hợp A — Lỗi do thiếu file Evidence hoặc sai định dạng `metadata.json`:**
-     * Nếu mã nguồn đã đúng, test thực tế đã pass nhưng bị reject do thiếu file trong `evidence/` hoặc `metadata.json` khai báo thiếu/sai test case:
-     * 👉 **TUYỆT ĐỐI CẤM sửa vào mã nguồn chức năng của workspace!**
-     * Chỉ cần bổ sung/chỉnh sửa đúng file evidence trong `{{FEATURE_DIR}}/evidence/` và cập nhật lại `evidence/metadata.json` phản ánh trung thực kết quả test đã đạt rồi hoàn tất ngay.
-     * **TRẠNG THÁI EVIDENCE MỚI LUÔN LÀ `NOT VERIFY`:** File evidence bạn tạo/sửa ở bước FIXING mặc định có trạng thái `NOT VERIFY` (chưa được hệ thống xác minh). Chỉ khai báo kết quả từng TEST CASE trong mảng `tests[]` của `metadata.json` (`status: "PASSED"|"FAILED"`); TUYỆT ĐỐI KHÔNG tự gán `PASS`/`PASSED`/`verdict` cho TỪNG FILE evidence và KHÔNG tự tạo hay ghi đè mục `evidenceStatus` — VERIFY mới là nơi xác nhận.
-   - **Trường hợp B — Lỗi do kiểm thử thất bại (Test Fail / Exception thật):**
-     * Đọc kỹ error log, định vị đúng file và hàm gây lỗi.
-     * Sửa tối thiểu đúng chỗ lỗi trong mã nguồn thuộc service đó, CẤM khảo sát lại toàn bộ monorepo.
-     * Chạy lại đúng lệnh test bị fail để kiểm chứng, cập nhật file evidence rồi hoàn tất.
+0. **BƯỚC 0 — KIỂM TRA MCP KHI BẮT ĐẦU:** Đọc mục `🔌 DANH SÁCH MCP SERVERS` ở trên để biết tool khả dụng. Ưu tiên native tool (`read`/`grep`/`edit`).
+1. **QUY TẮC CỐT LÕI CỦA BƯỚC FIXING (STRICT SCOPE):**
+   - **CHỈ FIX LỖI THEO ĐÚNG VERIFY ĐÃ BÁO:**
+     * Đọc kỹ phần `## Ngữ cảnh lỗi cần khắc phục (Error Context)` bên dưới. VERIFY đã chỉ ra cụ thể: file evidence nào không đạt, lý do không đạt (AI Vision báo sai lệch gì, API trả về mã lỗi gì, assertion nào thất bại).
+     * CHỈ sửa đúng nguyên nhân gây ra lỗi đó trong mã nguồn. TUYỆT ĐỐI KHÔNG sửa lan man các phần code không liên quan.
+   - **UNITTEST ĐÚNG PHẦN ĐÃ FIX:**
+     * Sau khi sửa mã nguồn, BẮT BUỘC chạy unit test của đúng hàm/class vừa sửa để đảm bảo lỗi đã được khắc phục hoàn toàn.
+   - **CẬP NHẬT EVIDENCE & CHUYỂN TRẠNG THÁI ĐỂ VERIFY LẠI:**
+     * Chạy lại test case tương ứng để thu thập lại đúng file evidence bị lỗi (ví dụ: chụp lại ảnh mới đúng tiêu chí, gọi lại API mới, xuất lại log).
+     * Cập nhật `metadata.json` với trạng thái `NOT VERIFY` cho các file evidence mới.
+     * Kết thúc lượt để hệ thống tự động chuyển trạng thái sang [VERIFY] đối soát lại!
 5. **XỬ LÝ LỖI LỆCH DỮ LIỆU API & DATABASE (DATA MISMATCH & RECONCILIATION):**
    - Nếu lỗi do dữ liệu trả về giữa API và câu lệnh SELECT trong CSDL không khớp:
      + Rà soát ngay 6 nguyên nhân kinh điển:

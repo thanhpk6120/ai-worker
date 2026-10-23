@@ -1,4 +1,4 @@
-const { spawnSync } = require('node:child_process');
+const { spawnSync, spawn } = require('node:child_process');
 const config = require('../config');
 class BaseAdapter {
   /**
@@ -23,6 +23,35 @@ class BaseAdapter {
    * @returns {{ installed: boolean, version: string | null, path: string | null }}
    */
   detect() {
+    const now = Date.now();
+    const cache = this._detectCache;
+
+    // Cache con hieu luc -> tra cache, KHONG spawn (0ms).
+    if (cache && cache.value && (now - cache.at) < config.DETECT_TTL_MS) {
+      return cache.value;
+    }
+
+    // CHUA co gia tri nao -> phai tra ket qua CHINH XAC (installed that).
+    // `getAvailableRunner()` (dung truoc moi pipeline step) phu thuoc `installed`,
+    // tra `installed:false` gia se chon sai runner. Lan dau chi chay 1 lan,
+    // cac lan sau dung cache.
+    if (!cache || !cache.value) {
+      const value = this._detectSync();
+      this._detectCache = { at: Date.now(), value };
+      return value;
+    }
+
+    // Cache da het han nhung van co gia tri cu -> tra gia tri cu (stale-while-revalidate)
+    // va refresh nen bang spawn bat dong bo. Khong chan event loop.
+    this._refreshDetectAsync();
+    return cache.value;
+  }
+
+  /**
+  * Detect dong bo (chi dung cho lan dau khoi tao cache).
+  * Giu nguyen hanh vi cua ban goc: `where`/`which` + `--version`, timeout 5000ms.
+  */
+  _detectSync() {
     try {
       const isWindows = process.platform === 'win32';
       const lookupCmd = isWindows ? 'where' : 'which';
@@ -68,6 +97,84 @@ class BaseAdapter {
         error: err.message
       };
     }
+  }
+
+  /**
+  * Refresh ket qua detect() o background (khong chan event loop).
+  * Dung `spawn` (bat dong bo) thay `spawnSync` -> moi pipeline step khong con
+  * treo ~1,4s. Cap nhat cache khi hoan tat.
+  */
+  _refreshDetectAsync() {
+    if (this._detectRefreshing) return;
+    this._detectRefreshing = true;
+
+    const isWindows = process.platform === 'win32';
+    const lookupCmd = isWindows ? 'where' : 'which';
+
+    const runCmd = (cmd, args) => new Promise((resolve) => {
+      let child;
+      try {
+        child = spawn(cmd, args, { encoding: 'utf8', windowsHide: true });
+      } catch (err) {
+        resolve({ status: -1, stdout: '', stderr: String(err && err.message || err) });
+        return;
+      }
+      let stdout = '';
+      let stderr = '';
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try { child.kill(); } catch (e) {}
+        resolve({ status: -1, stdout, stderr });
+      }, 5000);
+      child.stdout && child.stdout.on('data', (d) => { stdout += d; });
+      child.stderr && child.stderr.on('data', (d) => { stderr += d; });
+      child.on('error', (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ status: -1, stdout, stderr: String(err && err.message || err) });
+      });
+      child.on('close', (code) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ status: code, stdout, stderr });
+      });
+    });
+
+    (async () => {
+      let installed = false;
+      let binPath = null;
+      let version = null;
+      try {
+        const lookupResult = await runCmd(lookupCmd, [this.command]);
+        if (lookupResult.status === 0 && lookupResult.stdout && lookupResult.stdout.trim().length > 0) {
+          installed = true;
+          binPath = lookupResult.stdout.trim().split(/\r?\n/)[0].trim();
+        }
+        if (installed) {
+          const verResult = await runCmd(this.command, ['--version']);
+          if (verResult.status === 0 && verResult.stdout && verResult.stdout.trim().length > 0) {
+            version = verResult.stdout.trim().split(/\r?\n/)[0].trim();
+          } else if (verResult.stderr && verResult.stderr.trim().length > 0) {
+            version = verResult.stderr.trim().split(/\r?\n/)[0].trim();
+          }
+        }
+        this._detectCache = {
+          at: Date.now(),
+          value: { installed, version, path: binPath }
+        };
+      } catch (err) {
+        this._detectCache = {
+          at: Date.now(),
+          value: { installed: false, version: null, path: null, error: err.message }
+        };
+      } finally {
+        this._detectRefreshing = false;
+      }
+    })();
   }
 
   /**

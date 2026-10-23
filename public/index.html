@@ -5,43 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AI Worker - Autonomous Multi-Agent Pipeline</title>
 
-  <!-- Tailwind CSS CDN -->
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script>
-    tailwind.config = {
-      darkMode: 'class',
-      theme: {
-        extend: {
-          colors: {
-            brand: {
-              50: '#f0f9ff',
-              100: '#e0f2fe',
-              400: '#38bdf8',
-              500: '#0ea5e9',
-              600: '#0284c7',
-              700: '#0369a1',
-            },
-            surface: {
-              800: '#1e293b',
-              850: '#162032',
-              900: '#0f172a',
-              950: '#080d1a',
-            }
-          },
-          animation: {
-            'pulse-fast': 'pulse 1.2s cubic-bezier(0.4, 0, 0.6, 1) infinite',
-            'glow': 'glow 2s ease-in-out infinite alternate',
-          },
-          keyframes: {
-            glow: {
-              '0%': { boxShadow: '0 0 5px rgba(56, 189, 248, 0.3)' },
-              '100%': { boxShadow: '0 0 18px rgba(56, 189, 248, 0.8)' },
-            }
-          }
-        }
-      }
-    };
-  </script>
+  <!-- Precompiled Static Tailwind CSS -->
+  <link rel="stylesheet" href="/tailwind.css">
 
   <!-- Font Awesome Icons CDN -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
@@ -51,9 +16,6 @@
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
 
-  <!-- diff2html CDN -->
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/diff2html/bundles/css/diff2html.min.css" />
-  <script src="https://cdn.jsdelivr.net/npm/diff2html/bundles/js/diff2html-ui.min.js"></script>
   <!-- marked CDN -->
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 
@@ -97,12 +59,6 @@
         <span id="activeWorkersCount" class="text-brand-400 font-mono font-semibold">0</span>
         <span class="text-slate-500">/</span>
         <span id="maxConcurrency" class="text-slate-400 font-mono">3</span>
-      </div>
-      <span class="text-slate-600">|</span>
-      <div class="flex items-center gap-1.5 text-slate-400" id="systemOneBadgeWrap" title="Trạng thái model SystemOne (SystemOne / Jev)">
-        <i class="fa-solid fa-brain text-slate-500"></i>
-        <span>SystemOne:</span>
-        <span id="systemOneStatus" class="text-slate-300 font-mono">—</span>
       </div>
     </div>
 
@@ -223,7 +179,7 @@
                 <span id="activeJobIdBadge" class="font-mono text-xs px-2 py-0.5 rounded bg-slate-800 text-brand-400 border border-slate-700">job_id</span>
                 <span id="activeJobStatusBadge" class="status-badge status-todo">TO DO</span>
                 <span id="activeJobRunnerBadge" class="text-xs px-2 py-0.5 rounded bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 font-mono">claude</span>
-                <span id="activeJobSystemOneBadge" class="text-xs px-2 py-0.5 rounded bg-slate-700/60 text-slate-400 border border-slate-600/30 font-mono" title="SystemOne của task này">CHƯA GỌI</span>
+                <span id="activeJobSystemOneBadge" class="hidden text-xs px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 font-mono" title="Quyết định của SystemOne cho task này"></span>
                 <span id="activeJobFixingBadge" class="hidden text-xs px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 font-mono animate-pulse">Fixing: 1/3</span>
               </div>
               <h2 id="activeJobTitle" class="text-base sm:text-lg font-bold text-white truncate">Job Title Here</h2>
@@ -444,6 +400,9 @@
 
                 <!-- Terminal Specific Toolbar Controls -->
                 <div id="terminalToolbar" class="flex items-center gap-1.5">
+                  <button id="btnLoadOlderLogs" class="hidden px-2 py-1 rounded text-[11px] bg-surface-800 text-amber-300 border border-amber-500/30 hover:bg-surface-750 transition" title="Tải thêm lịch sử log cũ hơn">
+                    <i class="fa-solid fa-clock-rotate-left mr-1"></i> <span id="loadOlderLogsLabel">Tải log cũ</span>
+                  </button>
                   <button id="btnToggleAutoScroll" class="px-2 py-1 rounded text-[11px] bg-surface-800 text-emerald-400 border border-slate-700 hover:bg-surface-750 transition" title="Bật/Tắt tự động cuộn theo log">
                     <i class="fa-solid fa-arrow-down-long mr-1"></i> Auto-scroll: <span id="autoScrollState">ON</span>
                   </button>

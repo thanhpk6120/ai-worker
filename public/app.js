@@ -33,7 +33,15 @@
       maxConcurrency: 3
     },
     workspaces: [],
-    timerInterval: null
+    timerInterval: null,
+    logOffset: 0,
+    oldestLogOffset: 0,
+    hasOlderLogs: false,
+    jobCardMap: new Map(),
+    planCache: new Map(),
+    searchDebounceTimer: null,
+    fetchJobsAbortController: null,
+    fetchStatusAbortController: null
   };
 
   // Pipeline standard steps
@@ -377,9 +385,13 @@
     document.getElementById('btnCancelCreateModal')?.addEventListener('click', closeCreateJobModal);
 
     // Job Search & Status Filter
+    // Job Search & Status Filter (Debounce 200ms de tranh render vo ich moi ky tu - T2.5)
     document.getElementById('jobSearchInput')?.addEventListener('input', (e) => {
-      state.searchQuery = e.target.value.toLowerCase().trim();
-      renderJobsList();
+      clearTimeout(state.searchDebounceTimer);
+      state.searchDebounceTimer = setTimeout(() => {
+        state.searchQuery = e.target.value.toLowerCase().trim();
+        renderJobsList();
+      }, 200);
     });
 
     document.getElementById('statusFilterSelect')?.addEventListener('change', (e) => {
@@ -477,10 +489,25 @@
         const res = await fetch('/api/v1/jobs/' + state.activeJobId + '/approve', { method: 'POST' });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Duyệt thất bại');
+
+        if (state.activeJob && state.activeJob.id === state.activeJobId) {
+          state.activeJob.status = 'IMPLEMENT';
+          state.activeJob.current_step = 'IMPLEMENT';
+          renderActiveJobDetail();
+        }
+        const targetJob = state.jobs.find((j) => j.id === state.activeJobId);
+        if (targetJob) {
+          targetJob.status = 'IMPLEMENT';
+          targetJob.current_step = 'IMPLEMENT';
+          targetJob.updated_at = new Date().toISOString();
+        }
+        renderJobsList();
+
         showToast(data.message, 'success');
         fetchJobDetails(state.activeJobId);
+        fetchJobsListSilently();
       } catch (err) {
-        showToast(err.message, 'error');
+        showToast(err.message || 'Lỗi duyệt kế hoạch', 'error');
       } finally {
         btn.disabled = false;
         btn.innerHTML = oldHtml;
@@ -554,10 +581,59 @@
 
     // Terminal Toolbar Actions
     document.getElementById('btnToggleAutoScroll')?.addEventListener('click', toggleAutoScroll);
-    document.getElementById('btnClearTerminal')?.addEventListener('click', () => {
-      clearTerminalScreen({ ignoreHistory: true });
+    document.getElementById('btnClearTerminal')?.addEventListener('click', async () => {
+      const jobId = state.activeJobId;
+      if (!jobId) {
+        clearTerminalScreen({ resetMarker: true });
+        return;
+      }
+      if (!confirm('Bạn có chắc muốn xóa sạch toàn bộ file log của task này trên máy chủ không? Hành động này sẽ giải phóng dung lượng đĩa và không thể hoàn tác.')) {
+        return;
+      }
+      clearTerminalScreen({ resetMarker: true });
+      try {
+        const res = await fetch(`/api/v1/jobs/${jobId}/logs`, { method: 'DELETE' });
+        if (res.ok) {
+          state.logOffset = 0;
+          state.oldestLogOffset = 0;
+          state.hasOlderLogs = false;
+          const btnOlder = document.getElementById('btnLoadOlderLogs');
+          if (btnOlder) btnOlder.classList.add('hidden');
+          showToast('Đã xóa sạch toàn bộ log của task trên máy chủ.', 'success');
+        }
+      } catch (e) {
+        console.warn('Lỗi xóa log server:', e);
+      }
     });
     document.getElementById('btnCopyTerminalLog')?.addEventListener('click', copyTerminalLog);
+    // Terminal: Tai lich su log cu hon (T1.4, T1.5)
+    document.getElementById('btnLoadOlderLogs')?.addEventListener('click', loadOlderLogs);
+
+    // Event Delegation tren #jobsListContainer (1 listener duy nhat, tranh ro ri DOM - T2.2)
+    const jobsListContainer = document.getElementById('jobsListContainer');
+    if (jobsListContainer) {
+      jobsListContainer.addEventListener('click', (e) => {
+        const actionBtn = e.target.closest('[data-action]');
+        if (actionBtn) {
+          e.stopPropagation();
+          const action = actionBtn.getAttribute('data-action');
+          const jobId = actionBtn.getAttribute('data-job-id');
+          if (action === 'archive') {
+            window.aiWorker.archiveTask(jobId);
+          } else if (action === 'delete') {
+            window.aiWorker.deleteTask(jobId);
+          }
+          return;
+        }
+        const card = e.target.closest('.job-card');
+        if (card) {
+          const jobId = card.getAttribute('data-job-id');
+          if (jobId && jobId !== state.activeJobId) {
+            selectJob(jobId);
+          }
+        }
+      });
+    }
     // Navigation Tabs (Terminal vs Dev Plan vs Test Plan)
     document.querySelectorAll('.tab-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -656,9 +732,9 @@
       const job = data.job || data;
 
       state.activeJob = job;
-      state.evidences = data.evidence || data.evidences || [];
-      state.dualPlan = data.dual_plan || data.dualPlan || null;
-      state.currentQuestion = data.question || null;
+      state.evidences = (data.job && (data.job.evidence || data.job.evidences)) || data.evidence || data.evidences || [];
+      state.dualPlan = (data.job && (data.job.dual_plan || data.job.dualPlan)) || data.dual_plan || data.dualPlan || null;
+      state.currentQuestion = (data.job && (data.job.question || data.job.pending_question)) || data.question || null;
 
       renderActiveJobDetail();
 
@@ -684,8 +760,8 @@
       };
       renderSystemStatus();
     } catch (err) {
-      // Fallback status
-      state.systemStatus.online = true;
+      // Fallback status (T2P.1: hien thi dung Server Offline khi mat ket noi)
+      state.systemStatus.online = false;
       renderSystemStatus();
     }
   }
@@ -699,12 +775,21 @@
       state.eventSource.close();
       state.eventSource = null;
     }
-
-    if (clearTerm && state.term) {
-      writeTerminalBanner(`Bắt đầu kết nối log stream cho Job #${jobId}...`);
+    if (clearTerm) {
+      state.logOffset = 0;
+      state.oldestLogOffset = 0;
+      state.hasOlderLogs = false;
+      const btnOlder = document.getElementById('btnLoadOlderLogs');
+      if (btnOlder) btnOlder.classList.add('hidden');
+      if (state.term) {
+        writeTerminalBanner(`Bắt đầu kết nối log stream cho Job #${jobId}...`);
+      }
     }
 
-    const sseUrl = `/api/v1/jobs/${jobId}/logs/stream`;
+    // Reconnect tai theo offset (T1.5)
+    const sseUrl = (state.logOffset > 0 && !clearTerm)
+      ? `/api/v1/jobs/${jobId}/logs/stream?from=${state.logOffset}`
+      : `/api/v1/jobs/${jobId}/logs/stream`;
     state.eventSource = new EventSource(sseUrl);
 
     state.eventSource.onopen = () => {
@@ -728,6 +813,29 @@
     state.eventSource.addEventListener('log', (event) => {
       try {
         const payload = JSON.parse(event.data);
+        // Cap nhat byte offset tu Last-Event-ID hoac payload.offset (T1.5)
+        if (event.lastEventId) {
+          const parsedId = parseInt(event.lastEventId, 10);
+          if (Number.isFinite(parsedId) && parsedId > state.logOffset) {
+            state.logOffset = parsedId;
+          }
+        }
+        if (payload.offset && payload.offset > state.logOffset) {
+          state.logOffset = payload.offset;
+        }
+        // Bat nut tai them log cu neu la tail snapshot (T1.4)
+        if (payload.tailOnly && payload.totalBytes) {
+          state.oldestLogOffset = Math.max(0, payload.totalBytes - 256 * 1024);
+          state.hasOlderLogs = state.oldestLogOffset > 0;
+          const btnOlder = document.getElementById('btnLoadOlderLogs');
+          if (btnOlder && state.hasOlderLogs) {
+            btnOlder.classList.remove('hidden');
+            const totalKb = Math.round(payload.totalBytes / 1024);
+            const lbl = document.getElementById('loadOlderLogsLabel');
+            if (lbl) lbl.textContent = `Tải log cũ (${totalKb} KB)`;
+          }
+        }
+
         const isHistoryChunk = !payload.timestamp;
         if (isHistoryChunk && state.ignoreHistoricalLogs) {
           return;
@@ -751,10 +859,23 @@
     state.eventSource.addEventListener('step', (event) => {
       try {
         const payload = JSON.parse(event.data);
-        if (state.activeJob) {
-          state.activeJob.current_step = payload.step || payload.current_step;
+        const targetJobId = payload.jobId || jobId;
+        const newStep = payload.step || payload.current_step;
+
+        const targetJob = state.jobs.find((j) => j.id === targetJobId);
+        if (targetJob && newStep) {
+          targetJob.current_step = newStep;
+          if (payload.runner) targetJob.runner = payload.runner;
+          targetJob.updated_at = payload.timestamp || new Date().toISOString();
+        }
+
+        if (state.activeJob && (state.activeJob.id === targetJobId || !payload.jobId)) {
+          if (newStep) state.activeJob.current_step = newStep;
+          if (payload.runner) state.activeJob.runner = payload.runner;
+          renderActiveJobDetail();
           updateStepper(state.activeJob);
         }
+        renderJobsList();
       } catch (e) {
         console.warn('Step event error:', e);
       }
@@ -765,8 +886,20 @@
       try {
         const payload = JSON.parse(event.data);
         const newStatus = payload.status;
-        if (state.activeJob) {
+        const targetJobId = payload.jobId || jobId;
+
+        const targetJob = state.jobs.find((j) => j.id === targetJobId);
+        if (targetJob) {
+          targetJob.status = newStatus;
+          if (payload.current_step) targetJob.current_step = payload.current_step;
+          if (payload.runner) targetJob.runner = payload.runner;
+          targetJob.updated_at = payload.timestamp || new Date().toISOString();
+        }
+
+        if (state.activeJob && (state.activeJob.id === targetJobId || !payload.jobId)) {
           state.activeJob.status = newStatus;
+          if (payload.current_step) state.activeJob.current_step = payload.current_step;
+          if (payload.runner) state.activeJob.runner = payload.runner;
           if (newStatus === 'PENDING') state.activeJob.had_pending = 1;
           if (newStatus === 'FIXING') state.activeJob.fix_attempt = 1;
           renderActiveJobDetail();
@@ -807,6 +940,8 @@
           calls: Number(payload.calls) || 0,
           fallbacks: Number(payload.fallbacks) || 0,
           lastError: payload.lastError || null,
+          lastDecision: payload.lastDecision || null,
+          decisions: Array.isArray(payload.decisions) ? payload.decisions : [],
           model: payload.model || null,
           updatedAt: payload.updatedAt || null
         };
@@ -818,7 +953,7 @@
           state.activeJob.systemone_state = st;
           renderActiveJobDetail();
         }
-        renderJobsList(true);
+        renderJobsList();
       } catch (e) {
         console.warn('SystemOne event error:', e);
       }
@@ -872,6 +1007,41 @@
     };
   }
 
+  /**
+   * Tai lich su log cu hon theo phan trang byte offset (T1.4, T1.5)
+   */
+  async function loadOlderLogs() {
+    if (!state.activeJobId || state.oldestLogOffset <= 0) return;
+    const btnOlder = document.getElementById('btnLoadOlderLogs');
+    const lbl = document.getElementById('loadOlderLogsLabel');
+    if (btnOlder) btnOlder.disabled = true;
+    if (lbl) lbl.textContent = 'Đang tải...';
+    try {
+      const readChunk = 64 * 1024; // 64 KB moi lan cuon nguoc
+      const targetOffset = Math.max(0, state.oldestLogOffset - readChunk);
+      const limit = state.oldestLogOffset - targetOffset;
+      const res = await fetch(`/api/v1/jobs/${state.activeJobId}/logs?offset=${targetOffset}&limit=${limit}`);
+      const data = await res.json();
+      if (data.success && data.text) {
+        state.oldestLogOffset = targetOffset;
+        if (state.term) {
+          writeTerminalBanner(`--- ĐÃ TẢI ${Math.round(limit / 1024)} KB LOG CŨ ---`);
+          scheduleTerminalWrite(data.text, false);
+        }
+        if (state.oldestLogOffset <= 0) {
+          state.hasOlderLogs = false;
+          if (btnOlder) btnOlder.classList.add('hidden');
+        } else if (lbl) {
+          lbl.textContent = `Tải tiếp (${Math.round(state.oldestLogOffset / 1024)} KB còn lại)`;
+        }
+      }
+    } catch (e) {
+      showToast('Không thể tải log cũ: ' + e.message, 'error');
+    } finally {
+      if (btnOlder) btnOlder.disabled = false;
+    }
+  }
+
   function handleSsePayload(payload) {
     if (!payload) return;
 
@@ -888,17 +1058,38 @@
       }
       scheduleTerminalWrite(payload.text || payload.message || '', false, payload.timestamp);
     } else if (payload.type === 'status' && payload.status) {
-      if (state.activeJob) {
+      const targetJobId = payload.jobId || (state.activeJob && state.activeJob.id);
+      const targetJob = state.jobs.find((j) => j.id === targetJobId);
+      if (targetJob) {
+        targetJob.status = payload.status;
+        if (payload.current_step) targetJob.current_step = payload.current_step;
+        if (payload.runner) targetJob.runner = payload.runner;
+        targetJob.updated_at = payload.timestamp || new Date().toISOString();
+      }
+      if (state.activeJob && (!payload.jobId || state.activeJob.id === payload.jobId)) {
         state.activeJob.status = payload.status;
+        if (payload.current_step) state.activeJob.current_step = payload.current_step;
+        if (payload.runner) state.activeJob.runner = payload.runner;
         if (payload.status === 'PENDING') state.activeJob.had_pending = 1;
         if (payload.status === 'FIXING') state.activeJob.fix_attempt = 1;
         renderActiveJobDetail();
       }
+      renderJobsList();
     } else if (payload.type === 'step' && payload.step) {
-      if (state.activeJob) {
+      const targetJobId = payload.jobId || (state.activeJob && state.activeJob.id);
+      const targetJob = state.jobs.find((j) => j.id === targetJobId);
+      if (targetJob) {
+        targetJob.current_step = payload.step;
+        if (payload.runner) targetJob.runner = payload.runner;
+        targetJob.updated_at = payload.timestamp || new Date().toISOString();
+      }
+      if (state.activeJob && (!payload.jobId || state.activeJob.id === payload.jobId)) {
         state.activeJob.current_step = payload.step;
+        if (payload.runner) state.activeJob.runner = payload.runner;
+        renderActiveJobDetail();
         updateStepper(state.activeJob);
       }
+      renderJobsList();
     }
   }
 
@@ -917,21 +1108,49 @@
    * @param {object|null} soState Trang thai SystemOne cua task (khong dung ten `state` - tranh nham voi state toan cuc)
    * @returns {string} HTML
    */
-  function renderSystemOneBadge(soState) {
-    const s = soState && typeof soState === 'object' ? soState : null;
-    if (!s) {
-      return `<span class="px-1.5 py-0.5 rounded bg-slate-800/60 text-slate-400 border border-slate-600/30 text-[9px] font-mono tracking-tight inline-block align-middle" title="SystemOne: CHƯA GỌI - task này chưa có quyết định nào từ SystemOne">CHƯA GỌI</span>`;
-    }
-    const live = s.live === true ? true : (s.live === false ? false : null);
-    if (live === true) {
-      const tip = `SystemOne: LIVE\nSố lần gọi model thật: ${s.calls || 0}\nModel: ${s.model || '—'}${s.updatedAt ? '\nCập nhật: ' + s.updatedAt : ''}`;
-      return `<span class="px-1.5 py-0.5 rounded bg-emerald-900/40 text-emerald-300 border border-emerald-500/30 text-[9px] font-mono font-semibold tracking-tight inline-block align-middle" title="${escapeHtml(tip)}">LIVE</span>`;
-    }
-    if (live === false) {
-      const tip = `SystemOne: FALLBACK\nRơi về heuristic offline (không phải model thật).\nSố lần fallback: ${s.fallbacks || 0}/${s.calls || 0}\nLỗi: ${s.lastError || '—'}${s.updatedAt ? '\nCập nhật: ' + s.updatedAt : ''}`;
-      return `<span class="px-1.5 py-0.5 rounded bg-amber-900/40 text-amber-300 border border-amber-500/30 text-[9px] font-mono font-semibold tracking-tight inline-block align-middle" title="${escapeHtml(tip)}">FALLBACK</span>`;
-    }
-    return `<span class="px-1.5 py-0.5 rounded bg-slate-800/60 text-slate-400 border border-slate-600/30 text-[9px] font-mono tracking-tight inline-block align-middle" title="SystemOne: CHƯA GỌI">CHƯA GỌI</span>`;
+  function renderSystemOneBadge() {
+    // Không hiển thị 'CHƯA GỌI/LIVE' ở thẻ task/job theo yêu cầu người dùng
+    return '';
+  }
+  /**
+   * Xay dung noi dung HTML cho mot job card (T2.1, T2.2).
+   * Su dung data-action thay cho inline onclick de ho tro event delegation.
+   */
+  function buildJobCardHtml(job, isActive) {
+    const status = (job.status || 'TO DO').toUpperCase();
+    const statusClass = STATUS_CLASSES[status] || 'status-todo';
+    const title = escapeHtml(job.title || job.prompt || 'Untitled Job');
+    const repo = escapeHtml(job.repo_path || './');
+    const timeAgo = formatTimeAgo(job.created_at);
+    const taskCodeDisplay = job.task_code
+      ? `<span class="px-1.5 py-0.5 rounded bg-slate-800 text-brand-300 border border-brand-500/25 text-[10px] font-mono font-medium tracking-tight truncate max-w-[110px] inline-block mr-1 align-middle" title="${escapeHtml(job.task_code)}">${escapeHtml(job.task_code)}</span>`
+      : '';
+    const isArchived = status === 'ARCHIVED';
+    const canDelete = ['TO DO', 'DONE', 'CANCELLED', 'FAILED', 'ARCHIVED'].includes(status);
+    return `
+      <div class="flex items-center justify-between gap-1.5 mb-1.5">
+        <div class="flex items-center gap-1 min-w-0">
+          ${taskCodeDisplay}
+          <span class="font-mono text-[11px] text-slate-400 truncate">#${job.id.substring(0, 8)}</span>
+        </div>
+        <div class="flex items-center gap-1 shrink-0">
+          <span class="status-badge ${statusClass}">${status === 'PENDING' ? 'Chờ giải đáp' : status}</span>
+          <!-- Nút Lưu trữ Task -->
+          <button class="p-1 rounded hover:bg-amber-500/20 text-slate-400 hover:text-amber-300 transition" title="${isArchived ? 'Bỏ lưu trữ' : 'Lưu trữ Task'}" data-action="archive" data-job-id="${job.id}">
+            <i class="fa-solid fa-box-archive text-[11px] ${isArchived ? 'text-amber-400' : ''}"></i>
+          </button>
+          <!-- Nút Xóa Task -->
+          <button class="p-1 rounded hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 transition ${canDelete ? '' : 'hidden'}" title="Xóa Task" data-action="delete" data-job-id="${job.id}">
+            <i class="fa-solid fa-trash-can text-[11px]"></i>
+          </button>
+        </div>
+      </div>
+      <h4 class="text-xs font-semibold text-slate-200 line-clamp-2 mb-1.5 leading-snug">${title}</h4>
+      <div class="flex items-center justify-between text-[11px] text-slate-400 font-mono">
+        <span class="truncate max-w-[150px]"><i class="fa-regular fa-folder mr-1 text-slate-500"></i>${repo}</span>
+        <span class="text-slate-500 shrink-0">${timeAgo}</span>
+      </div>
+    `;
   }
 
   function renderJobsList(force = false) {
@@ -962,7 +1181,8 @@
     if (state.searchQuery) {
       filtered = filtered.filter((j) => {
         const idMatch = (j.id || '').toLowerCase().includes(state.searchQuery);
-        const titleMatch = (j.title || j.prompt || '').toLowerCase().includes(state.searchQuery);
+        // Ho tro prompt_search alias (P-4, T3.3) de tim duoc tu khoa nam sau 200 ky tu
+        const titleMatch = (j.title || j.prompt_search || j.prompt || '').toLowerCase().includes(state.searchQuery);
         const repoMatch = (j.repo_path || '').toLowerCase().includes(state.searchQuery);
         return idMatch || titleMatch || repoMatch;
       });
@@ -975,73 +1195,73 @@
           <p>Không tìm thấy công việc phù hợp.</p>
         </div>
       `;
+      state.jobCardMap.clear();
       updateJobsCountBadge(0);
       return;
     }
 
-    container.innerHTML = filtered
-      .map((job) => {
-        const isActive = job.id === state.activeJobId;
-        const status = (job.status || 'TO DO').toUpperCase();
-        const statusClass = STATUS_CLASSES[status] || 'status-todo';
-        const title = escapeHtml(job.title || job.prompt || 'Untitled Job');
-        const runner = escapeHtml(getEffectiveAgentForJob(job));
-        const repo = escapeHtml(job.repo_path || './');
-        const timeAgo = formatTimeAgo(job.created_at);
-        const taskCodeDisplay = job.task_code
-          ? `<span class="px-1.5 py-0.5 rounded bg-slate-800 text-brand-300 border border-brand-500/25 text-[10px] font-mono font-medium tracking-tight truncate max-w-[110px] inline-block mr-1 align-middle" title="${escapeHtml(job.task_code)}">${escapeHtml(job.task_code)}</span>`
-          : '';
-        const isArchived = status === 'ARCHIVED';
-        const canDelete = ['TO DO', 'DONE', 'CANCELLED', 'FAILED', 'ARCHIVED'].includes(status);
-        // Badge SystemOne THEO TASK: du lieu cua chinh job nay, khong phai trang thai global server.
-        const soBadge = renderSystemOneBadge(job.systemone_state);
+    // Nếu container đang chứa placeholder rỗng hoặc loading spinner -> dọn sạch (Issue 2)
+    if (container.querySelector('.fa-folder-open') || container.querySelector('.fa-spinner') || state.jobCardMap.size === 0) {
+      container.innerHTML = '';
+      state.jobCardMap.clear();
+    }
 
-        return `
-          <div class="job-card ${isActive ? 'active' : ''} p-2.5 rounded-lg border transition cursor-pointer relative group" data-job-id="${job.id}">
-            <div class="flex items-center justify-between gap-1.5 mb-1.5">
-              <div class="flex items-center gap-1 min-w-0">
-                ${taskCodeDisplay}
-                <span class="font-mono text-[11px] text-slate-400 truncate">#${job.id.substring(0, 8)}</span>
-                ${soBadge}
-              </div>
-              <div class="flex items-center gap-1 shrink-0">
-                <span class="status-badge ${statusClass}">${status === 'PENDING' ? 'Chờ giải đáp' : status}</span>
-                <!-- Nút Lưu trữ Task -->
-                <button class="p-1 rounded hover:bg-amber-500/20 text-slate-400 hover:text-amber-300 transition" title="${isArchived ? 'Bỏ lưu trữ' : 'Lưu trữ Task'}" onclick="event.stopPropagation(); window.aiWorker.archiveTask('${job.id}')">
-                  <i class="fa-solid fa-box-archive text-[11px] ${isArchived ? 'text-amber-400' : ''}"></i>
-                </button>
-                <!-- Nút Xóa Task -->
-                ${canDelete ? `
-                <button class="p-1 rounded hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 transition" title="Xóa Task" onclick="event.stopPropagation(); window.aiWorker.deleteTask('${job.id}')">
-                  <i class="fa-solid fa-trash-can text-[11px]"></i>
-                </button>
-                ` : ''}
-              </div>
-            </div>
-            <h4 class="text-xs font-semibold text-slate-200 line-clamp-2 mb-1.5 leading-snug">${title}</h4>
-            <div class="flex items-center justify-between text-[11px] text-slate-400 font-mono">
-              <span class="truncate max-w-[150px]"><i class="fa-regular fa-folder mr-1 text-slate-500"></i>${repo}</span>
-              <span class="text-slate-500 shrink-0">${timeAgo}</span>
-            </div>
-          </div>
-        `;
-      })
-      .join('');
+    const currentFilteredIds = new Set(filtered.map(j => j.id));
+
+    // 1. Xoá các node không còn trong filtered (khác status, archived, bị xóa...)
+    for (const [id, entry] of state.jobCardMap.entries()) {
+      if (!currentFilteredIds.has(id)) {
+        if (entry.el && entry.el.parentNode === container) {
+          entry.el.remove();
+        }
+        state.jobCardMap.delete(id);
+      }
+    }
+
+    // 2. Render hoặc cập nhật từng card theo filtered (T2.1 incremental render)
+    for (const job of filtered) {
+      const isActive = job.id === state.activeJobId;
+      let entry = state.jobCardMap.get(job.id);
+
+      if (!entry) {
+        // Tạo node mới
+        const el = document.createElement('div');
+        el.className = `job-card ${isActive ? 'active' : ''} p-2.5 rounded-lg border transition cursor-pointer relative group`;
+        el.setAttribute('data-job-id', job.id);
+        el.innerHTML = buildJobCardHtml(job, isActive);
+        entry = {
+          el,
+          lastStatus: job.status,
+          lastIsActive: isActive,
+          lastSoState: JSON.stringify(job.systemone_state)
+        };
+        state.jobCardMap.set(job.id, entry);
+        container.appendChild(el);
+      } else {
+        // Cập nhật node đã có
+        const el = entry.el;
+        if (entry.lastIsActive !== isActive) {
+          if (isActive) el.classList.add('active');
+          else el.classList.remove('active');
+          entry.lastIsActive = isActive;
+        }
+
+        const soStateStr = JSON.stringify(job.systemone_state);
+        if (entry.lastStatus !== job.status || entry.lastSoState !== soStateStr) {
+          el.innerHTML = buildJobCardHtml(job, isActive);
+          entry.lastStatus = job.status;
+          entry.lastSoState = soStateStr;
+        }
+
+        // Re-append giữ đúng thứ tự DOM theo filtered (appendChild di chuyển node có sẵn - O(1))
+        container.appendChild(el);
+      }
+    }
 
     // Tự động chọn task đầu tiên nếu chưa có task nào được chọn
     if (!state.activeJobId && filtered.length > 0) {
       selectJob(filtered[0].id);
     }
-
-    // Bind click events on cards
-    container.querySelectorAll('.job-card').forEach((card) => {
-      card.addEventListener('click', () => {
-        const jobId = card.getAttribute('data-job-id');
-        if (jobId !== state.activeJobId) {
-          selectJob(jobId);
-        }
-      });
-    });
 
     updateJobsCountBadge(filtered.length);
   }
@@ -1100,20 +1320,22 @@
     // Badge SystemOne CUA TASK NAY (du lieu job.systemone_state, khong phai global).
     const soBadgeEl = document.getElementById('activeJobSystemOneBadge');
     if (soBadgeEl) {
-      const st = job.systemone_state;
-      const live = st && typeof st === 'object' ? (st.live === true ? true : (st.live === false ? false : null)) : null;
-      if (live === true) {
-        soBadgeEl.textContent = 'LIVE';
-        soBadgeEl.className = 'text-xs px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-mono font-semibold';
-        soBadgeEl.title = `SystemOne: LIVE — ${st.calls || 0} quyết định từ model thật (${st.model || '—'})`;
-      } else if (live === false) {
-        soBadgeEl.textContent = 'FALLBACK';
-        soBadgeEl.className = 'text-xs px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 font-mono font-semibold';
-        soBadgeEl.title = `SystemOne: FALLBACK — ${st.fallbacks || 0}/${st.calls || 0} quyết định rơi về heuristic offline. ${st.lastError || ''}`;
+      let st = job.systemone_state;
+      if (typeof st === 'string') {
+        try { st = JSON.parse(st); } catch (e) { st = null; }
+      }
+      const hasUsedSystemOne = Boolean(st && typeof st === 'object' && ((st.calls && st.calls > 0) || st.lastDecision || (Array.isArray(st.decisions) && st.decisions.length > 0)));
+      if (hasUsedSystemOne) {
+        soBadgeEl.classList.remove('hidden');
+        const decisionText = st.lastDecision || (st.live ? 'Đã quyết định' : 'Offline Heuristic');
+        soBadgeEl.textContent = `SystemOne: ${decisionText}`;
+        soBadgeEl.className = 'text-xs px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 font-mono font-medium';
+        const decisionList = Array.isArray(st.decisions) && st.decisions.length > 0
+          ? '\n\nLịch sử quyết định:\n' + st.decisions.map(d => `• ${d.summary || d.route}`).join('\n')
+          : '';
+        soBadgeEl.title = `SystemOne cho task này:\nQuyết định: ${decisionText}\nModel: ${st.model || '—'}\nSố lần gọi: ${st.calls || 1}${decisionList}`;
       } else {
-        soBadgeEl.textContent = 'CHƯA GỌI';
-        soBadgeEl.className = 'text-xs px-2 py-0.5 rounded bg-slate-700/60 text-slate-400 border border-slate-600/30 font-mono';
-        soBadgeEl.title = 'SystemOne: CHƯA GỌI — task này chưa có quyết định nào từ SystemOne';
+        soBadgeEl.classList.add('hidden');
       }
     }
 
@@ -1272,7 +1494,7 @@
     const hasReachedTesting = ['TESTING', 'VERIFY', 'FIXING', 'DONE'].includes(status);
     const hasReachedVerify = ['VERIFY', 'FIXING', 'DONE'].includes(status);
     const hasTouchedPending = status === 'PENDING' || Boolean(Number(job.had_pending)) || Boolean(job.had_pending) || (Array.isArray(job.questions) && job.questions.length > 0);
-    const hasTouchedFixing = status === 'FIXING' || getFixAttemptFromJob(job) > 0;
+    const hasTouchedFixing = status === 'FIXING' || Boolean(Number(job.had_fixing)) || Boolean(job.had_fixing) || getFixAttemptFromJob(job) > 0;
     const isDone = status === 'DONE';
 
     // Lấy toạ độ tâm các node (y luôn là 17px - tâm của vòng tròn 34px)
@@ -1389,13 +1611,18 @@
       n.classList.add('untouched');
     });
 
-    const hasReachedPlanning = ['PLANNING', 'PENDING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING', 'DONE'].includes(status);
-    const hasReachedImplement = ['IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING', 'DONE'].includes(status);
-    const hasReachedTesting = ['TESTING', 'VERIFY', 'FIXING', 'DONE'].includes(status);
-    const hasReachedVerify = ['VERIFY', 'FIXING', 'DONE'].includes(status);
+    const STEP_ORDER = ['TODO', 'PLANNING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'DONE'];
+    const curStepIdx = STEP_ORDER.indexOf(currentStep);
+    const statusIdx = STEP_ORDER.indexOf(status);
+    const maxIdx = Math.max(curStepIdx, statusIdx);
+
+    const hasReachedPlanning = maxIdx >= 1 || ['PENDING', 'FIXING'].includes(status) || ['PENDING', 'FIXING'].includes(currentStep);
+    const hasReachedImplement = maxIdx >= 2 || ['FIXING'].includes(status) || ['FIXING'].includes(currentStep);
+    const hasReachedTesting = maxIdx >= 3 || ['FIXING'].includes(status) || ['FIXING'].includes(currentStep);
+    const hasReachedVerify = maxIdx >= 4;
     const hasTouchedPending = status === 'PENDING' || Boolean(Number(job.had_pending)) || Boolean(job.had_pending) || (Array.isArray(job.questions) && job.questions.length > 0);
-    const hasTouchedFixing = status === 'FIXING' || getFixAttemptFromJob(job) > 0;
-    const isDone = status === 'DONE';
+    const hasTouchedFixing = status === 'FIXING' || currentStep === 'FIXING' || Boolean(Number(job.had_fixing)) || Boolean(job.had_fixing) || getFixAttemptFromJob(job) > 0;
+    const isDone = status === 'DONE' || currentStep === 'DONE';
 
     if (nodeTodo) {
       nodeTodo.classList.remove('untouched');
@@ -1464,10 +1691,8 @@
     const testContainer = document.getElementById('testPlanContent');
     const dual = state.dualPlan;
 
-    if (devContainer) {
-      if (dual && dual.dev_plan) {
-        devContainer.innerHTML = formatMarkdownContent(dual.dev_plan);
-      } else {
+    if (!dual) {
+      if (devContainer) {
         devContainer.innerHTML = `
           <div class="text-center py-12 text-slate-500">
             <i class="fa-solid fa-file-circle-question text-3xl mb-2 text-slate-600"></i>
@@ -1476,12 +1701,7 @@
           </div>
         `;
       }
-    }
-
-    if (testContainer) {
-      if (dual && dual.test_plan) {
-        testContainer.innerHTML = formatMarkdownContent(dual.test_plan);
-      } else {
+      if (testContainer) {
         testContainer.innerHTML = `
           <div class="text-center py-12 text-slate-500">
             <i class="fa-solid fa-vial-circle-check text-3xl mb-2 text-slate-600"></i>
@@ -1490,6 +1710,22 @@
           </div>
         `;
       }
+      return;
+    }
+
+    // Dung ket qua cache neu da parse Markdown roi (T2.4)
+    const cached = state.activeJobId ? state.planCache.get(state.activeJobId) : null;
+    if (cached && cached.devHtml) {
+      if (devContainer) devContainer.innerHTML = cached.devHtml;
+      if (testContainer) testContainer.innerHTML = cached.testHtml;
+      return;
+    }
+
+    if (devContainer && dual.dev_plan) {
+      devContainer.innerHTML = formatMarkdownContent(dual.dev_plan);
+    }
+    if (testContainer && dual.test_plan) {
+      testContainer.innerHTML = formatMarkdownContent(dual.test_plan);
     }
   }
 
@@ -1528,13 +1764,17 @@
       return null;
     };
     const evChannel = (e) => {
-      const explicit = evExplicitChannel(e);
-      if (explicit) return explicit;
       const fn = evFilename(e);
+      // Quy tắc cứng theo đuôi file (Issue 4: không lẫn giữa API .json và Log .log):
       if (/(\.png|\.webp|\.jpg|\.jpeg|\.svg)$/.test(fn)) return 'ui';
       if (/(\.log|\.txt)$/.test(fn)) return 'log';
-      if (fn.endsWith('.sql') || fn.includes('db') || fn.includes('assert')) return 'db';
-      if (fn.endsWith('.json')) return fn.includes('api') ? 'api' : 'log';
+      if (fn.endsWith('.sql')) return 'db';
+      if (fn.endsWith('.json')) {
+        if (fn.includes('db') || fn.includes('assert')) return 'db';
+        return 'api';
+      }
+      const explicit = evExplicitChannel(e);
+      if (explicit) return explicit;
       return 'log';
     };
     const uiEvidences = state.evidences.filter((e) => evChannel(e) === 'ui');
@@ -1865,35 +2105,7 @@
       maxConc.textContent = state.systemStatus.maxConcurrency;
     }
 
-    // Badge SystemOne: LIVE (model that) | FALLBACK (heuristic offline) | OFF
-    const soStatus = document.getElementById('systemOneStatus');
-    const soWrap = document.getElementById('systemOneBadgeWrap');
-    if (soStatus) {
-      const s = state.systemStatus.systemoneStatus;
-      if (!s) {
-        soStatus.textContent = '—';
-        soStatus.className = 'text-slate-300 font-mono';
-      } else if (s.enabled === false) {
-        soStatus.textContent = 'OFF';
-        soStatus.className = 'text-slate-500 font-mono';
-      } else if (s.live === true) {
-        soStatus.textContent = 'LIVE';
-        soStatus.className = 'text-emerald-400 font-mono font-semibold';
-      } else if (s.live === false) {
-        soStatus.textContent = 'FALLBACK';
-        soStatus.className = 'text-amber-400 font-mono font-semibold';
-      } else {
-        soStatus.textContent = 'CHƯA GỌI';
-        soStatus.className = 'text-slate-400 font-mono';
-      }
-    }
-    if (soWrap) {
-      const s = state.systemStatus.systemoneStatus;
-      const tip = s
-        ? `SystemOne ${s.model} @ ${s.baseUrl}\nTrạng thái: ${s.enabled === false ? 'tắt' : (s.live === true ? 'đang gọi model thật' : (s.live === false ? 'rơi về heuristic offline' : 'chưa gọi'))}\n${s.lastError ? 'Lỗi: ' + s.lastError : ''}\nFallback: ${s.fallbackCount} lần`
-        : 'Trạng thái SystemOne chưa tải';
-      soWrap.setAttribute('title', tip);
-    }
+    // Đã bỏ phần "SystemOne: CHƯA GỌI" của cả worker chung theo yêu cầu
   }
 
   function updateJobsCountBadge(visibleCount) {
@@ -1911,7 +2123,7 @@
       if (state.searchQuery) {
         filtered = filtered.filter((j) => {
           const idMatch = (j.id || '').toLowerCase().includes(state.searchQuery);
-          const titleMatch = (j.title || j.prompt || '').toLowerCase().includes(state.searchQuery);
+          const titleMatch = (j.title || j.prompt_search || j.prompt || '').toLowerCase().includes(state.searchQuery);
           const repoMatch = (j.repo_path || '').toLowerCase().includes(state.searchQuery);
           return idMatch || titleMatch || repoMatch;
         });
@@ -2900,11 +3112,24 @@
   // Nap lai danh sach evidence sau khi xoa. Chi lay evidence -> khong reconnect
   // SSE log stream (fetchJobDetails se mo connection moi, gay reconnect thua).
   async function refreshEvidences(jobId) {
-    const res = await fetch(`/api/v1/jobs/${jobId}`);
-    if (!res.ok) throw new Error(`Failed to load job details (HTTP ${res.status})`);
-    const data = await res.json();
-    state.evidences = data.evidence || data.evidences || [];
-    renderEvidenceHub();
+    try {
+      const res = await fetch(`/api/v1/jobs/${jobId}/evidence`);
+      if (res.ok) {
+        const data = await res.json();
+        state.evidences = data.evidence || data.evidences || [];
+        renderEvidenceHub();
+        return;
+      }
+    } catch (e) {}
+    try {
+      const res = await fetch(`/api/v1/jobs/${jobId}`);
+      if (!res.ok) throw new Error(`Failed to load job details (HTTP ${res.status})`);
+      const data = await res.json();
+      state.evidences = (data.job && (data.job.evidence || data.job.evidences)) || data.evidence || data.evidences || [];
+      renderEvidenceHub();
+    } catch (err) {
+      console.warn('refreshEvidences error:', err);
+    }
   }
   // --- Evidence Toggle & Delete ---
   async function toggleEvidenceStatus(filename, currentStatus) {
@@ -3558,50 +3783,71 @@
     const devContainer = document.getElementById('devPlanMarkdownContainer') || document.getElementById('devPlanContent');
     const testContainer = document.getElementById('testPlanMarkdownContainer') || document.getElementById('testPlanContent');
 
+    // Kiem tra cache (T2.3, T2.4)
+    const cached = state.planCache.get(jobId);
+    if (cached && cached.devHtml !== undefined) {
+      if (devContainer) devContainer.innerHTML = cached.devHtml;
+      if (testContainer) testContainer.innerHTML = cached.testHtml;
+      return;
+    }
+    if (cached && cached.promise) {
+      await cached.promise;
+      const updated = state.planCache.get(jobId);
+      if (updated && state.activeJobId === jobId) {
+        if (devContainer) devContainer.innerHTML = updated.devHtml;
+        if (testContainer) testContainer.innerHTML = updated.testHtml;
+      }
+      return;
+    }
+
     let devContent = state.dualPlan?.dev_plan || '';
     let testContent = state.dualPlan?.test_plan || '';
 
-    try {
-      let res = await fetch(`/api/v1/tasks/${jobId}/plan-files`);
-      if (!res.ok) {
-        res = await fetch(`/api/v1/jobs/${jobId}/plan-files`);
+    const fetchPromise = (async () => {
+      try {
+        let res = await fetch(`/api/v1/tasks/${jobId}/plan-files`);
+        if (!res.ok) {
+          res = await fetch(`/api/v1/jobs/${jobId}/plan-files`);
+        }
+        if (res.ok) {
+          const data = await res.json();
+          if (data.dev_plan || data.devPlan) devContent = data.dev_plan || data.devPlan;
+          if (data.test_plan || data.testPlan) testContent = data.test_plan || data.testPlan;
+        }
+      } catch (err) {
+        console.warn('loadPlanFiles API error, using dual_plan fallback:', err);
       }
-      if (res.ok) {
-        const data = await res.json();
-        if (data.dev_plan || data.devPlan) devContent = data.dev_plan || data.devPlan;
-        if (data.test_plan || data.testPlan) testContent = data.test_plan || data.testPlan;
-      }
-    } catch (err) {
-      console.warn('loadPlanFiles API error, using dual_plan fallback:', err);
-    }
 
-    if (devContainer) {
-      if (devContent) {
-        devContainer.innerHTML = `<div class="prose prose-invert max-w-none text-xs leading-relaxed">${formatMarkdownContent(devContent)}</div>`;
-      } else {
-        devContainer.innerHTML = `
+      const devHtml = devContent
+        ? `<div class="prose prose-invert max-w-none text-xs leading-relaxed">${formatMarkdownContent(devContent)}</div>`
+        : `
           <div class="text-center py-12 text-slate-500">
             <i class="fa-solid fa-file-code text-2xl mb-2 opacity-50 block"></i>
             Chưa có Dev Plan cho task này
           </div>
         `;
-      }
-    }
 
-    if (testContainer) {
-      if (testContent) {
-        testContainer.innerHTML = `<div class="prose prose-invert max-w-none text-xs leading-relaxed">${formatMarkdownContent(testContent)}</div>`;
-      } else {
-        testContainer.innerHTML = `
+      const testHtml = testContent
+        ? `<div class="prose prose-invert max-w-none text-xs leading-relaxed">${formatMarkdownContent(testContent)}</div>`
+        : `
           <div class="text-center py-12 text-slate-500">
             <i class="fa-solid fa-vial text-2xl mb-2 opacity-50 block"></i>
             Chưa có Test Plan cho task này
           </div>
         `;
-      }
+
+      state.planCache.set(jobId, { devHtml, testHtml });
+      return { devHtml, testHtml };
+    })();
+
+    state.planCache.set(jobId, { promise: fetchPromise });
+    const result = await fetchPromise;
+
+    if (state.activeJobId === jobId) {
+      if (devContainer) devContainer.innerHTML = result.devHtml;
+      if (testContainer) testContainer.innerHTML = result.testHtml;
     }
   }
-
   // =========================================================================
   // TASK LIFECYCLE MANAGEMENT (DELETE TASK, UPDATE STATUS)
   // =========================================================================
@@ -3647,6 +3893,29 @@
         });
       }
       if (!res.ok) throw new Error('Không thể cập nhật trạng thái');
+      const data = await res.json().catch(() => ({}));
+      const updatedJob = data && data.job;
+
+      // Đồng bộ state cục bộ ngay lập tức để UI cập nhật không có độ trễ
+      if (state.activeJob && state.activeJob.id === state.activeJobId) {
+        state.activeJob.status = newStatus;
+        if (['PLANNING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING'].includes(newStatus)) {
+          state.activeJob.current_step = newStatus;
+        }
+        if (updatedJob) Object.assign(state.activeJob, updatedJob);
+        renderActiveJobDetail();
+      }
+      const targetJob = state.jobs.find((j) => j.id === state.activeJobId);
+      if (targetJob) {
+        targetJob.status = newStatus;
+        if (['PLANNING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING'].includes(newStatus)) {
+          targetJob.current_step = newStatus;
+        }
+        targetJob.updated_at = new Date().toISOString();
+        if (updatedJob) Object.assign(targetJob, updatedJob);
+      }
+      renderJobsList();
+
       showToast('Cập nhật trạng thái thành công!', 'success');
       fetchJobDetails(state.activeJobId, false);
       fetchJobsListSilently();
@@ -3688,7 +3957,16 @@
     const quickTrackInput = document.getElementById('editTaskQuickTrack');
     if (codeInput) codeInput.value = job.task_code || ('TASK-' + job.id.substring(0, 8).toUpperCase());
     if (titleInput) titleInput.value = job.title || '';
-    if (promptInput) promptInput.value = job.prompt || '';
+    if (promptInput) {
+      promptInput.value = job.prompt || '';
+      // Lay prompt day du tu API chi tiet vi state.jobs chi chua preview 200 ky tu (T3.3)
+      fetch(`/api/v1/jobs/${job.id}`).then(r => r.json()).then(d => {
+        const full = d.job || d;
+        if (full && full.prompt && editingTaskId === targetId && promptInput) {
+          promptInput.value = full.prompt;
+        }
+      }).catch(() => {});
+    }
     try {
       if ((!state.workspaces || state.workspaces.length === 0) && typeof loadWorkspaces === 'function') await loadWorkspaces();
       else if (wsSelect && wsSelect.options.length <= 1 && typeof loadWorkspaces === 'function') await loadWorkspaces();

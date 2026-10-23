@@ -5,7 +5,17 @@ const fs = require('node:fs');
 const config = require('../config');
 
 let dbInstance = null;
+const stmtCache = new Map();
 
+function getStmt(sql) {
+  let stmt = stmtCache.get(sql);
+  if (!stmt) {
+    const db = getDb();
+    stmt = db.prepare(sql);
+    stmtCache.set(sql, stmt);
+  }
+  return stmt;
+}
 function getDb() {
   if (!dbInstance) {
     initDb();
@@ -52,7 +62,8 @@ function initDb() {
       exit_code INTEGER,
       summary TEXT,
       priority INTEGER DEFAULT 0,
-      had_pending INTEGER DEFAULT 0
+      had_pending INTEGER DEFAULT 0,
+      had_fixing INTEGER DEFAULT 0
     );
   `);
 
@@ -67,6 +78,9 @@ function initDb() {
     if (!colNames.includes('workspace_id')) { dbInstance.exec('ALTER TABLE jobs ADD COLUMN workspace_id TEXT;'); }
     if (!colNames.includes('had_pending')) {
       dbInstance.exec('ALTER TABLE jobs ADD COLUMN had_pending INTEGER DEFAULT 0;');
+    }
+    if (!colNames.includes('had_fixing')) {
+      dbInstance.exec('ALTER TABLE jobs ADD COLUMN had_fixing INTEGER DEFAULT 0;');
     }
     // Trang thai SystemOne THEO TUNG JOB (JSON): { live, calls, fallbacks, lastError, model, updatedAt }.
     // Badge "CHƯA GỌI" phai la du lieu cua task, khong phai trang thai global cua server.
@@ -213,6 +227,21 @@ function initDb() {
   } catch (err) {
     console.error('[DB] Lỗi khởi tạo default settings:', err);
   }
+  // Chỉ mục tối ưu hiệu năng truy vấn (T3.1, PERF-FIX-01)
+  dbInstance.exec(`
+    CREATE INDEX IF NOT EXISTS idx_jobs_status       ON jobs(status);
+    CREATE INDEX IF NOT EXISTS idx_jobs_created_at    ON jobs(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_jobs_task_code    ON jobs(task_code);
+    CREATE INDEX IF NOT EXISTS idx_steps_job_id      ON steps(job_id);
+    CREATE INDEX IF NOT EXISTS idx_questions_job_id  ON questions(job_id);
+  `);
+
+  // Checkpoint WAL định kỳ để file WAL không phình to (T3P.1)
+  try {
+    dbInstance.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+  } catch (e) {}
+
+  stmtCache.clear();
 
   return dbInstance;
 }
@@ -266,15 +295,14 @@ function createJob(jobData) {
 
 function getJobById(id) {
   if (!id) return null;
-  const db = getDb();
-  const stmt = db.prepare('SELECT * FROM jobs WHERE id = ?');
-  const exact = stmt.get(id);
+  const exactStmt = getStmt('SELECT * FROM jobs WHERE id = ?');
+  const exact = exactStmt.get(id);
   if (exact) return exact;
 
   // Hỗ trợ tìm kiếm theo prefix ID (short-id như e6b6f051) hoặc task_code (như RSGATE-50)
   try {
     const cleanId = String(id).trim();
-    const fuzzyStmt = db.prepare('SELECT * FROM jobs WHERE id LIKE ? OR task_code = ? ORDER BY created_at DESC LIMIT 1');
+    const fuzzyStmt = getStmt('SELECT * FROM jobs WHERE id LIKE ? OR task_code = ? ORDER BY created_at DESC LIMIT 1');
     const fuzzy = fuzzyStmt.get(`${cleanId}%`, cleanId);
     if (fuzzy) return fuzzy;
   } catch (e) {}
@@ -337,7 +365,11 @@ function listJobs(filter = {}) {
     params.push(filter.runner);
   }
 
-  let sql = 'SELECT * FROM jobs';
+  // Tối ưu payload: cắt ngắn prompt thành preview 200 ký tự và thêm alias computed prompt_search (T3.3)
+  const columns = filter.full
+    ? '*'
+    : 'id, task_code, title, repo_path, workspace_id, base_branch, worktree_path, status, created_at, updated_at, completed_at, runner, pipeline_config, current_step, error_message, exit_code, summary, priority, had_pending, had_fixing, gate_result, systemone_state, SUBSTR(prompt, 1, 200) AS prompt, SUBSTR(prompt, 1, 1000) AS prompt_search';
+  let sql = `SELECT ${columns} FROM jobs`;
   if (whereClauses.length > 0) {
     sql += ' WHERE ' + whereClauses.join(' AND ');
   }
@@ -352,7 +384,7 @@ function listJobs(filter = {}) {
     params.push(Number(filter.offset));
   }
 
-  const stmt = db.prepare(sql);
+  const stmt = getStmt(sql);
   return stmt.all(...params);
 }
 

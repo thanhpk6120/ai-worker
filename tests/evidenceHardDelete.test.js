@@ -1,8 +1,13 @@
-const { describe, it, before, after } = require('node:test');
-const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+
+// PHẢI set DB_PATH TRƯỚC mọi require để không ghi vào DB production ai-worker.sqlite
+const TMP_DB_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'evidence-db-test-'));
+process.env.DB_PATH = path.join(TMP_DB_DIR, 'test.sqlite');
+
+const { describe, it, before, after } = require('node:test');
+const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const db = require('../src/storage/db');
 const { BrowserRunner } = require('../src/verification/browserRunner');
@@ -20,6 +25,11 @@ describe('Visual Evidence Mockup & Hard Delete DB Test Suite', () => {
     try {
       if (tempDir && fs.existsSync(tempDir)) {
         fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    } catch (e) {}
+    try {
+      if (TMP_DB_DIR && fs.existsSync(TMP_DB_DIR)) {
+        fs.rmSync(TMP_DB_DIR, { recursive: true, force: true });
       }
     } catch (e) {}
   });

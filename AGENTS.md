@@ -233,17 +233,20 @@ updated_at: 2026-10-11
   - Server-Sent Events (`/api/v1/jobs/:id/logs/stream`)
   - Host OS Subprocess Spawn qua `ProcessManager`
   - MCP CloakBrowser integration cho Browser UI Evidence
-- **Status vocabulary:** `TO DO` → `PLANNING` (`PENDING`) → `IMPLEMENT` → `TESTING` (`FIXING`) → `DONE` (`FAILED`, `CANCELLED`, `TIMED_OUT`)
+- **Status vocabulary:** `TO DO` → `PLANNING` (`PENDING`) → `IMPLEMENT` → `TESTING` → `VERIFY` (`FIXING`) → `DONE` (`FAILED`, `CANCELLED`, `TIMED_OUT`)
 - **Task format:** `checklist`
 
-### 11.2 Phạm vi và an toàn
-- Không triển khai bất kỳ tính năng nào ngoài phạm vi đã được duyệt trong `expect.md` / `dev_plan.md` / `tasks.md`.
-- Cập nhật liên tục trạng thái trong `tasks.md` khi tiến hành công việc.
-- `report.md` phải phản ánh file thay đổi thực tế và kết quả test thực tế.
+### 11.2 Phạm vi từng bước (Step Scope Control) & An toàn
+- **PLANNING:** Chỉ phân tích yêu cầu & mã nguồn hiện tại, làm rõ vướng mắc (PENDING), lập `dev_plan.md` + `test_plan.md` và tự verify plan. Tuyệt đối không sửa code, không chạy test, không tạo evidence.
+- **IMPLEMENT:** Chỉ sửa mã nguồn và viết/chạy unit test cho toàn bộ hàm, class, biến liên quan đến thay đổi. Tuyệt đối không tạo file trong `evidence/`.
+- **TESTING:** Chạy kiểm thử theo đúng `test_plan.md` và thu thập đầy đủ evidence (ảnh màn hình, log, api json). Không cần tự verify ở bước này (mọi evidence ban đầu mang trạng thái `NOT VERIFY`).
+- **VERIFY:** Chỉ verify các evidence, thực hiện verify hoàn toàn bằng AI Vision (không dùng OCR). Truyền ảnh + expect cần đạt, AI trả về JSON pass/fail cho từng ảnh. Thẩm định thành công chuyển thành `PASS`, không đạt chuyển thành `FAILED`.
+- **FIXING:** Chỉ fix lỗi theo đúng báo cáo từ VERIFY, sau đó unit test đúng phần vừa fix rồi chuyển trạng thái sang `VERIFY` để đối soát lại.
+- **Stepper Connectors:** Nếu luồng đã chạm vào `FIXING` (`had_fixing: 1`), đường nối stepper bắt buộc nối xuyên qua FIXING rồi mới tới DONE.
+- **SystemOne Display:** Bỏ phần "SystemOne: CHƯA GỌI" của cả worker chung. Trong từng task/job nếu có sử dụng SystemOne thì hiển thị quyết định SystemOne đã chọn (ẩn khi chưa dùng). Không hiển thị "CHƯA GỌI/LIVE" ở thẻ task/job.
 - Tuyệt đối không commit hoặc ghi secrets, API keys, password vào code hoặc tài liệu.
 - Không chỉnh sửa file build artifact (`node_modules/`, `*.sqlite-wal`, `*.sqlite-shm`).
 - **QUY TẮC TIÊN QUYẾT:** TẤT CẢ các lệnh xoá file/thư mục BẮT BUỘC phải dùng cách di chuyển nó vào thùng rác (Trash / Recycle Bin), TUYỆT ĐỐI KHÔNG ĐƯỢC xoá vĩnh viễn.
-
 ### 11.3 Quy chuẩn code
 - Tuân thủ cấu trúc phân tầng Node.js CommonJS.
 - Mọi file tạo mới phải ở định dạng **UTF-8 without BOM**.

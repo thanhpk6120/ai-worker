@@ -1,3 +1,11 @@
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+
+// PHẢI set DB_PATH TRƯỚC mọi require để không ghi vào DB production ai-worker.sqlite
+const TMP_DB_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'verify-gate-db-'));
+process.env.DB_PATH = path.join(TMP_DB_DIR, 'test.sqlite');
+
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { DatabaseSync } = require('node:sqlite');
@@ -333,5 +341,13 @@ describe('VerificationGate & SQLite Schema Test Suite', () => {
       assert.strictEqual(result.channels.ui.status, 'CRASHED');
       assert.ok(result.failedChannels.includes('ui'));
     });
+  });
+
+  after(() => {
+    try {
+      if (TMP_DB_DIR && fs.existsSync(TMP_DB_DIR)) {
+        fs.rmSync(TMP_DB_DIR, { recursive: true, force: true });
+      }
+    } catch (e) {}
   });
 });

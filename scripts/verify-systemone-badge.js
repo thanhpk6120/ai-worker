@@ -82,13 +82,16 @@ async function main() {
 
     console.log(`\nTAT CA PASS: badge per-task - job A = ${badge.live} (${badge.calls} calls), job B = CHUA GOI`);
   } finally {
-    // Don job test qua API (archive), khong xoa cung trong DB.
+    // Cancel truoc de dua status ve CANCELLED, sau do DELETE xoa cung khoi DB
     for (const id of created) {
       try {
         await fetch(`${BASE}/api/v1/jobs/${id}/cancel`, { method: 'POST' });
-      } catch (e) { /* ignore */ }
+      } catch (e) {}
+      try {
+        await fetch(`${BASE}/api/v1/jobs/${id}`, { method: 'DELETE' });
+      } catch (e) {}
     }
-    console.log('Da cancel job test:', created.join(', '));
+    console.log('Da cancel & xoa sach job test khoi DB:', created.join(', '));
     try { fs.rmSync(TMP_WS, { recursive: true, force: true }); } catch (e) {}
   }
 }

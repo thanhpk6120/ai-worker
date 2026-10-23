@@ -36,4 +36,30 @@ describe('Runtime Evidence Gate (build log vs runtime log)', () => {
     const r = verifyTaskEvidence({ jobId: 'rt-ok', evidenceDir: edir, featureDir: fdir, taskCode: 'RT-01', emit: () => {} });
     assert.strictEqual(r.failed, false);
   });
+  it('4. API json co UTF-8 BOM + nested test cases -> PASS khi runtime log hop le', () => {
+    const bomPayload = '\uFEFF' + JSON.stringify({
+      baseUrl: 'http://localhost:6012',
+      login: { endpoint: 'POST /api/authenticate', httpStatus: 200 },
+      tc15_hub_list: { httpStatus: 200, httpMethodValue: 'POST', itemCount: 10 }
+    });
+    fss.writeFileSync(path.join(edir, '02_api_verification.json'), bomPayload, 'utf8');
+    fss.writeFileSync(path.join(edir, '05_service_runtime.log'), 'Server listening on port 6012\nPOST /api/authenticate 200 OK\nGET /api/recon/hub 200 OK\n');
+    fss.writeFileSync(path.join(edir, 'metadata.json'), '\uFEFF' + JSON.stringify(meta([{ id: 'TC-API-01', name: 'API', status: 'PASSED', evidence: ['02_api_verification.json', '05_service_runtime.log'], note: 'API 200' }])));
+    const r = verifyTaskEvidence({ jobId: 'rt-bom-nested-ok', evidenceDir: edir, featureDir: fdir, taskCode: 'RT-01', emit: () => {} });
+    assert.strictEqual(r.failed, false, 'Phai parse duoc file co UTF-8 BOM va nested testcase');
+  });
+  it('5. API json kieu api_tc15_hub_list (httpStatus, firstItem, itemCount) co BOM -> PASS', () => {
+    const tcPayload = '\uFEFF' + JSON.stringify({
+      method: 'GET',
+      url: 'http://localhost:6012/api/recon/hub?page=0&size=10',
+      httpStatus: 200,
+      itemCount: 10,
+      firstItem: { id: 1, httpMethod: 'POST' }
+    });
+    fss.writeFileSync(path.join(edir, 'api_tc15_hub_list.json'), tcPayload, 'utf8');
+    fss.writeFileSync(path.join(edir, '05_service_runtime.log'), 'Server listening on port 6012\nGET /api/recon/hub 200 OK\n');
+    fss.writeFileSync(path.join(edir, 'metadata.json'), JSON.stringify(meta([{ id: 'TC-API-01', name: 'API', status: 'PASSED', evidence: ['api_tc15_hub_list.json', '05_service_runtime.log'], note: 'API 200' }])));
+    const r = verifyTaskEvidence({ jobId: 'rt-tc15-ok', evidenceDir: edir, featureDir: fdir, taskCode: 'RT-01', emit: () => {} });
+    assert.strictEqual(r.failed, false, 'Phai chap nhan httpStatus + firstItem + itemCount');
+  });
 });

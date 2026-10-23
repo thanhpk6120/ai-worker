@@ -155,6 +155,8 @@ class TaskQueue extends EventEmitter {
       const runningInfo = this.runningJobs.get(jobId);
       this.emit('job:cancel', { jobId });
       this.emit('job:cancelled', { jobId, status: 'RUNNING' });
+      this.runningJobs.delete(jobId);
+      this.releaseWorkspaceLock(jobId);
       return { cancelled: true, state: 'RUNNING', job: runningInfo.job };
     }
 

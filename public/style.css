@@ -821,7 +821,7 @@ pre code {
   stroke: #10b981;
   stroke-width: 3;
   stroke-dasharray: 4 2;
-  filter: drop-shadow(0 0 8px rgba(16, 185, 129, 0.8));
+  /* Bo drop-shadow ket hop animation de tranh GPU repaint 60fps lien tuc (T2.7) */
   animation: svg-dash-flow 1.5s linear infinite;
 }
 
@@ -851,6 +851,7 @@ pre code {
 #jobsListContainer {
   contain: content;
   content-visibility: auto;
+  contain-intrinsic-size: 1px 500px;
 }
 
 .job-card {

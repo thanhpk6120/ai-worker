@@ -111,6 +111,11 @@ const AI_TRIAGE_TIMEOUT_MS = process.env.AI_TRIAGE_TIMEOUT_MS ? parseInt(process
 const AI_TRIAGE_ENABLED = process.env.AI_TRIAGE_ENABLED !== 'false';
 // TTL cache RAM cho ket qua triage (ms). Mac dinh 1 gio.
 const AI_TRIAGE_CACHE_TTL_MS = process.env.AI_TRIAGE_CACHE_TTL_MS ? parseInt(process.env.AI_TRIAGE_CACHE_TTL_MS, 10) : 3600000;
+// TTL cache RAM cho ket qua `detect()` cua runner CLI (ms). Mac dinh 60 giay.
+// Detect chay `spawnSync` 2 lan (where + --version) -> ~1,4s LAN, chan event loop.
+// Cache o `BaseAdapter.detect()` (khong phai o registry) vi detect() nam ca tren
+// duong chay job (truoc moi pipeline step), khong chi tren duong UI.
+const DETECT_TTL_MS = process.env.DETECT_TTL_MS ? parseInt(process.env.DETECT_TTL_MS, 10) : 60000;
 
 // Tự động tạo thư mục nếu chưa có
 [WORKTREE_BASE_DIR, LOG_DIR, EVIDENCE_DIR].forEach((dir) => {
@@ -140,6 +145,7 @@ module.exports = {
   AI_TRIAGE_TIMEOUT_MS,
   AI_TRIAGE_ENABLED,
   AI_TRIAGE_CACHE_TTL_MS,
+  DETECT_TTL_MS,
   DEFAULT_TIMEOUT_MS,
   normalizeTimeoutMs,
   resolveJobTimeoutMs

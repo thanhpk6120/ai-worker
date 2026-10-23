@@ -9,6 +9,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 const { EventEmitter } = require('node:events');
+const zlib = require('node:zlib');
 
 const config = require('./config');
 const db = require('./storage/db');
@@ -24,6 +25,7 @@ const fileContext = require('./systemone/fileContext');
 const { guardPrompt } = require('./execution/promptGuard');
 const evidenceStore = require('./verification/evidenceStore');
 const { EvidenceWatcher } = require('./verification/evidenceWatcher');
+const { verifyImageWithAI } = require('./verification/aiVisionVerifier');
 const stepGate = require('./execution/stepGate');
 
 // === Evidence realtime (TASK-PIPELINE-FIX C-1..C-3) ===
@@ -43,6 +45,52 @@ class JobEventBus extends EventEmitter {
   constructor() {
     super();
     this.setMaxListeners(300);
+    /** @type {Map<string, { stream: fs.WriteStream, offset: number, path: string }>} */
+    this._logStreams = new Map();
+  }
+
+  _ensureLogStream(jobId) {
+    if (!jobId) return null;
+    let info = this._logStreams.get(jobId);
+    if (info && info.stream && !info.stream.destroyed && !info.stream.closed) {
+      return info;
+    }
+    try {
+      const logFilePath = path.join(config.LOG_DIR, `${jobId}.log`);
+      let initialOffset = 0;
+      if (fs.existsSync(logFilePath)) {
+        try { initialOffset = fs.statSync(logFilePath).size; } catch (e) { initialOffset = 0; }
+      }
+      const stream = fs.createWriteStream(logFilePath, { flags: 'a', encoding: 'utf8' });
+      stream.on('error', (err) => {
+        console.warn(`[JobEventBus] Loi ghi log stream job ${jobId}:`, err.message);
+      });
+      info = { stream, offset: initialOffset, path: logFilePath };
+      this._logStreams.set(jobId, info);
+      return info;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  _closeLogStream(jobId) {
+    const info = this._logStreams.get(jobId);
+    if (info) {
+      try { info.stream.end(); } catch (e) {}
+      this._logStreams.delete(jobId);
+    }
+  }
+
+  getLogOffset(jobId) {
+    if (!jobId) return 0;
+    const info = this._logStreams.get(jobId);
+    if (info) return info.offset;
+    const logFilePath = path.join(config.LOG_DIR, `${jobId}.log`);
+    try {
+      return fs.existsSync(logFilePath) ? fs.statSync(logFilePath).size : 0;
+    } catch (e) {
+      return 0;
+    }
   }
 
   emitJobLog(jobId, payload) {
@@ -57,14 +105,21 @@ class JobEventBus extends EventEmitter {
     this.emit('log', normalized);
     if (jobId && normalized.text) {
       try {
-        const logFilePath = path.join(config.LOG_DIR, `${jobId}.log`);
-        // Prefix timestamp cho TUNG dong: khong co timestamp thi khong do duoc
-        // thoi gian thuoc tung buoc (task bd88ae0a ton ~4h, khong phan biet duoc).
         const stamped = String(normalized.text)
           .split('\n')
           .map((line) => (line.length ? `[${normalized.timestamp}] ${line}\n` : ''))
           .join('');
-        fs.appendFileSync(logFilePath, stamped, 'utf8');
+        const byteLen = Buffer.byteLength(stamped, 'utf8');
+        const info = this._ensureLogStream(jobId);
+        if (info && info.stream) {
+          info.stream.write(stamped, () => {
+            info.offset += byteLen;
+          });
+          normalized.offset = info.offset + byteLen;
+        } else {
+          const logFilePath = path.join(config.LOG_DIR, `${jobId}.log`);
+          fs.appendFileSync(logFilePath, stamped, 'utf8');
+        }
       } catch (err) {}
     }
   }
@@ -91,10 +146,12 @@ class JobEventBus extends EventEmitter {
     };
     this.emit(`job:${jobId}:status`, normalized);
     this.emit('status', normalized);
-    // Job terminal => dung watcher evidence realtime (C-3) va dong step timeline.
-    if (normalized.status && ['DONE', 'FAILED', 'CANCELLED', 'TIMED_OUT'].includes(normalized.status)) {
+    // Job terminal => dung watcher evidence realtime, dong step timeline va stream log.
+    // Dong thoi xu ly 'DELETED' (tranh ro ri watcher khi xoa job - review_round2).
+    if (normalized.status && ['DONE', 'FAILED', 'CANCELLED', 'TIMED_OUT', 'DELETED'].includes(normalized.status)) {
       try { stopEvidenceWatcher(jobId); } catch (e) {}
       try { endStepTimeline(jobId, { status: normalized.status }); } catch (e) {}
+      try { this._closeLogStream(jobId); } catch (e) {}
     }
     // Job roi trang thai KHONG chay (PENDING cho user, TO DO, ARCHIVED...) => DONG
     // doan dang mo. Neu de mo, thoi gian cho user se bi tinh nham vao "Thoi luong".
@@ -258,8 +315,61 @@ const app = express();
 // MIDDLEWARES
 // =========================================================================
 app.use(cors());
-app.use(express.json({ limit: '20mb' }));
-app.use(express.urlencoded({ extended: true, limit: '20mb' }));
+app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ extended: true, limit: '2mb' }));
+
+// Middleware nen response gzip bang node:zlib stdlib (T3.5, UC-6)
+// Chi nen JSON > 1024 bytes, bo qua route SSE (/logs/stream) de khong pha vo realtime streaming.
+app.use((req, res, next) => {
+  if (req.path.includes('/logs/stream')) {
+    return next();
+  }
+  const acceptEncoding = req.headers['accept-encoding'] || '';
+  if (!acceptEncoding.includes('gzip')) {
+    return next();
+  }
+
+  const originalSend = res.send;
+  res.send = function (body) {
+    if (res.headersSent) return originalSend.call(this, body);
+
+    let buffer = null;
+    if (typeof body === 'string') {
+      const contentType = String(res.getHeader('content-type') || '');
+      if (contentType.includes('application/json') || body.startsWith('{') || body.startsWith('[')) {
+        buffer = Buffer.from(body, 'utf8');
+      }
+    } else if (Buffer.isBuffer(body)) {
+      buffer = body;
+    } else if (body && typeof body === 'object') {
+      try {
+        const jsonStr = JSON.stringify(body);
+        buffer = Buffer.from(jsonStr, 'utf8');
+        if (!res.getHeader('content-type')) {
+          res.setHeader('content-type', 'application/json; charset=utf-8');
+        }
+      } catch (e) {
+        return originalSend.call(this, body);
+      }
+    }
+
+    if (buffer && buffer.length > 1024) {
+      try {
+        const gzipped = zlib.gzipSync(buffer);
+        res.setHeader('content-encoding', 'gzip');
+        res.setHeader('content-length', gzipped.length);
+        res.removeHeader('etag');
+        return originalSend.call(this, gzipped);
+      } catch (e) {
+        // Fallback khong nen
+      }
+    }
+
+    return originalSend.call(this, body);
+  };
+
+  next();
+});
 
 // URL Rewrite Middleware: Chuẩn hóa toàn diện /api/v1/tasks thành /api/v1/jobs
 app.use((req, res, next) => {
@@ -390,7 +500,11 @@ function hasDbShape(parsedData, filename) {
   }
   return name.includes('db') || name.includes('assert');
 }
-// ponytail: .log/.txt luôn là LOG (kể cả tên chứa "api"); .json thiếu dáng API thì giữ ở LOG, không drop.
+// Phan loai ro rang:
+// - .log / .txt -> LOG_TRACE (luon la Log, khong bao gio lan sang API)
+// - .png / .jpg / .webp / .jpeg / .svg -> UI_SCREENSHOT
+// - .sql hoac file .json chua db/assert -> DB_QUERY
+// - .json con lai -> API_TEST (luon la API test / assertions, khong lan sang Log)
 function resolveEvidenceType({ filename = '', ext = '', meta = {}, parsedData = null } = {}) {
   const name = String(filename || '').toLowerCase();
   const e = String(ext || '').toLowerCase();
@@ -401,10 +515,10 @@ function resolveEvidenceType({ filename = '', ext = '', meta = {}, parsedData = 
   if (hint === 'UI_SCREENSHOT') return 'UI_SCREENSHOT';
   if (hint === 'LOG_TRACE') return 'LOG_TRACE';
   if (hint === 'DB_QUERY') return 'DB_QUERY';
-  if (hint === 'API_TEST') return hasApiRuntimeShape(parsedData) || hasDbShape(parsedData, name) ? (hasDbShape(parsedData, name) && !hasApiRuntimeShape(parsedData) ? 'DB_QUERY' : 'API_TEST') : 'API_TEST';
+  if (hint === 'API_TEST') return 'API_TEST';
   if (hasDbShape(parsedData, name) && (e === '.json' || e === '.sql' || e === '.db' || e === '.sqlite')) return 'DB_QUERY';
-  if (e === '.json') return hasApiRuntimeShape(parsedData) ? 'API_TEST' : 'LOG_TRACE';
-  if (name.includes('api') && hasApiRuntimeShape(parsedData)) return 'API_TEST';
+  if (e === '.json') return 'API_TEST';
+  if (name.includes('api')) return 'API_TEST';
   return 'LOG_TRACE';
 }
 // Chi doc noi dung (utf8) cho file text. File binary (.xlsx/.pdf/.zip/.docx...)
@@ -486,7 +600,7 @@ function serveEvidenceFile(req, res) {
       const metaPath = path.join(taskEvidenceDir, 'metadata.json');
       let metaObj = null;
       if (fs.existsSync(metaPath)) {
-        try { metaObj = JSON.parse(fs.readFileSync(metaPath, 'utf8')); } catch (e) {}
+        try { metaObj = JSON.parse(fs.readFileSync(metaPath, 'utf8').replace(/^\uFEFF/, '')); } catch (e) {}
       }
       if (isEvidenceFileDeleted(metaObj, safeFilename)) {
         return res.status(404).send('Evidence file has been marked as deleted');
@@ -507,7 +621,7 @@ function serveEvidenceFile(req, res) {
           const candidateMeta = path.join(featuresRoot, sub, 'evidence', 'metadata.json');
           let subMeta = null;
           if (fs.existsSync(candidateMeta)) {
-            try { subMeta = JSON.parse(fs.readFileSync(candidateMeta, 'utf8')); } catch (e) {}
+            try { subMeta = JSON.parse(fs.readFileSync(candidateMeta, 'utf8').replace(/^\uFEFF/, '')); } catch (e) {}
           }
           if (isEvidenceFileDeleted(subMeta, safeFilename)) {
             continue;
@@ -646,11 +760,29 @@ function recordSystemOne(jobId, result, route) {
     prev = job && job.systemone_state ? JSON.parse(job.systemone_state) : null;
   } catch (e) { prev = null; }
   const fallback = d.fallback === true;
+  let decisionSummary = '';
+  if (route === 'triage') {
+    const comp = d.complexity || d.scope || (d.is_quick ? 'S' : (d.is_large ? 'L' : 'M'));
+    const trk = d.track || (d.is_quick ? 'quick' : 'full');
+    decisionSummary = `Triage: ${comp}/${trk}${d.confidence !== undefined ? ' (conf: ' + d.confidence + ')' : ''}`;
+  } else if (route === 'fixGate') {
+    const act = d.retry !== undefined ? (d.retry ? 'RETRY' : 'STOP') : (d.action || (d.allowRetry ? 'RETRY' : 'STOP'));
+    const pSuccess = d.p_success !== undefined ? ` (p: ${d.p_success})` : '';
+    const scope = d.fixScope ? ` [${d.fixScope}]` : '';
+    decisionSummary = `FixGate: ${act}${pSuccess}${scope}`;
+  } else if (route === 'repeatedCause') {
+    const isRep = d.repeated !== undefined ? d.repeated : (d.verdict === 'REPEATED');
+    decisionSummary = `LoopCheck: ${isRep ? 'REPEATED' : 'NEW'}`;
+  } else {
+    decisionSummary = `${route || 'decision'}: ${d.verdict || d.action || d.scope || 'OK'}`;
+  }
   const state = {
     live: !fallback,
     calls: ((prev && prev.calls) || 0) + 1,
     fallbacks: ((prev && prev.fallbacks) || 0) + (fallback ? 1 : 0),
     lastError: fallback ? ((prev && prev.lastError) || 'model khong phan hoi - dung heuristic offline') : null,
+    lastDecision: decisionSummary,
+    decisions: [...((prev && prev.decisions) || []).slice(-10), { route: route || 'decision', summary: decisionSummary, time: new Date().toISOString() }],
     model: (() => { try { return systemone.getStatus().model; } catch (e) { return null; } })(),
     updatedAt: new Date().toISOString()
   };
@@ -1192,6 +1324,8 @@ function parseSystemOneState(job) {
       calls: Number(v.calls) || 0,
       fallbacks: Number(v.fallbacks) || 0,
       lastError: v.lastError || null,
+      lastDecision: v.lastDecision || null,
+      decisions: Array.isArray(v.decisions) ? v.decisions : [],
       model: v.model || null,
       updatedAt: v.updatedAt || null
     };
@@ -1257,7 +1391,7 @@ function getTaskEvidences(job) {
   let metadata = {};
   const metadataPath = path.join(taskEvidenceDir, 'metadata.json');
   if (fs.existsSync(metadataPath)) {
-    try { metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8')); } catch(e){}
+    try { metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8').replace(/^\uFEFF/, '')); } catch(e){}
   }
   // evidenceStore hieu ca 3 shape (array / map / tests[]); getEvidenceFileMeta chi doc duoc 2.
   const storeMeta = evidenceStore.readMetadata(taskEvidenceDir);
@@ -1307,7 +1441,7 @@ function getTaskEvidences(job) {
         // File text: doc noi dung de hien thi.
         try { fileContent = fs.readFileSync(fullFilePath, 'utf8'); } catch (e) { fileContent = ''; }
         if (ext === '.json' && fileContent) {
-          try { parsedData = JSON.parse(fileContent); } catch (e) { parsedData = null; }
+          try { parsedData = JSON.parse(fileContent.replace(/^\uFEFF/, '')); } catch (e) { parsedData = null; }
         }
       } else {
         // File binary (.xlsx/.pdf/.zip...): doc nhu utf8 se ra "PK\x03\x04..."
@@ -1373,14 +1507,14 @@ function getTaskEvidences(job) {
       };
 
       if (type === 'API_TEST' && parsedData) {
-        itemObj.method = (parsedData.method || (parsedData.request && parsedData.request.method) || 'GET').toUpperCase();
-        itemObj.endpoint = parsedData.endpoint || parsedData.url || (parsedData.request && (parsedData.request.url || parsedData.request.endpoint || parsedData.request.path)) || '/api';
-        itemObj.statusCode = parsedData.statusCode || parsedData.status_code || parsedData.status || (parsedData.response && parsedData.response.status) || 200;
+        itemObj.method = (parsedData.method || parsedData.httpMethod || (parsedData.request && parsedData.request.method) || 'GET').toUpperCase();
+        itemObj.endpoint = parsedData.endpoint || parsedData.url || parsedData.baseUrl || (parsedData.request && (parsedData.request.url || parsedData.request.endpoint || parsedData.request.path)) || '/api';
+        itemObj.statusCode = parsedData.statusCode || parsedData.status_code || parsedData.httpStatus || parsedData.status || (parsedData.response && parsedData.response.status) || 200;
         itemObj.durationMs = parsedData.durationMs || parsedData.duration_ms || parsedData.latency_ms || parsedData.latency || 0;
         itemObj.request = parsedData.request || { method: itemObj.method, endpoint: itemObj.endpoint, headers: parsedData.headers, body: parsedData.body || parsedData.payload };
-        itemObj.response = parsedData.response || { status: itemObj.statusCode, headers: parsedData.responseHeaders, body: parsedData.responseBody || parsedData.data };
+        itemObj.response = parsedData.response || { status: itemObj.statusCode, headers: parsedData.responseHeaders, body: parsedData.responseBody || parsedData.data || parsedData.firstItem };
+        itemObj.parsedData = parsedData;
       }
-
       if (type === 'DB_QUERY' && parsedData) {
         itemObj.table = parsedData.table || parsedData.tableName || parsedData.target || 'Database Table';
         itemObj.query = parsedData.query || parsedData.sql || fileContent;
@@ -1451,7 +1585,13 @@ app.get('/api/v1/jobs/:id', (req, res) => {
     return res.json({
       success: true,
       job: fullJobData,
-      ...fullJobData
+      evidence: fullJobData.evidence,
+      evidences: fullJobData.evidences,
+      dual_plan: fullJobData.dual_plan,
+      dualPlan: fullJobData.dualPlan,
+      question: fullJobData.question,
+      questions: fullJobData.questions,
+      steps: fullJobData.steps
     });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
@@ -1847,11 +1987,10 @@ app.delete(['/api/v1/jobs/:id/evidence/files/:filename', '/api/v1/tasks/:id/evid
     const metadataPath = path.join(taskEvidenceDir, 'metadata.json');
     if (fs.existsSync(metadataPath)) {
       try {
-        const raw = fs.readFileSync(metadataPath, 'utf8');
+        const raw = fs.readFileSync(metadataPath, 'utf8').replace(/^\uFEFF/, '');
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed)) {
           const filtered = parsed.filter(item => {
-            if (!item) return false;
             const name = item.fileName || item.name || item.file || '';
             return name !== safeFilename && !item.filePath?.includes(safeFilename);
           });
@@ -2035,7 +2174,7 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
           let metadataObj = {};
           const metaPath = path.join(evidenceDir, 'metadata.json');
           if (fs.existsSync(metaPath)) {
-            try { metadataObj = JSON.parse(fs.readFileSync(metaPath, 'utf8')); } catch (e) {}
+            try { metadataObj = JSON.parse(fs.readFileSync(metaPath, 'utf8').replace(/^\uFEFF/, '')); } catch (e) {}
           }
   
           // Kiểm tra xem có file ảnh UI thật không
@@ -2070,7 +2209,7 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
               });
             } else {
               try {
-                metadataObj = JSON.parse(metaRaw);
+                metadataObj = JSON.parse(metaRaw.replace(/^\uFEFF/, ''));
               } catch (parseErr) {
                 metaParseError = true;
                 agentFailed = true;
@@ -2128,7 +2267,7 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
               }
               const testsArr = Array.isArray(metadataObj.tests) ? metadataObj.tests : [];
               if (testsArr.length > 0) {
-                const badTest = testsArr.some(t => !t || !/^(PASSED|PASS)$/i.test(String((t.status || t.verdict || '')).trim()) || scanStatusWeasel(t));
+                const badTest = testsArr.some(t => !t || !/^(PASSED|PASS|NOT\s*VERIFY|CAPTURED|COLLECTED|)$/i.test(String((t.status || t.verdict || '')).trim()) || scanStatusWeasel(t));
                 if (badTest) {
                   agentFailed = true;
                   jobEventBus.emitJobLog(id, {
@@ -2262,25 +2401,44 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
             for (const af of apiFiles) {
               let rawA = '';
               try { rawA = fs.readFileSync(path.join(evidenceDir, af), 'utf8'); } catch (e) { rawA = ''; }
+              rawA = rawA.replace(/^\uFEFF/, '');
               let objA = null;
               try { objA = JSON.parse(rawA); } catch (e) { objA = null; }
               const strA = (rawA || '');
               const eps = (objA && Array.isArray(objA.endpointsChecked)) ? objA.endpointsChecked : [];
-              const hasMethod = !!(objA && (objA.method || objA.request || objA.endpoint || objA.url || eps.length > 0));
-              const hasUrl = !!(objA && (objA.url || objA.endpoint || objA.request || eps.some(e => e && e.endpoint)));
-              const hasStatus = !!(objA && (objA.status || objA.responseStatus || objA.statusCode || eps.some(e => e && e.status)));
-              const hasBody = !!(objA && (objA.body || objA.data || objA.response || objA.payload || objA.result || objA.count || objA.items || objA.rows || objA.records || objA.total || eps.length > 0));
+              let hasMethod = !!(objA && (objA.method || objA.request || objA.endpoint || objA.url || objA.httpMethod || eps.length > 0));
+              let hasUrl = !!(objA && (objA.url || objA.endpoint || objA.request || objA.baseUrl || eps.some(e => e && (e.endpoint || e.url))));
+              let hasStatus = !!(objA && (objA.status || objA.responseStatus || objA.statusCode || objA.httpStatus || eps.some(e => e && (e.status || e.httpStatus || e.statusCode))));
+              let hasBody = !!(objA && (objA.body || objA.data || objA.response || objA.payload || objA.result || objA.count !== undefined || objA.items || objA.rows || objA.records || objA.total !== undefined || objA.itemCount !== undefined || objA.firstItem !== undefined || eps.length > 0));
+
+              // Ho tro cau truc long test case (nested testcases: { login: { endpoint, httpStatus }, tc15_hub: { httpStatus, httpMethod }... })
+              if (objA && typeof objA === 'object' && !Array.isArray(objA)) {
+                const subValues = Object.values(objA).filter(v => v && typeof v === 'object' && !Array.isArray(v));
+                if (subValues.length > 0) {
+                  if (!hasMethod && subValues.some(s => s.endpoint || s.url || s.method || s.httpMethod)) hasMethod = true;
+                  if (!hasUrl && (objA.baseUrl || subValues.some(s => s.endpoint || s.url || s.baseUrl))) hasUrl = true;
+                  if (!hasStatus && subValues.some(s => s.status || s.httpStatus || s.statusCode)) hasStatus = true;
+                  if (!hasBody && subValues.some(s => s.body || s.data || s.response || s.payload || s.result || s.itemCount !== undefined || s.items || s.keys || s.count !== undefined || s.firstItem !== undefined)) hasBody = true;
+                }
+              } else if (Array.isArray(objA)) {
+                if (objA.some(s => s && (s.endpoint || s.url || s.method || s.httpMethod))) hasMethod = true;
+                if (objA.some(s => s && (s.endpoint || s.url || s.baseUrl))) hasUrl = true;
+                if (objA.some(s => s && (s.status || s.httpStatus || s.statusCode))) hasStatus = true;
+                if (objA.some(s => s && (s.body || s.data || s.response || s.payload || s.result || s.itemCount !== undefined || s.items || s.firstItem !== undefined))) hasBody = true;
+              }
+
               const buildOnlyApi = /npm install|npm run build|building|compiled|vite|webpack|tsc -b/i.test(strA) && !HTTP_RUNTIME_RE.test(strA);
               if (!objA || !hasMethod || !hasUrl || !hasStatus || !hasBody || buildOnlyApi) {
                 agentFailed = true;
+                failedEvidenceFiles.add(af);
                 jobEventBus.emitJobLog(id, {
-                  text: '\n[TESTING-VERIFY] KIEM THU THAT BAI: ' + af + ' khong phai API runtime (thieu method+url day du http://localhost:PORT + path nghiep vu, responseStatus 2xx, request/response body that, hoac chi la build log). Agent phai khoi dong service that, goi API nghiep vu that va luu 02_api_verification.json day du!\n'
+                  text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: ${af} không phải API runtime (thiếu method+url đầy đủ http://localhost:PORT + path nghiệp vụ, responseStatus 2xx, request/response body thật, hoặc chỉ là build log). Agent phải khởi động service thật, gọi API nghiệp vụ thật và lưu ${af} đầy đủ!\n`
                 });
                 break;
               }
             }
           } catch (e) {}
-          // 2c3. Chan log thieu runtime service khi co api_verification
+          // 2c3. Bắt buộc có runtime log service chứng minh service thật đã được bật và phục vụ request test
           try {
             const hasApiFile = validFiles.some(f => /api/i.test(f) && f.toLowerCase().endsWith('.json'));
             if (hasApiFile) {
@@ -2293,8 +2451,13 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
               }
               if (!hasRuntime) {
                 agentFailed = true;
+                if (logFiles2.length > 0) {
+                  logFiles2.forEach(f => failedEvidenceFiles.add(f));
+                } else {
+                  failedEvidenceFiles.add('05_service_runtime.log');
+                }
                 jobEventBus.emitJobLog(id, {
-                  text: '\n[TESTING-VERIFY] KIEM THU THAT BAI: Co api_verification nhung thieu runtime log service (05_service_runtime.log phai chua listening/started/ready + dong request GET/POST/PUT/DELETE + status 2xx luc phuc vu request test). Log hien tai chi la build log. Agent phai khoi dong service that va luu runtime log!\n'
+                  text: '\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: Có file API verification nhưng thiếu runtime log service (cần log chứa listening/started/ready + dòng request GET/POST/PUT/DELETE + status 2xx lúc phục vụ request test). Log hiện tại chỉ là build log hoặc thiếu log. Agent phải khởi động service thật và lưu runtime log!\n'
                 });
               }
             }
@@ -2335,7 +2498,7 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
             const dbAssertionFiles = validFiles.filter(f => /database.*assertion|db.*assertion|reconciliation/i.test(f) && f.endsWith('.json'));
             for (const dbFile of dbAssertionFiles) {
               try {
-                const dbContent = JSON.parse(fs.readFileSync(path.join(evidenceDir, dbFile), 'utf8'));
+                const dbContent = JSON.parse(fs.readFileSync(path.join(evidenceDir, dbFile), 'utf8').replace(/^\uFEFF/, ''));
                 if (dbContent && typeof dbContent === 'object') {
                   const isDbFailed = dbContent.matched === false || dbContent.passed === false || dbContent.status === 'FAILED' || dbContent.status === 'FAIL' || dbContent.verdict === 'FAILED' || dbContent.verdict === 'FAIL';
                   const hasDiscrepancies = (Array.isArray(dbContent.discrepancies) && dbContent.discrepancies.length > 0) ||
@@ -2431,7 +2594,96 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
     } finally {
       jobEventBus.emitJobLog = originalEmit;
     }
-    return { failed: agentFailed, reasons };
+    return { failed: agentFailed, reasons, validFiles, failedEvidenceFiles };
+};
+
+/**
+ * Thẩm định evidence toàn diện kết hợp AI Vision cho hình ảnh (không dùng OCR).
+ */
+const verifyTaskEvidenceAsync = async ({ jobId, evidenceDir, featureDir, taskCode, emit, skipAiVision = false }) => {
+  const syncRes = verifyTaskEvidence({ jobId, evidenceDir, featureDir, taskCode, emit });
+  let agentFailed = syncRes.failed;
+  const reasons = [...(syncRes.reasons || [])];
+  const failedEvidenceFiles = new Set(syncRes.failedEvidenceFiles || []);
+  const validFiles = syncRes.validFiles || [];
+
+  if (skipAiVision) {
+    return { failed: agentFailed, reasons, failedEvidenceFiles };
+  }
+
+  // Lọc các file ảnh UI để thẩm định bằng AI Vision
+  const uiImageFiles = validFiles.filter(f => {
+    const lower = String(f).toLowerCase();
+    return lower.endsWith('.png') || lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.webp');
+  });
+
+  if (uiImageFiles.length > 0) {
+    jobEventBus.emitJobLog(jobId, {
+      text: `\n[VERIFY-AI-VISION] 👁️ Bắt đầu thẩm định ${uiImageFiles.length} hình ảnh bằng AI Vision (không dùng OCR)...\n`
+    });
+
+    let storeMeta = { records: [] };
+    try {
+      storeMeta = evidenceStore.readMetadata(evidenceDir);
+    } catch (e) {}
+    const metaRecords = storeMeta.records || [];
+
+    for (const img of uiImageFiles) {
+      const fullImgPath = path.join(evidenceDir, img);
+      const rec = metaRecords.find(r => r.fileName === img || r.name === img || (r.filePath && r.filePath.includes(img))) || {};
+      const expectedCriteria = rec.passCriteria || rec.pass_criteria || rec.expected || rec.description || '';
+      const testCaseName = rec.testCase || rec.caseName || rec.stepName || img;
+
+      try {
+        const visionResult = await verifyImageWithAI({
+          imagePath: fullImgPath,
+          expectedCriteria,
+          testCaseName,
+          stepName: rec.stepName || ''
+        });
+
+        if (!visionResult.passed) {
+          agentFailed = true;
+          failedEvidenceFiles.add(img);
+          const failMsg = `Ảnh ${img} không đạt thẩm định AI Vision: ${visionResult.reason}`;
+          if (!reasons.includes(failMsg)) reasons.push(failMsg);
+          jobEventBus.emitJobLog(jobId, {
+            text: `[VERIFY-AI-VISION] ❌ FAILED: ${img} — ${visionResult.reason}\n${visionResult.details ? `  (Chi tiết: ${visionResult.details})\n` : ''}`
+          });
+        } else {
+          jobEventBus.emitJobLog(jobId, {
+            text: `[VERIFY-AI-VISION] ✅ PASS: ${img} — ${visionResult.reason}\n`
+          });
+        }
+      } catch (vErr) {
+        agentFailed = true;
+        failedEvidenceFiles.add(img);
+        const failMsg = `Lỗi kiểm tra AI Vision cho ${img}: ${vErr.message}`;
+        if (!reasons.includes(failMsg)) reasons.push(failMsg);
+        jobEventBus.emitJobLog(jobId, {
+          text: `[VERIFY-AI-VISION] ❌ FAILED (fail-closed): ${img} — ${failMsg}\n`
+        });
+      }
+    }
+
+    // Cập nhật lại statusMap trong metadata.json sau khi có kết quả AI Vision
+    try {
+      const statusMap = {};
+      const allFiles = fs.readdirSync(evidenceDir).filter(f => f !== 'metadata.json' && !f.startsWith('.'));
+      for (const f of allFiles) {
+        if (failedEvidenceFiles.has(f) || failedEvidenceFiles.has(f.toLowerCase())) {
+          statusMap[f] = evidenceStore.STATUS.FAILED;
+        } else {
+          statusMap[f] = evidenceStore.STATUS.PASS;
+        }
+      }
+      if (Object.keys(statusMap).length > 0) {
+        evidenceStore.setStatuses(evidenceDir, statusMap);
+      }
+    } catch (e) {}
+  }
+
+  return { failed: agentFailed, reasons, failedEvidenceFiles };
 };
 
 // === Evidence realtime (TASK-PIPELINE-FIX C-1..C-3) ===
@@ -2626,9 +2878,16 @@ function computeJobRuntimeMs(job, steps) {
  */
 const scheduleNextStep = (id, opts, delayMs = 100) => {
   const timer = setTimeout(() => {
-    executeStep(id, opts).catch((__e) => { console.error('[EXECUTE-STEP-NEXT-ERR]', (__e && __e.message) || __e); });
+    executeStep(id, opts).catch((__e) => {
+      console.error('[EXECUTE-STEP-NEXT-ERR]', (__e && __e.message) || __e);
+      try {
+        const errMsg = (__e && __e.message) || String(__e);
+        db.updateJob(id, { status: 'FAILED', error_message: errMsg });
+        jobEventBus.emitJobStatus(id, { status: 'FAILED' });
+        jobEventBus.emitJobError(id, { error: errMsg });
+      } catch (errDb) {}
+    });
   }, delayMs);
-  if (timer && typeof timer.unref === 'function') timer.unref();
   return timer;
 };
 const executeStep = async (id, opts) => {
@@ -3271,11 +3530,10 @@ const executeStep = async (id, opts) => {
           jobEventBus.emitJobError(id, { error: msg });
           return;
         }
-        jobEventBus.emitJobLog(id, { text: `\n[TESTING] Agent kiem thu bao loi ('+failReasonText+'), chuyen sang [FIXING]...` });
-        db.updateJob(id, { status: 'FIXING', current_step: 'FIXING', runner: fixAgentAfterTest, error_message: 'Kiem thu that bai ('+failReasonText+').', gate_result: failGate });
+        jobEventBus.emitJobLog(id, { text: `\n[TESTING] Agent kiểm thử báo lỗi ('+failReasonText+'), chuyển sang [FIXING]...` });
+        db.updateJob(id, { status: 'FIXING', current_step: 'FIXING', had_fixing: 1, runner: fixAgentAfterTest, error_message: 'Kiểm thử thất bại ('+failReasonText+').', gate_result: failGate });
         jobEventBus.emitJobStatus(id, { status: 'FIXING', runner: fixAgentAfterTest });
         scheduleNextStep(id, opts, 100);
-        return;
       }
       jobEventBus.emitJobLog(id, { text: `\n[TESTING] Hoan tat kiem thu qua Agent, chuyen sang [VERIFY] de doi soat evidence...` });
       const verifyAgent = 'verify-gate';
@@ -3292,7 +3550,7 @@ const executeStep = async (id, opts) => {
       if (checkVerify && checkVerify.status === 'CANCELLED') return;
       // PreJudge: BO - chi ghi log, khong quyet dinh gi (verifyTaskEvidence la nguon su that).
       // Ton 1 network call moi vong FIXING ma khong doi hanh vi gi => ton tai, cham.
-      const { failed: verifyFailed, reasons: verifyReasons } = verifyTaskEvidence({
+      const { failed: verifyFailed, reasons: verifyReasons } = await verifyTaskEvidenceAsync({
         jobId: id, evidenceDir, featureDir, taskCode,
         emit: (text) => jobEventBus.emitJobLog(id, { text })
       });
@@ -3303,10 +3561,9 @@ const executeStep = async (id, opts) => {
           : 'Đối soát evidence thất bại (VERIFY).';
         const failGate = { passed: false, error: reasonText, timeout: false, decided_at: new Date().toISOString(), mapped_from: 'VERIFY', source: 'pipeline-verify-evidence' };
         jobEventBus.emitJobLog(id, { text: `\n[VERIFY] ❌ Đối soát evidence thất bại: ${reasonText}. Chuyển sang FIXING với 🤖 Agent: ${fixAgent}.\n` });
-        db.updateJob(id, { status: 'FIXING', current_step: 'FIXING', runner: fixAgent, error_message: reasonText, gate_result: failGate });
+        db.updateJob(id, { status: 'FIXING', current_step: 'FIXING', had_fixing: 1, runner: fixAgent, error_message: reasonText, gate_result: failGate });
         jobEventBus.emitJobStatus(id, { status: 'FIXING', runner: fixAgent });
         scheduleNextStep(id, opts, 100);
-        return;
       }
       // Lưu path gọn nhẹ vào SQLite DB (chỉ lưu đường dẫn, KHÔNG lưu payload lớn)
       const relEvidencePath = `docs/features/${taskCode}/evidence`;
@@ -3460,9 +3717,10 @@ const executeStep = async (id, opts) => {
         }
       }
 
-      // Quay lại TESTING
-      db.updateJob(id, { status: 'TESTING', current_step: 'TESTING' });
-      jobEventBus.emitJobStatus(id, { status: 'TESTING' });
+      // Đã sửa lỗi xong, chuyển sang VERIFY để đối soát lại
+      jobEventBus.emitJobLog(id, { text: `\n[FIXING] Hoàn tất sửa lỗi và cập nhật bằng chứng, chuyển sang [VERIFY] để đối soát lại...\n` });
+      db.updateJob(id, { status: 'VERIFY', current_step: 'VERIFY', runner: 'verify-gate' });
+      jobEventBus.emitJobStatus(id, { status: 'VERIFY', runner: 'verify-gate' });
       scheduleNextStep(id, opts, 100);
       return;
     }
@@ -3995,7 +4253,6 @@ app.post('/api/v1/jobs/:id/answer', (req, res) => {
       questionId: targetQuestion ? targetQuestion.id : null
     });
 
-    jobEventBus.emitJobStatus(id, { status: 'IMPLEMENT' });
 
     jobEventBus.emitJobLog(id, {
       text: `\n[CLARIFICATION] Đã nhận câu trả lời từ người dùng: ${typeof finalAnswer === 'object' ? JSON.stringify(finalAnswer) : finalAnswer}\n` +
@@ -4058,6 +4315,38 @@ app.post(['/api/v1/jobs/:id/approve', '/api/v1/tasks/:id/approve'], (req, res) =
     });
 
     return res.json({ success: true, message: 'Đã duyệt kế hoạch, bắt đầu triển khai mã nguồn', status: 'IMPLEMENT' });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * POST /api/v1/jobs/:id/verify và POST /api/v1/tasks/:id/verify
+ * Kích hoạt lại bước đối soát evidence (VERIFY) độc lập
+ */
+app.post(['/api/v1/jobs/:id/verify', '/api/v1/tasks/:id/verify'], (req, res) => {
+  try {
+    const { id } = req.params;
+    const job = db.getJobById(id);
+    if (!job) {
+      return res.status(404).json({ success: false, error: 'Job not found' });
+    }
+
+    db.updateJob(id, { status: 'VERIFY', current_step: 'VERIFY', runner: 'verify-gate' });
+    jobEventBus.emitJobStatus(id, { status: 'VERIFY', runner: 'verify-gate' });
+    jobEventBus.emitJobLog(id, { text: `\n[VERIFY] Kích hoạt đối soát lại toàn bộ evidence...\n` });
+
+    setImmediate(() => {
+      executeStep(id).catch(err => {
+        console.error(`[EXECUTE-STEP-ERR] Lỗi khi chạy VERIFY cho Job ${id}:`, err);
+      });
+    });
+
+    return res.json({
+      success: true,
+      message: 'Đã kích hoạt bước đối soát evidence (VERIFY)',
+      job: db.getJobById(id)
+    });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
   }
@@ -4127,6 +4416,9 @@ function handleJobStatus(req, res) {
     const gate = resolveJobGate(status, req.body || {}, job);
     const nowIso = new Date().toISOString();
     const statusUpdates = { status: gate.finalStatus, gate_result: gate.gateResult, updated_at: nowIso };
+    if (['PLANNING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING'].includes((gate.finalStatus || '').toUpperCase())) {
+      statusUpdates.current_step = gate.finalStatus;
+    }
     if (['DONE', 'CANCELLED', 'FAILED'].includes((gate.finalStatus || '').toUpperCase())) statusUpdates.completed_at = nowIso;
     if ((gate.finalStatus || '').toUpperCase() === 'DONE') statusUpdates.error_message = null;
     else if (req.body && req.body.error_message && typeof req.body.error_message === 'string') statusUpdates.error_message = req.body.error_message;
@@ -4142,9 +4434,9 @@ function handleJobStatus(req, res) {
       return res.json({ success: true, job: updatedJob, gate_result: gate.gateResult, note: gate.reason });
     }
     
-    // Nếu status là trạng thái cần chạy thì đi qua TaskQueue để tôn trọng Workspace Lock.
-    // Không gọi executeStep trực tiếp để tránh 2 job cùng workspace chạy đè nhau.
-    if (['PLANNING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING'].includes((gate.finalStatus || '').toUpperCase())) {
+    // Nếu status là trạng thái cần chạy thì kiểm tra hàng đợi hoặc kích hoạt executeStep trực tiếp
+    const targetStatus = (gate.finalStatus || '').toUpperCase();
+    if (['PLANNING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING'].includes(targetStatus)) {
       if (!taskQueue.isJobEnqueuedOrRunning(targetId)) {
         const freshJob = db.getJobById(targetId) || updatedJob || job;
         const probeJob = freshJob || job;
@@ -4157,9 +4449,38 @@ function handleJobStatus(req, res) {
           });
         }
         taskQueue.enqueue(probeJob, (queuedJob, queueOpts) => runJobPipeline(targetId, queueOpts), (probeJob && probeJob.priority) || (job && job.priority) || 0);
+      } else if (taskQueue.runningJobs.has(targetId)) {
+        // Job đang giữ lock chạy (runningJobs)
+        const priorStatus = ((job && job.status) || '').toUpperCase();
+        if (priorStatus === 'PENDING') {
+          // Task đang ở PENDING (executeStep đã return chờ user): kích hoạt ngay executeStep để thực thi bước mới
+          setImmediate(() => {
+            executeStep(targetId).catch((err) => {
+              console.error(`[EXECUTE-STEP-ERR] Lỗi khi chạy bước ${targetStatus} cho Job ${targetId}:`, err);
+            });
+          });
+        } else if (priorStatus !== targetStatus) {
+          // Task đang chạy một bước khác và user đổi bước mid-flight: kill tiến trình cũ trước khi chạy bước mới
+          try {
+            const { defaultProcessManager } = require('./execution/processManager');
+            if (defaultProcessManager) {
+              defaultProcessManager.killProcessesByJobId(targetId).catch(() => {});
+            }
+          } catch (e) {}
+          setImmediate(() => {
+            executeStep(targetId).catch((err) => {
+              console.error(`[EXECUTE-STEP-ERR] Lỗi khi chuyển sang bước ${targetStatus} cho Job ${targetId}:`, err);
+            });
+          });
+        }
+      }
+      // Nếu job chỉ đang nằm trong taskQueue.queue (chờ workspace lock): giữ nguyên trong hàng đợi để tôn trọng lock
+    } else if (['TO DO', 'TO_DO', 'CANCELLED', 'DONE', 'FAILED'].includes(targetStatus)) {
+      // Nếu chuyển về trạng thái không chạy, giải phóng job khỏi taskQueue nếu đang enqueued hoặc running
+      if (taskQueue.isJobEnqueuedOrRunning(targetId)) {
+        taskQueue.cancel(targetId);
       }
     }
-
     return res.json({ success: true, job: updatedJob, gate_result: gate.gateResult });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
@@ -4237,10 +4558,11 @@ app.get('/api/v1/jobs/:id/logs/stream', (req, res) => {
   if (typeof res.flush === 'function') {
     res.flush();
   }
-  const sendEvent = (eventType, payload) => {
+  const sendEvent = (eventType, payload, eventId = null) => {
     try {
       const dataStr = typeof payload === 'object' ? JSON.stringify(payload) : String(payload);
-      res.write(`event: ${eventType}\ndata: ${dataStr}\n\n`);
+      const idPrefix = (eventId !== null && eventId !== undefined) ? `id: ${eventId}\n` : '';
+      res.write(`${idPrefix}event: ${eventType}\ndata: ${dataStr}\n\n`);
       if (typeof res.flush === 'function') {
         res.flush();
       }
@@ -4307,25 +4629,92 @@ app.get('/api/v1/jobs/:id/logs/stream', (req, res) => {
     updatedAt: soState ? soState.updatedAt : null
   });
 
-  // 3. Đọc log đã lưu trước đó nếu có file log
+  // 3. Đọc log snapshot giới hạn (tail tối đa 256 KB) theo byte offset.
+  // Khong doc toan bo file sync (file 25.8MB tung lam server block 178ms va client freeze).
   const logFilePath = path.join(config.LOG_DIR, `${id}.log`);
   if (fs.existsSync(logFilePath)) {
-    try {
-      const savedLogs = fs.readFileSync(logFilePath, 'utf8');
-      if (savedLogs) {
-        sendEvent('log', {
-          type: 'log',
-          jobId: id,
-          text: savedLogs
-        });
+    (async () => {
+      let fileHandle = null;
+      try {
+        const stat = await fs.promises.stat(logFilePath);
+        const totalBytes = stat.size;
+        if (totalBytes === 0) return;
+
+        // Parse offset client yeu cau (query ?from= hoac header Last-Event-ID)
+        const rawFrom = req.query.from !== undefined ? req.query.from : req.headers['last-event-id'];
+        let clientOffset = rawFrom !== undefined ? parseInt(String(rawFrom), 10) : -1;
+        // Neu clientOffset >= totalBytes -> client da o cuoi file (khong can gui lai tail snapshot)
+        if (clientOffset >= totalBytes) {
+          return;
+        }
+        if (!Number.isFinite(clientOffset) || clientOffset < 0) {
+          clientOffset = -1; // mac dinh: ket noi moi chua co offset -> lay tail snapshot toi da 256KB
+        }
+
+        const MAX_TAIL_BYTES = 256 * 1024; // 256 KB
+        let readStart = 0;
+        let readLength = 0;
+        let isTailSnapshot = false;
+
+        if (clientOffset === -1) {
+          // Client moi: chi lay 256 KB cuoi
+          if (totalBytes > MAX_TAIL_BYTES) {
+            readStart = totalBytes - MAX_TAIL_BYTES;
+            isTailSnapshot = true;
+          } else {
+            readStart = 0;
+          }
+          readLength = totalBytes - readStart;
+        } else if (clientOffset < totalBytes) {
+          // Client reconnect: doc tu offset den cuoi (gioi han 256KB moi lan)
+          readStart = clientOffset;
+          readLength = Math.min(MAX_TAIL_BYTES, totalBytes - readStart);
+        } else {
+          // Client da o cuoi file -> khong can doc gi
+          return;
+        }
+
+        if (readLength <= 0) return;
+
+        fileHandle = await fs.promises.open(logFilePath, 'r');
+        const buffer = Buffer.alloc(readLength);
+        await fileHandle.read(buffer, 0, readLength, readStart);
+        let text = buffer.toString('utf8');
+
+        // Neu la tail snapshot giua chung, bo qua dong dau neu bi cat doi
+        if (isTailSnapshot) {
+          const firstNl = text.indexOf('\n');
+          if (firstNl !== -1 && firstNl < 500) {
+            text = text.slice(firstNl + 1);
+          }
+        }
+
+        if (text) {
+          const endOffset = readStart + readLength;
+          sendEvent('log', {
+            type: 'log',
+            jobId: id,
+            text,
+            offset: endOffset,
+            tailOnly: isTailSnapshot,
+            totalBytes
+          }, endOffset);
+        }
+      } catch (e) {
+        // Bo qua loi doc log file
+      } finally {
+        if (fileHandle) {
+          try { await fileHandle.close(); } catch (e) {}
+        }
       }
-    } catch (e) {
-      // Bỏ qua lỗi đọc file
-    }
+    })();
   }
 
   // 4. Đăng ký listener vào JobEventBus
-  const logListener = (data) => sendEvent('log', data);
+  const logListener = (data) => {
+    const eventId = data && data.offset !== undefined ? data.offset : null;
+    sendEvent('log', data, eventId);
+  };
   const stepListener = (data) => sendEvent('step', data);
   const statusListener = (data) => sendEvent('status', data);
   const questionListener = (data) => sendEvent('question', data);
@@ -4391,6 +4780,113 @@ app.get('/api/v1/jobs/:id/logs/stream', (req, res) => {
   });
 });
 
+/**
+ * GET /api/v1/jobs/:id/logs
+ * Doc lich su log phan trang theo byte offset va limit (UC-2, T1.4).
+ * Query params:
+ *   - offset: vi tri byte bat dau (mac dinh 0)
+ *   - limit: so byte toi da doc (mac dinh 65536 = 64KB, toi da 262144 = 256KB)
+ *   - direction: 'tail' (doc nguoc tu cuoi ve) | 'head' (tu dau di) - mac dinh 'head'
+ */
+app.get('/api/v1/jobs/:id/logs', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const job = db.getJobById(id);
+    if (!job) {
+      return res.status(404).json({ success: false, error: `Job with ID '${id}' not found` });
+    }
+    const logFilePath = path.join(config.LOG_DIR, `${id}.log`);
+    if (!fs.existsSync(logFilePath)) {
+      return res.json({
+        success: true,
+        jobId: id,
+        text: '',
+        offset: 0,
+        limit: 0,
+        totalBytes: 0,
+        hasMore: false
+      });
+    }
+
+    const stat = await fs.promises.stat(logFilePath);
+    const totalBytes = stat.size;
+    if (totalBytes === 0) {
+      return res.json({
+        success: true,
+        jobId: id,
+        text: '',
+        offset: 0,
+        limit: 0,
+        totalBytes: 0,
+        hasMore: false
+      });
+    }
+
+    const maxLimit = 256 * 1024;
+    const defaultLimit = 64 * 1024;
+    let limit = req.query.limit !== undefined ? parseInt(String(req.query.limit), 10) : defaultLimit;
+    if (!Number.isFinite(limit) || limit <= 0) limit = defaultLimit;
+    if (limit > maxLimit) limit = maxLimit;
+
+    let offset = req.query.offset !== undefined ? parseInt(String(req.query.offset), 10) : 0;
+    if (!Number.isFinite(offset) || offset < 0) offset = 0;
+    if (offset > totalBytes) offset = totalBytes;
+
+    const readLength = Math.min(limit, totalBytes - offset);
+    if (readLength <= 0) {
+      return res.json({
+        success: true,
+        jobId: id,
+        text: '',
+        offset,
+        limit,
+        totalBytes,
+        hasMore: false
+      });
+    }
+
+    const fileHandle = await fs.promises.open(logFilePath, 'r');
+    try {
+      const buffer = Buffer.alloc(readLength);
+      await fileHandle.read(buffer, 0, readLength, offset);
+      const text = buffer.toString('utf8');
+      const nextOffset = offset + readLength;
+      return res.json({
+        success: true,
+        jobId: id,
+        text,
+        offset,
+        limit: readLength,
+        nextOffset,
+        totalBytes,
+        hasMore: nextOffset < totalBytes
+      });
+    } finally {
+      try { await fileHandle.close(); } catch (e) {}
+    }
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * DELETE /api/v1/jobs/:id/logs
+ * Xoa sach toan bo file log tren may chu cua 1 task (giai phong dia, tranh nang).
+ */
+app.delete(['/api/v1/jobs/:id/logs', '/api/v1/tasks/:id/logs'], (req, res) => {
+  try {
+    const { id } = req.params;
+    jobEventBus._closeLogStream(id);
+    const logFilePath = path.join(config.LOG_DIR, `${id}.log`);
+    if (fs.existsSync(logFilePath)) {
+      fs.writeFileSync(logFilePath, '', 'utf8');
+    }
+    return res.json({ success: true, message: 'Đã xóa toàn bộ log của task' });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // Catch-all middleware cho SPA Dashboard (tương thích Express 5)
 app.use((req, res, next) => {
   if (req.method !== 'GET') {
@@ -4422,6 +4918,7 @@ module.exports = {
   app,
   jobEventBus,
   verifyTaskEvidence,
+  verifyTaskEvidenceAsync,
   resolveEvidenceType,
   normalizeEvidenceTypeHint,
   hasApiRuntimeShape,
