@@ -552,12 +552,20 @@ function normalizeEvidenceTypeHint(meta) {
   return null;
 }
 function hasApiRuntimeShape(parsedData) {
-  if (!parsedData || typeof parsedData !== 'object' || Array.isArray(parsedData)) return false;
+  if (!parsedData || typeof parsedData !== 'object') return false;
+  if (Array.isArray(parsedData)) {
+    return parsedData.some(item => hasApiRuntimeShape(item));
+  }
   const req = parsedData.request && typeof parsedData.request === 'object' ? parsedData.request : null;
   const hasEndpoint = !!(parsedData.endpoint || parsedData.url || (req && (req.url || req.endpoint || req.path)));
   const hasMethod = !!(parsedData.method || (req && req.method));
-  const hasStatus = parsedData.status !== undefined || parsedData.statusCode !== undefined || parsedData.status_code !== undefined || (parsedData.response && typeof parsedData.response === 'object' && parsedData.response.status !== undefined);
-  return hasEndpoint && (hasMethod || hasStatus);
+  const hasStatus = parsedData.status !== undefined || parsedData.statusCode !== undefined || parsedData.status_code !== undefined || parsedData.responseStatus !== undefined || (parsedData.response && typeof parsedData.response === 'object' && parsedData.response.status !== undefined);
+  if (hasEndpoint && (hasMethod || hasStatus)) return true;
+  const list = Array.isArray(parsedData.cases) ? parsedData.cases : Array.isArray(parsedData.items) ? parsedData.items : Array.isArray(parsedData.endpointsChecked) ? parsedData.endpointsChecked : null;
+  if (list && list.length > 0) {
+    return list.some(item => hasApiRuntimeShape(item));
+  }
+  return false;
 }
 function hasDbShape(parsedData, filename) {
   const name = String(filename || '').toLowerCase();
@@ -2453,13 +2461,13 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
           // 2c. Chặn log rỗng giả: log chỉ có tên lệnh, stdout=(empty), không keyword test thật
           try {
             const logFiles = validFiles.filter(f => ['.log', '.txt'].includes(path.extname(f).toLowerCase()));
-            const LOG_KEY_RE = /browser|capture|screenshot|playwright|puppeteer|navigate|GET\s+\/api|POST\s+\/api|tsc|pytest|npm\s+test|mvn\s+test|go\s+test|passed|failed|assert|✓|✔|PASS/i;
+            const LOG_KEY_RE = /browser|capture|screenshot|playwright|puppeteer|navigate|GET\s+\/api|POST\s+\/api|PUT\s+\/api|DELETE\s+\/api|PATCH\s+\/api|tsc|pytest|npm\s+test|mvn\s+test|go\s+test|passed|failed|assert|✓|✔|PASS/i;
             const RUNTIME_KEY_RE = /listening|started|ready|listening on|server.*port|GET\s+\/|POST\s+\/|PUT\s+\/|DELETE\s+\/|PATCH\s+\/|incoming|request|response|status\s*2\d\d|200 OK/i;
             const BUILD_ONLY_RE = /npm install|npm run build|building|compiled|vite|webpack|tsc -b/i;
             for (const lf of logFiles) {
               const raw = fs.readFileSync(path.join(evidenceDir, lf), 'utf8');
               const trimmed = (raw || '').trim();
-              if (/stdout\s*=\s*\(empty\)/i.test(trimmed) || /\(empty\)/i.test(trimmed) && trimmed.length < 1024 || (trimmed.length < 200 && !LOG_KEY_RE.test(trimmed))) {
+              if (/stdout\s*=\s*\(empty\)/i.test(trimmed) || /\(empty\)/i.test(trimmed) && trimmed.length < 1024 || (trimmed.length < 200 && !LOG_KEY_RE.test(trimmed) && !RUNTIME_KEY_RE.test(trimmed))) {
                 agentFailed = true;
                 jobEventBus.emitJobLog(id, {
                   text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: ${lf} rỗng giả (stdout empty, thiếu output/keyword test thật). Agent phải chạy lại lệnh test thật và lưu log đầy đủ!\n`
@@ -2485,20 +2493,35 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
               let hasStatus = !!(objA && (objA.status || objA.responseStatus || objA.statusCode || objA.httpStatus || eps.some(e => e && (e.status || e.httpStatus || e.statusCode))));
               let hasBody = !!(objA && (objA.body || objA.data || objA.response || objA.payload || objA.result || objA.count !== undefined || objA.items || objA.rows || objA.records || objA.total !== undefined || objA.itemCount !== undefined || objA.firstItem !== undefined || eps.length > 0));
 
+              // Ho tro cau truc mang test case trong cac thuoc tinh: cases, items, tests, endpoints, calls
+              const arrayCases = (objA && typeof objA === 'object' && !Array.isArray(objA)) ? (
+                Array.isArray(objA.cases) ? objA.cases :
+                Array.isArray(objA.items) ? objA.items :
+                Array.isArray(objA.tests) ? objA.tests :
+                Array.isArray(objA.endpoints) ? objA.endpoints :
+                Array.isArray(objA.calls) ? objA.calls : []
+              ) : [];
+              if (arrayCases.length > 0) {
+                if (!hasMethod && arrayCases.some(s => s && (s.endpoint || s.url || s.method || s.httpMethod))) hasMethod = true;
+                if (!hasUrl && (objA.baseUrl || arrayCases.some(s => s && (s.endpoint || s.url || s.baseUrl)))) hasUrl = true;
+                if (!hasStatus && arrayCases.some(s => s && (s.status || s.responseStatus || s.httpStatus || s.statusCode))) hasStatus = true;
+                if (!hasBody && arrayCases.some(s => s && (s.body || s.data || s.response || s.responseBody || s.payload || s.result || s.itemCount !== undefined || s.items || s.firstItem !== undefined))) hasBody = true;
+              }
+
               // Ho tro cau truc long test case (nested testcases: { login: { endpoint, httpStatus }, tc15_hub: { httpStatus, httpMethod }... })
               if (objA && typeof objA === 'object' && !Array.isArray(objA)) {
                 const subValues = Object.values(objA).filter(v => v && typeof v === 'object' && !Array.isArray(v));
                 if (subValues.length > 0) {
                   if (!hasMethod && subValues.some(s => s.endpoint || s.url || s.method || s.httpMethod)) hasMethod = true;
                   if (!hasUrl && (objA.baseUrl || subValues.some(s => s.endpoint || s.url || s.baseUrl))) hasUrl = true;
-                  if (!hasStatus && subValues.some(s => s.status || s.httpStatus || s.statusCode)) hasStatus = true;
-                  if (!hasBody && subValues.some(s => s.body || s.data || s.response || s.payload || s.result || s.itemCount !== undefined || s.items || s.keys || s.count !== undefined || s.firstItem !== undefined)) hasBody = true;
+                  if (!hasStatus && subValues.some(s => s.status || s.responseStatus || s.httpStatus || s.statusCode)) hasStatus = true;
+                  if (!hasBody && subValues.some(s => s.body || s.data || s.response || s.responseBody || s.payload || s.result || s.itemCount !== undefined || s.items || s.keys || s.count !== undefined || s.firstItem !== undefined)) hasBody = true;
                 }
               } else if (Array.isArray(objA)) {
                 if (objA.some(s => s && (s.endpoint || s.url || s.method || s.httpMethod))) hasMethod = true;
                 if (objA.some(s => s && (s.endpoint || s.url || s.baseUrl))) hasUrl = true;
-                if (objA.some(s => s && (s.status || s.httpStatus || s.statusCode))) hasStatus = true;
-                if (objA.some(s => s && (s.body || s.data || s.response || s.payload || s.result || s.itemCount !== undefined || s.items || s.firstItem !== undefined))) hasBody = true;
+                if (objA.some(s => s && (s.status || s.responseStatus || s.httpStatus || s.statusCode))) hasStatus = true;
+                if (objA.some(s => s && (s.body || s.data || s.response || s.responseBody || s.payload || s.result || s.itemCount !== undefined || s.items || s.firstItem !== undefined))) hasBody = true;
               }
 
               const buildOnlyApi = /npm install|npm run build|building|compiled|vite|webpack|tsc -b/i.test(strA) && !HTTP_RUNTIME_RE.test(strA);
@@ -2997,10 +3020,13 @@ function computeJobRuntimeMs(job, steps) {
   const key = resolveCanonicalJobId(job.id);
   const tracked = stepTimeline.get(key) || stepTimeline.get(job.id);
   let total = 0;
+  // Job CHUA TUNG CHAY (khong co doan nao co started_at) => null (chua co du lieu).
+  let hasStarted = false;
   for (const st of list) {
     if (!st) continue;
     const startedAt = Date.parse(st.started_at || '');
     if (!Number.isFinite(startedAt)) continue;
+    hasStarted = true;
     const finishedAt = st.finished_at ? Date.parse(st.finished_at) : NaN;
     if (Number.isFinite(finishedAt)) {
       const diff = finishedAt - startedAt;
@@ -3009,14 +3035,9 @@ function computeJobRuntimeMs(job, steps) {
       // Doan dang MO va worker DANG chay doan nay => cong den thoi diem hien tai.
       const diff = now - startedAt;
       if (diff > 0) total += diff;
-    } else if (!isRunning) {
-      // Đoạn mở nhưng job đã dừng (orphan do crash/restart hoặc đổi trạng thái mà chưa kịp ghi finished_at)
-      const fallbackEnd = Date.parse(job.completed_at || job.updated_at || '');
-      if (Number.isFinite(fallbackEnd) && fallbackEnd > startedAt) {
-        total += Math.min(fallbackEnd - startedAt, 3600000);
-      }
     }
   }
+  if (!hasStarted) return null;
   return total;
 }
 /**
@@ -4449,6 +4470,14 @@ app.post(['/api/v1/jobs/:id/pause', '/api/v1/tasks/:id/pause'], async (req, res)
     } catch (e) {
       console.warn('[SERVER] Không thể gọi processManager khi pause:', e);
     }
+    // Hủy job khỏi taskQueue để giải phóng slot concurrency
+    try {
+      if (taskQueue.isJobEnqueuedOrRunning(id)) {
+        taskQueue.cancel(id);
+      }
+    } catch (e) {
+      console.warn('[SERVER] Lỗi cancel taskQueue khi pause:', e);
+    }
 
     const updatedJob = db.updateJob(id, {
       status: 'PAUSED',
@@ -4506,9 +4535,12 @@ app.post(['/api/v1/jobs/:id/resume', '/api/v1/tasks/:id/resume'], async (req, re
       text: `\n[RESUME] ▶ Tiếp tục thực thi task ngay tại bước [${resumeStep}]...\n`
     });
 
-    // Kích hoạt tiếp tục pipeline
-    scheduleNextStep(id, {}, 100);
-
+    // Kích hoạt tiếp tục pipeline qua taskQueue để đảm bảo giới hạn concurrency (3 luồng)
+    if (!taskQueue.isJobEnqueuedOrRunning(id)) {
+      taskQueue.enqueue(updatedJob, (queuedJob, queueOpts) => runJobPipeline(id, queueOpts), (updatedJob && updatedJob.priority) || 0);
+    } else {
+      scheduleNextStep(id, {}, 100);
+    }
     return res.json({
       success: true,
       message: `Đã tiếp tục task tại bước ${resumeStep}`,

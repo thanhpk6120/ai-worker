@@ -62,4 +62,24 @@ describe('Runtime Evidence Gate (build log vs runtime log)', () => {
     const r = verifyTaskEvidence({ jobId: 'rt-tc15-ok', evidenceDir: edir, featureDir: fdir, taskCode: 'RT-01', emit: () => {} });
     assert.strictEqual(r.failed, false, 'Phai chap nhan httpStatus + firstItem + itemCount');
   });
+  it('6. API json co mang cases chua method, endpoint, responseStatus, responseBody -> PASS khi runtime log hop le', () => {
+    const casesPayload = JSON.stringify({
+      testSuite: 'API_VERIFICATION_EVIDENCE',
+      baseUrl: 'http://localhost:6012',
+      cases: [
+        {
+          testId: 'TC-01',
+          method: 'PUT',
+          endpoint: '/api/v1/jobs/test-1',
+          responseStatus: 200,
+          responseBody: { success: true }
+        }
+      ]
+    });
+    fss.writeFileSync(path.join(edir, '02_api_verification.json'), casesPayload, 'utf8');
+    fss.writeFileSync(path.join(edir, '05_service_runtime.log'), 'Server listening on port 6012\nPUT /api/v1/jobs/test-1 200 OK\n');
+    fss.writeFileSync(path.join(edir, 'metadata.json'), JSON.stringify(meta([{ id: 'TC-API-01', name: 'API', status: 'PASSED', evidence: ['02_api_verification.json', '05_service_runtime.log'], note: 'API 200' }])));
+    const r = verifyTaskEvidence({ jobId: 'rt-cases-array-ok', evidenceDir: edir, featureDir: fdir, taskCode: 'RT-01', emit: () => {} });
+    assert.strictEqual(r.failed, false, 'Phai chap nhan cau truc mang cases voi method va responseStatus');
+  });
 });
