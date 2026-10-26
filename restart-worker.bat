@@ -6,40 +6,27 @@ set PORT=3000
 set LOGFILE=logs\server-bg.log
 if not exist logs mkdir logs
 
-echo [1/4] Tim PID giu port %PORT% ...
-for /f "tokens=5" %%P in ('netstat -ano ^| findstr ":%PORT% " ^| findstr "LISTENING"') do (
-  echo Kill PID %%P ...
-  taskkill /F /PID %%P >nul 2>&1
+set "NODE_CMD=node"
+where node >nul 2>nul
+if %errorlevel% neq 0 (
+    if exist "%LOCALAPPDATA%\Microsoft\WinGet\Links\fnm.exe" (
+        set NODE_CMD="%LOCALAPPDATA%\Microsoft\WinGet\Links\fnm.exe" exec --using=default -- node
+    ) else if exist "%USERPROFILE%\AppData\Local\Microsoft\WinGet\Links\fnm.exe" (
+        set NODE_CMD="%USERPROFILE%\AppData\Local\Microsoft\WinGet\Links\fnm.exe" exec --using=default -- node
+    )
 )
 
-echo [2/4] Cho port %PORT% tu do ...
-for /L %%i in (1,1,15) do (
-  netstat -ano | findstr ":%PORT% " | findstr "LISTENING" >nul 2>&1
-  if errorlevel 1 goto PORTFREE
-  REM timeout /t doc stdin => loi "Input redirection is not supported" khi stdin bi redirect.
-  REM ping -n khong doc stdin, cho delay tuong duong.
-  ping -n 2 127.0.0.1 >nul
-)
-:PORTFREE
-netstat -ano | findstr ":%PORT% " | findstr "LISTENING" >nul 2>&1
-if not errorlevel 1 (
-  echo Loi: port %PORT% van ban. Thoat.
-  exit /b 1
-)
-echo Port %PORT% da tu do.
-
-echo [3/4] Start nen: node src/index.js ...
-REM Dung worker-control.js: spawn DETACHED (tiến trình con của explorer).
-REM Ban cua `start "" /MIN cmd /c` => tien trinh thuoc cay con cua shell cha,
-REM bi reap khi shell agent dong => worker chet giua chung (step de lai RUNNING mo coi).
+echo [1/3] Xoa bien moi truong ke thua tu shell...
 call "%~dp0clear-systemone-env.bat"
-node scripts\worker-control.js start
+
+echo [2/3] Khoi dong lai AI Worker Server...
+%NODE_CMD% "%~dp0scripts\worker-control.js" restart
 if errorlevel 1 (
-  echo Loi: khong start duoc worker. Xem %LOGFILE%.
+  echo Loi: khong restart duoc worker. Xem %LOGFILE%.
   exit /b 1
 )
 
-echo [4/4] Kiem tra /api/v1/status ...
+echo [3/3] Kiem tra /api/v1/status ...
 curl -s -o nul -w "HTTP %%{http_code}\n" http://localhost:%PORT%/api/v1/status
 if errorlevel 1 (
   echo Loi: server chua phan hoi. Xem %LOGFILE%.

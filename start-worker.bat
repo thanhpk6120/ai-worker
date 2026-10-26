@@ -31,20 +31,28 @@ if %errorlevel% neq 0 (
 )
 
 echo [*] Node.js runtime ready!
-echo [*] Opening Web UI Dashboard at http://localhost:3000...
-start "" cmd /c "ping -n 3 127.0.0.1 >nul && start http://localhost:3000"
-
-echo.
-echo [*] Server is running on port 3000...
-echo [*] Press Ctrl + C to stop the server.
-echo.
-
-REM Xoa bien SystemOne ke thua tu shell cha truoc khi chay node (gia tri cu se che do .env).
+echo [*] Khoi dong AI Worker chay ngam (Headless Background Daemon)...
 call "%~dp0clear-systemone-env.bat"
-%NODE_CMD% src/index.js
+%NODE_CMD% "%~dp0scripts\worker-control.js" start
 
 if %errorlevel% neq 0 (
     echo.
-    echo [WARNING] Server stopped with error!
+    echo [ERROR] Khong the khoi dong worker. Xem logs\server-bg.log de biet chi tiet.
     pause
+    exit /b 1
 )
+
+echo.
+echo ========================================================================
+echo [OK] AI Worker Server da khoi dong thanh cong o che do chay ngam!
+echo      - Khong co cua so terminal nao bi chiem hay ngáng man hinh.
+echo      - Xem toan bo logs truc tiep tren Web Dashboard tai nut [Worker Logs].
+echo      - De dung worker bat cu luc nao: chay file stop-worker.bat.
+echo ========================================================================
+echo.
+echo [*] Dang mo Web UI Dashboard tai http://localhost:3000...
+start http://localhost:3000
+
+echo [*] Cua so nay se tu dong dong sau 2 giay...
+ping -n 3 127.0.0.1 >nul
+exit /b 0

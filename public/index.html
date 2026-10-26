@@ -75,6 +75,12 @@
         <i class="fa-solid fa-folder-tree text-amber-400"></i>
         <span class="hidden sm:inline font-medium">Workspaces</span>
       </button>
+      <!-- Worker Logs Button -->
+      <button id="btnOpenWorkerLogsModal" class="p-2 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-300 hover:text-white border border-slate-700 text-xs transition flex items-center gap-1.5 shadow-sm" title="Xem Logs toàn hệ thống của Worker (Server Logs)">
+        <i class="fa-solid fa-server text-emerald-400"></i>
+        <span class="hidden sm:inline font-medium">Worker Logs</span>
+        <span id="workerLogsActiveDot" class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse hidden"></span>
+      </button>
 
       <button id="btnOpenSettingsModal" class="p-2 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-300 hover:text-white border border-slate-700 text-xs transition flex items-center gap-1.5 shadow-sm" title="Cài đặt Runner Pipeline">
         <i class="fa-solid fa-gear"></i>
@@ -254,7 +260,17 @@
                 <i class="fa-solid fa-play"></i>
                 <span>Chạy Pipeline</span>
               </button>
+              <!-- Nút Tạm dừng Task (Sáng khi task đang chạy) -->
+              <button id="btnPauseTask" class="hidden px-3.5 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-xs font-semibold shadow-md transition flex items-center gap-1.5 active:scale-95" title="Tạm dừng ngay tại bước hiện tại">
+                <i class="fa-solid fa-pause"></i>
+                <span>Dừng</span>
+              </button>
 
+              <!-- Nút Tiếp tục Task (Sáng khi task đang tạm dừng PAUSED) -->
+              <button id="btnResumeTask" class="hidden px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white border border-emerald-400 text-xs font-bold shadow-lg shadow-emerald-600/30 transition flex items-center gap-1.5 active:scale-95 animate-pulse" title="Tiếp tục ngay tại bước đang đứng">
+                <i class="fa-solid fa-forward-step"></i>
+                <span>Tiếp tục</span>
+              </button>
               <!-- Nút Hủy Task (Sáng khi task đang chạy) -->
               <button id="btnCancelTask" class="px-3 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 text-xs font-medium transition flex items-center gap-1.5 disabled:opacity-40 disabled:pointer-events-none">
                 <i class="fa-solid fa-ban"></i>
@@ -1180,6 +1196,104 @@
           </button>
         </div>
       </form>
+    </div>
+  </div>
+  <!-- Modal Worker Logs (Nhật ký Vận hành Toàn Hệ thống) -->
+  <div id="workerLogsModal" class="fixed inset-0 bg-black/90 backdrop-blur-sm z-50 flex items-center justify-center hidden p-2 sm:p-4">
+    <div style="height: 85vh; max-height: 85vh; background-color: #000000; border: 1px solid #1c1c1c;" class="rounded-2xl w-full max-w-5xl shadow-2xl overflow-hidden flex flex-col animate-in fade-in zoom-in-95 duration-200">
+      <!-- Modal Header -->
+      <div style="background-color: #0a0a0a; border-bottom: 1px solid #1a1a1a;" class="p-3 px-4 flex items-center justify-between shrink-0">
+        <div class="flex items-center gap-2.5">
+          <div class="w-8 h-8 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center border border-emerald-500/20">
+            <i class="fa-solid fa-server text-sm"></i>
+          </div>
+          <div>
+            <div class="flex items-center gap-2">
+              <h3 class="text-sm font-bold text-white">AI Worker System Logs</h3>
+              <span id="workerLogsLiveBadge" class="flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/25 text-[10px] font-semibold">
+                <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                <span>Live Streaming</span>
+              </span>
+            </div>
+            <p class="text-[11px] text-zinc-400">Nhật ký toàn bộ tiến trình máy chủ ai-worker (stdout, stderr, server-bg.log)</p>
+          </div>
+        </div>
+
+        <!-- Toolbar Controls -->
+        <div class="flex items-center gap-2">
+          <!-- Search / Filter input -->
+          <div class="relative hidden sm:block">
+            <i class="fa-solid fa-magnifying-glass absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500 text-xs"></i>
+            <input type="text" id="workerLogsFilterInput" placeholder="Lọc từ khóa (ERROR, BOOT...)" style="background-color: #000000; border: 1px solid #222222;" class="w-44 rounded-lg pl-7 pr-2.5 py-1 text-xs text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-brand-500 font-mono" />
+          </div>
+
+          <!-- Nút Tải log cũ hơn -->
+          <button id="btnLoadOlderWorkerLogs" style="background-color: #111111; border: 1px solid #222222;" class="px-2.5 py-1 rounded-lg text-xs text-zinc-300 hover:bg-[#1a1a1a] transition flex items-center gap-1.5" title="Tải thêm log cũ hơn (hoặc lăn chuột lên trên cùng)">
+            <i class="fa-solid fa-arrow-up text-[11px] text-amber-400"></i>
+            <span class="hidden md:inline text-[11px]">Tải log cũ</span>
+          </button>
+
+          <!-- Auto-scroll button -->
+          <button id="btnToggleWorkerLogsAutoScroll" style="background-color: #111111; border: 1px solid #222222;" class="px-2.5 py-1 rounded-lg text-xs text-emerald-400 hover:bg-[#1a1a1a] transition flex items-center gap-1.5" title="Bật/Tắt tự động cuộn theo log mới">
+            <i class="fa-solid fa-arrow-down-long text-[11px]"></i>
+            <span class="hidden md:inline text-[11px]">Auto-scroll:</span>
+            <span id="workerLogsAutoScrollLabel" class="font-bold text-[11px]">ON</span>
+          </button>
+
+          <!-- Refresh button -->
+          <button id="btnRefreshWorkerLogs" style="background-color: #111111; border: 1px solid #222222;" class="p-1.5 px-2 rounded-lg text-zinc-400 hover:text-white hover:bg-[#1a1a1a] text-xs transition" title="Làm mới chunk log mới nhất">
+            <i class="fa-solid fa-arrows-rotate"></i>
+          </button>
+
+          <!-- Copy button -->
+          <button id="btnCopyWorkerLogs" style="background-color: #111111; border: 1px solid #222222;" class="p-1.5 px-2 rounded-lg text-zinc-400 hover:text-white hover:bg-[#1a1a1a] text-xs transition" title="Sao chép toàn bộ logs đang hiển thị">
+            <i class="fa-regular fa-copy"></i>
+          </button>
+
+          <!-- Clear Client View -->
+          <button id="btnClearWorkerLogsView" style="background-color: #111111; border: 1px solid #222222;" class="p-1.5 px-2 rounded-lg text-zinc-400 hover:text-white hover:bg-[#1a1a1a] text-xs transition" title="Xóa màn hình tạm">
+            <i class="fa-solid fa-eraser"></i>
+          </button>
+
+          <!-- Clear Server Log file -->
+          <button id="btnClearServerLogFile" class="p-1.5 px-2 rounded-lg bg-rose-950/30 hover:bg-rose-900/50 text-rose-400 hover:text-rose-300 border border-rose-900/40 text-xs transition" title="Xóa sạch file log trên server">
+            <i class="fa-solid fa-trash-can"></i>
+          </button>
+
+          <!-- Close Modal -->
+          <button type="button" id="btnCloseWorkerLogsModal" class="text-zinc-400 hover:text-white transition w-7 h-7 rounded-lg flex items-center justify-center hover:bg-[#1a1a1a] ml-1">
+            <i class="fa-solid fa-xmark text-sm"></i>
+          </button>
+        </div>
+      </div>
+
+      <!-- Modal Body (Code Terminal Container nền đen hoàn toàn) -->
+      <div style="background-color: #000000;" class="flex-1 p-0 overflow-hidden flex flex-col min-h-0 relative">
+        <!-- Top loading banner khi cuộn lên đỉnh để load log cũ -->
+        <div id="workerLogsLoadingOlder" style="background-color: #0d0d0d; border-bottom: 1px solid #1f1f1f;" class="hidden py-1 px-4 text-center text-xs text-amber-400 font-mono flex items-center justify-center gap-2 shrink-0">
+          <i class="fa-solid fa-spinner fa-spin text-xs"></i>
+          <span>Đang tải thêm 100 dòng log cũ hơn...</span>
+        </div>
+        <div id="workerLogsReachedStart" style="background-color: #0a0a0a; border-bottom: 1px solid #181818;" class="hidden py-1 px-4 text-center text-[10px] text-zinc-500 font-mono select-none shrink-0">
+          ── ĐÃ ĐẾN ĐẦU FILE NHẬT KÝ (DÒNG 1) ──
+        </div>
+
+        <div id="workerLogsContainer" style="overflow-y: auto; overflow-x: auto; background-color: #000000;" class="flex-1 p-2 font-mono text-[11px] leading-[17px] custom-scrollbar select-text space-y-0 text-zinc-300">
+          <div class="text-zinc-500 italic py-6 text-center">Đang tải log mới nhất từ máy chủ AI Worker...</div>
+        </div>
+      </div>
+
+      <!-- Modal Footer -->
+      <div style="background-color: #0a0a0a; border-top: 1px solid #1a1a1a;" class="px-4 py-2 flex items-center justify-between text-[11px] text-zinc-400 shrink-0">
+        <div class="flex items-center gap-3">
+          <span>Phạm vi: <strong id="workerLogsRangeLabel" class="text-zinc-200 font-mono">0 - 0</strong> / <span id="workerLogsTotalLabel" class="font-mono text-zinc-400">0 dòng</span></span>
+          <span class="text-zinc-600">|</span>
+          <span class="text-zinc-500 hidden sm:inline"><i class="fa-solid fa-arrow-up mr-1 text-zinc-400"></i>Lăn chuột lên trên để tải thêm log cũ</span>
+        </div>
+        <div class="text-zinc-500 text-[10.5px]">
+          Nhấn <kbd style="background-color: #141414; border: 1px solid #262626;" class="px-1.5 py-0.5 rounded font-mono text-[10px] text-zinc-300">ESC</kbd> để đóng
+        </div>
+      </div>
     </div>
   </div>
 

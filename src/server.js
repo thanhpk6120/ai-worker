@@ -241,6 +241,72 @@ class JobEventBus extends EventEmitter {
 
 const jobEventBus = new JobEventBus();
 jobEventBus.on('error', () => {});
+// Quản lý System Logs của Worker Server (toàn bộ tiến trình server)
+const systemLogEmitter = new EventEmitter();
+systemLogEmitter.setMaxListeners(300);
+const systemLogBuffer = [];
+const MAX_SYSTEM_LOG_BUFFER = 1000;
+let systemLogFileStream = null;
+
+function getSystemLogStream() {
+  if (systemLogFileStream && !systemLogFileStream.destroyed && !systemLogFileStream.closed) {
+    return systemLogFileStream;
+  }
+  try {
+    const bgLogPath = path.join(config.LOG_DIR, 'server-bg.log');
+    if (!fs.existsSync(config.LOG_DIR)) fs.mkdirSync(config.LOG_DIR, { recursive: true });
+    systemLogFileStream = fs.createWriteStream(bgLogPath, { flags: 'a', encoding: 'utf8' });
+    systemLogFileStream.on('error', () => {});
+    return systemLogFileStream;
+  } catch (e) {
+    return null;
+  }
+}
+
+function appendSystemLog(chunk, isError = false) {
+  try {
+    const str = typeof chunk === 'string' ? chunk : (chunk ? chunk.toString('utf8') : '');
+    if (!str) return;
+
+    // Ghi trực tiếp ra file log từ Node.js
+    const fileStream = getSystemLogStream();
+    if (fileStream && !fileStream.destroyed) {
+      fileStream.write(str);
+    }
+
+    const lines = str.split(/\r?\n/);
+    for (const line of lines) {
+      if (!line) continue;
+      const entry = {
+        id: Date.now() + '-' + Math.random().toString(36).slice(2, 7),
+        timestamp: new Date().toISOString(),
+        text: line,
+        isError: Boolean(isError)
+      };
+      systemLogBuffer.push(entry);
+      if (systemLogBuffer.length > MAX_SYSTEM_LOG_BUFFER) {
+        systemLogBuffer.shift();
+      }
+      systemLogEmitter.emit('log', entry);
+    }
+  } catch (e) {}
+}
+
+if (!global.__aiWorkerStdoutHooked) {
+  global.__aiWorkerStdoutHooked = true;
+  const origStdoutWrite = process.stdout.write.bind(process.stdout);
+  const origStderrWrite = process.stderr.write.bind(process.stderr);
+
+  process.stdout.write = function (chunk, encoding, cb) {
+    appendSystemLog(chunk, false);
+    return origStdoutWrite(chunk, encoding, cb);
+  };
+
+  process.stderr.write = function (chunk, encoding, cb) {
+    appendSystemLog(chunk, true);
+    return origStderrWrite(chunk, encoding, cb);
+  };
+}
 
 // Tích hợp lắng nghe từ processManager nếu có
 try {
@@ -1355,8 +1421,15 @@ app.get('/api/v1/jobs', (req, res) => {
     }
 
     // Badge SystemOne per-task: tra `systemone_state` da parse (object, khong phai string).
-    const jobsWithSo = jobs.map((j) => ({ ...j, systemone_state: parseSystemOneState(j) }));
-
+    // Dong thoi tra runtime_ms: tong thoi gian thuc su worker chay task.
+    const jobsWithSo = jobs.map((j) => {
+      const steps = db.getStepsByJobId(j.id) || [];
+      return {
+        ...j,
+        systemone_state: parseSystemOneState(j),
+        runtime_ms: computeJobRuntimeMs(j, steps)
+      };
+    });
     return res.json({
       success: true,
       jobs: jobsWithSo,
@@ -1787,6 +1860,7 @@ app.put(['/api/v1/jobs/:id', '/api/v1/tasks/:id'], (req, res) => {
     jobEventBus.emitJobLog(id, {
       text: `[UPDATE] Đã cập nhật thông tin Task: Mã: ${updatedJob.task_code || id} | Tiêu đề: ${updatedJob.title}\n`
     });
+    jobEventBus.emitJobStatus(id, { status: updatedJob.status, current_step: updatedJob.current_step, job: updatedJob });
     return res.json({
       success: true,
       message: 'Cập nhật thông tin Task thành công!',
@@ -2476,21 +2550,68 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
               }
             }
           } catch (e) {}
-          // 2e. Chặn ảnh UI trùng lặp nội dung (cùng MD5): 2 PNG giống hệt nhau không chứng minh được 2 case khác nhau
+          // 2e. Chặn ảnh UI trùng lặp nội dung (cùng MD5) giữa các test case khác nhau
           try {
-            const seen = new Map();
+            // Xây dựng map file ảnh -> danh sách test case ID sử dụng nó từ metadataObj.tests
+            const fileToCaseIds = new Map();
+            const testsArr = (metadataObj && Array.isArray(metadataObj.tests)) ? metadataObj.tests : [];
+            for (const tc of testsArr) {
+              const tcId = String(tc.id || tc.test_id || '').trim().toUpperCase();
+              if (!tcId) continue;
+              const evList = Array.isArray(tc.evidence) ? tc.evidence : (tc.evidence ? [tc.evidence] : []);
+              for (const ev of evList) {
+                const baseName = path.basename(String(ev).trim());
+                if (!fileToCaseIds.has(baseName)) fileToCaseIds.set(baseName, new Set());
+                fileToCaseIds.get(baseName).add(tcId);
+              }
+            }
+
+            const seenMd5ToImg = new Map();
+            const duplicateAliasFiles = new Set();
+
             for (const img of uiImageFiles) {
               const buf = fs.readFileSync(path.join(evidenceDir, img));
               const md5 = crypto.createHash('md5').update(buf).digest('hex');
-              if (seen.has(md5)) {
-                agentFailed = true;
-                failedEvidenceFiles.add(img);
-                jobEventBus.emitJobLog(id, {
-                  text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: ${img} trùng nội dung (MD5 ${md5}) với ${seen.get(md5)} — không chứng minh được test case riêng biệt. Agent phải chụp lại từng kịch bản thật!\n`
-                });
-                break;
+              if (seenMd5ToImg.has(md5)) {
+                const firstImg = seenMd5ToImg.get(md5);
+                const firstCases = fileToCaseIds.get(firstImg) || new Set();
+                const currCases = fileToCaseIds.get(img) || new Set();
+
+                // Kiểm tra xem 2 file có chung test case không
+                let shareSameCase = false;
+                for (const c of currCases) {
+                  if (firstCases.has(c)) {
+                    shareSameCase = true;
+                    break;
+                  }
+                }
+                // Nếu cùng thuộc 1 test case (hoặc không khai báo test case riêng):
+                // Đây là file bản sao/alias trong cùng 1 kịch bản (không phải gian lận 2 case khác nhau)
+                if (shareSameCase || (firstCases.size === 0 && currCases.size === 0)) {
+                  duplicateAliasFiles.add(img);
+                  jobEventBus.emitJobLog(id, {
+                    text: `\n[TESTING-VERIFY] ℹ️ Phát hiện ${img} có cùng nội dung (MD5 ${md5}) với ${firstImg} trong cùng kịch bản kiểm thử — tự động bỏ qua file trùng lặp này, chỉ thẩm định file chính!\n`
+                  });
+                } else {
+                  // Trùng nội dung giữa 2 test case KHÁC NHAU: gian lận dùng 1 ảnh cho nhiều case khác nhau
+                  agentFailed = true;
+                  failedEvidenceFiles.add(img);
+                  jobEventBus.emitJobLog(id, {
+                    text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: ${img} (case: ${[...currCases].join(', ') || 'N/A'}) trùng nội dung (MD5 ${md5}) với ${firstImg} (case: ${[...firstCases].join(', ') || 'N/A'}) — không chứng minh được test case riêng biệt. Agent phải chụp lại từng kịch bản thật!\n`
+                  });
+                  break;
+                }
+              } else {
+                seenMd5ToImg.set(md5, img);
               }
-              seen.set(md5, img);
+            }
+
+            // Loại bỏ các file trùng lặp nội dung trong cùng test case khỏi danh sách thẩm định AI Vision
+            if (duplicateAliasFiles.size > 0) {
+              for (const dup of duplicateAliasFiles) {
+                const idx = uiImageFiles.indexOf(dup);
+                if (idx !== -1) uiImageFiles.splice(idx, 1);
+              }
             }
           } catch (e) {}
           // 2f. Đối soát tính nhất quán của Database Assertion / Reconciliation nếu có file assertion CSDL
@@ -2618,22 +2739,48 @@ const verifyTaskEvidenceAsync = async ({ jobId, evidenceDir, featureDir, taskCod
   });
 
   if (uiImageFiles.length > 0) {
-    jobEventBus.emitJobLog(jobId, {
-      text: `\n[VERIFY-AI-VISION] 👁️ Bắt đầu thẩm định ${uiImageFiles.length} hình ảnh bằng AI Vision (không dùng OCR)...\n`
-    });
-
     let storeMeta = { records: [] };
     try {
       storeMeta = evidenceStore.readMetadata(evidenceDir);
     } catch (e) {}
     const metaRecords = storeMeta.records || [];
 
+    // Kiểm tra cấu hình lần chạy trước từ pipeline_config nếu có (Incremental Verification)
+    let lastFailedEvidences = new Set();
+    try {
+      const curJob = db.getJobById(jobId);
+      const pipeCfg = jobPolicy.parsePipelineConfig(curJob);
+      if (Array.isArray(pipeCfg.last_failed_evidences)) {
+        lastFailedEvidences = new Set(pipeCfg.last_failed_evidences.map(f => path.basename(f)));
+      }
+    } catch (e) {}
+    const imagesToVerify = [];
+    const priorStatusMap = (storeMeta && storeMeta.evidenceStatus) || {};
+
     for (const img of uiImageFiles) {
+      const statusEntry = priorStatusMap[img] || {};
+      const alreadyPassed = statusEntry.status === 'PASS' && statusEntry.verified === true;
+      const wasFailed = lastFailedEvidences.has(img);
+      if (alreadyPassed && !wasFailed) {
+        jobEventBus.emitJobLog(jobId, {
+          text: `[VERIFY-AI-VISION] ⏭️ Bỏ qua thẩm định lại ảnh ${img} (đã đạt PASS ở lượt trước và không thay đổi).\n`
+        });
+      } else {
+        imagesToVerify.push(img);
+      }
+    }
+
+    if (imagesToVerify.length > 0) {
+      jobEventBus.emitJobLog(jobId, {
+        text: `\n[VERIFY-AI-VISION] 👁️ Bắt đầu thẩm định ${imagesToVerify.length}/${uiImageFiles.length} hình ảnh cần xác minh bằng AI Vision (không dùng OCR)...\n`
+      });
+    }
+
+    for (const img of imagesToVerify) {
       const fullImgPath = path.join(evidenceDir, img);
       const rec = metaRecords.find(r => r.fileName === img || r.name === img || (r.filePath && r.filePath.includes(img))) || {};
       const expectedCriteria = rec.passCriteria || rec.pass_criteria || rec.expected || rec.description || '';
       const testCaseName = rec.testCase || rec.caseName || rec.stepName || img;
-
       try {
         const visionResult = await verifyImageWithAI({
           imagePath: fullImgPath,
@@ -2840,36 +2987,36 @@ function endStepTimeline(jobId, { exitCode, status } = {}) {
  * @returns {number} tong so ms da chay thuc te
  */
 function computeJobRuntimeMs(job, steps) {
-  if (!job) return null;
+  if (!job) return 0;
   const status = (job.status || '').toString().trim().toUpperCase();
   const list = Array.isArray(steps) ? steps : [];
   const now = Date.now();
   // Job dang CHAY thuc te => doan dang mo duoc dem tiep.
   const isRunning = RUNNING_JOB_STATUSES.has(status);
   // Doan dang chay trong process nay (neu co) => moi cong phan "chua dong".
-  const tracked = stepTimeline.get(job.id);
+  const key = resolveCanonicalJobId(job.id);
+  const tracked = stepTimeline.get(key) || stepTimeline.get(job.id);
   let total = 0;
-  // Job CHUA TUNG CHAY (khong co doan nao co started_at) => null (chua bi do).
-  // Phai phan biet null voi 0: 0 = da chay nhung tong = 0 (doan 0ms),
-  // null = chua co du lieu runtime => UI fallback ve wall-clock cho job cu.
-  let hasStarted = false;
   for (const st of list) {
     if (!st) continue;
     const startedAt = Date.parse(st.started_at || '');
     if (!Number.isFinite(startedAt)) continue;
-    hasStarted = true;
     const finishedAt = st.finished_at ? Date.parse(st.finished_at) : NaN;
     if (Number.isFinite(finishedAt)) {
       const diff = finishedAt - startedAt;
       if (diff > 0) total += diff;
-    } else if (isRunning && tracked && tracked.stepId === st.id) {
+    } else if (isRunning && tracked && (tracked.stepId === st.id || (!st.id && tracked.phase === st.step_type))) {
       // Doan dang MO va worker DANG chay doan nay => cong den thoi diem hien tai.
       const diff = now - startedAt;
       if (diff > 0) total += diff;
+    } else if (!isRunning) {
+      // Đoạn mở nhưng job đã dừng (orphan do crash/restart hoặc đổi trạng thái mà chưa kịp ghi finished_at)
+      const fallbackEnd = Date.parse(job.completed_at || job.updated_at || '');
+      if (Number.isFinite(fallbackEnd) && fallbackEnd > startedAt) {
+        total += Math.min(fallbackEnd - startedAt, 3600000);
+      }
     }
-    // Doan MO khong duoc theo doi (orphan) => bo qua, khong dem thoi gian cho.
   }
-  if (!hasStarted) return null;
   return total;
 }
 /**
@@ -2892,7 +3039,7 @@ const scheduleNextStep = (id, opts, delayMs = 100) => {
 };
 const executeStep = async (id, opts) => {
   const job = db.getJobById(id);
-  if (!job || job.status === 'CANCELLED') return;
+  if (!job || job.status === 'CANCELLED' || job.status === 'PAUSED') return;
 
   // Gioi han so lan chuyen step lien tiep trong 1 lan goi.
   // Pipeline 5 step x N retry co the chay lau; gioi han nay chi dung cho test
@@ -3041,9 +3188,22 @@ const executeStep = async (id, opts) => {
         let outBuffer = '';
         let planningResult = null;
         let planningRunnerError = null;
+        const planningPromptFile = path.join(featureDir, 'prompt_planning.md');
+        try {
+          fs.writeFileSync(planningPromptFile, planningGuard.promptToUse, 'utf8');
+        } catch (err) {
+          console.warn('[PROMPT-FILE] Không thể ghi prompt_planning.md:', err.message);
+        }
+
         try {
           planningResult = await runner.execute({
-            prompt: planningGuard.promptToUse, cwd: workspacePath, jobId: id,
+            prompt: planningGuard.promptToUse,
+            promptFilePath: planningPromptFile,
+            featureDir,
+            step: 'PLANNING',
+            taskCode,
+            cwd: workspacePath,
+            jobId: id,
             timeoutMs: stepTimeoutMs,
             onStdout: (text) => { outBuffer += text; jobEventBus.emitJobLog(id, { text }); },
             onStderr: (text) => { outBuffer += text; jobEventBus.emitJobLog(id, { text }); }
@@ -3055,7 +3215,7 @@ const executeStep = async (id, opts) => {
         }
         clearInterval(planProgressTimer);
         const checkAfterPlan = db.getJobById(id);
-        if (checkAfterPlan && checkAfterPlan.status === 'CANCELLED') {
+        if (checkAfterPlan && (checkAfterPlan.status === 'CANCELLED' || checkAfterPlan.status === 'PAUSED')) {
           return;
         }
         // Trích xuất dev_plan.md và test_plan.md từ stdout nếu chưa được tạo trên ổ cứng
@@ -3296,9 +3456,22 @@ const executeStep = async (id, opts) => {
               attemptExpired = true;
             } else {
               implementResult = null;
+              const implementPromptFile = path.join(featureDir, 'prompt_implement.md');
+              try {
+                fs.writeFileSync(implementPromptFile, implementGuard.promptToUse, 'utf8');
+              } catch (err) {
+                console.warn('[PROMPT-FILE] Không thể ghi prompt_implement.md:', err.message);
+              }
+
               try {
                 implementResult = await runner.execute({
-                  prompt: implementGuard.promptToUse, cwd: workspacePath, jobId: id,
+                  prompt: implementGuard.promptToUse,
+                  promptFilePath: implementPromptFile,
+                  featureDir,
+                  step: 'IMPLEMENT',
+                  taskCode,
+                  cwd: workspacePath,
+                  jobId: id,
                   timeoutMs: attemptTimeout.timeoutMs,
                   onStdout: (text) => jobEventBus.emitJobLog(id, { text }),
                   onStderr: (text) => jobEventBus.emitJobLog(id, { text })
@@ -3311,7 +3484,7 @@ const executeStep = async (id, opts) => {
             }
 
             const checkAfterImp = db.getJobById(id);
-            if (checkAfterImp && checkAfterImp.status === 'CANCELLED') {
+            if (checkAfterImp && (checkAfterImp.status === 'CANCELLED' || checkAfterImp.status === 'PAUSED')) {
               attemptCancelled = true;
             }
 
@@ -3463,9 +3636,22 @@ const executeStep = async (id, opts) => {
       let agentFailed = false;
 
       if (runner) {
+        const testingPromptFile = path.join(featureDir, 'prompt_testing.md');
+        try {
+          fs.writeFileSync(testingPromptFile, testingGuard.promptToUse, 'utf8');
+        } catch (err) {
+          console.warn('[PROMPT-FILE] Không thể ghi prompt_testing.md:', err.message);
+        }
+
         try {
           testingResult = await runner.execute({
-            prompt: testingGuard.promptToUse, cwd: workspacePath, jobId: id,
+            prompt: testingGuard.promptToUse,
+            promptFilePath: testingPromptFile,
+            featureDir,
+            step: 'TESTING',
+            taskCode,
+            cwd: workspacePath,
+            jobId: id,
             timeoutMs: stepTimeoutMs,
             onStdout: (text) => jobEventBus.emitJobLog(id, { text }),
             onStderr: (text) => jobEventBus.emitJobLog(id, { text })
@@ -3479,7 +3665,7 @@ const executeStep = async (id, opts) => {
         }
 
         const checkAfterTest = db.getJobById(id);
-        if (checkAfterTest && checkAfterTest.status === 'CANCELLED') {
+        if (checkAfterTest && (checkAfterTest.status === 'CANCELLED' || checkAfterTest.status === 'PAUSED')) {
           return;
         }
 
@@ -3499,7 +3685,7 @@ const executeStep = async (id, opts) => {
         testingResult = { output: `Không tìm thấy runner hợp lệ cho ${testAgent}`, exitCode: 1 };
         
         const checkAfterTest = db.getJobById(id);
-        if (checkAfterTest && checkAfterTest.status === 'CANCELLED') return;
+        if (checkAfterTest && (checkAfterTest.status === 'CANCELLED' || checkAfterTest.status === 'PAUSED')) return;
       }
 
       // TESTING that bai (timeout/exit!=0/thieu runner): chuyen thang sang FIXING, KHONG qua VERIFY.
@@ -3561,9 +3747,20 @@ const executeStep = async (id, opts) => {
           : 'Đối soát evidence thất bại (VERIFY).';
         const failGate = { passed: false, error: reasonText, timeout: false, decided_at: new Date().toISOString(), mapped_from: 'VERIFY', source: 'pipeline-verify-evidence' };
         jobEventBus.emitJobLog(id, { text: `\n[VERIFY] ❌ Đối soát evidence thất bại: ${reasonText}. Chuyển sang FIXING với 🤖 Agent: ${fixAgent}.\n` });
+
+        // Lưu danh sách evidence bị failed vào pipeline_config để FIXING và VERIFY sau xử lý trúng đích
+        try {
+          const freshJob = db.getJobById(id) || job;
+          const pipe = jobPolicy.parsePipelineConfig(freshJob);
+          pipe.last_failed_evidences = Array.from(failedEvidenceFiles);
+          pipe.last_verify_reasons = verifyReasons;
+          db.updateJob(id, { pipeline_config: pipe });
+        } catch (e) {}
+
         db.updateJob(id, { status: 'FIXING', current_step: 'FIXING', had_fixing: 1, runner: fixAgent, error_message: reasonText, gate_result: failGate });
         jobEventBus.emitJobStatus(id, { status: 'FIXING', runner: fixAgent });
         scheduleNextStep(id, opts, 100);
+        return;
       }
       // Lưu path gọn nhẹ vào SQLite DB (chỉ lưu đường dẫn, KHÔNG lưu payload lớn)
       const relEvidencePath = `docs/features/${taskCode}/evidence`;
@@ -3595,11 +3792,20 @@ const executeStep = async (id, opts) => {
       if (fixingGuard.scrubbed || fixingGuard.injection) {
         jobEventBus.emitJobLog(id, { text: `\n[GUARD] ⚠ Prompt FIXING: secret=${fixingGuard.hasSecret ? 'có' : 'không'} injection=${fixingGuard.injection ? 'có' : 'không'}. Tiếp tục bằng prompt đã scrub, không FAILED job.\n` });
       }
-      const attempt = systemone.getFixAttempt(job);
-      // max_retries khai trong pipeline_config của job PHẢI được dùng thật.
-      // Trước đây đọc config.MAX_FIXING_RETRIES (env) => job khai 10 vẫn dừng ở 3/3.
+      const priorAttempt = systemone.getFixAttempt(job);
       const retryPolicy = jobPolicy.resolveMaxRetries(job);
       const maxRetries = retryPolicy.value;
+      const attempt = priorAttempt + 1;
+
+      if (attempt > maxRetries) {
+        const msg = `FIXING đã vượt quá số vòng sửa tối đa (${priorAttempt}/${maxRetries} vòng). Dừng pipeline.`;
+        jobEventBus.emitJobLog(id, { text: `\n[FIXING-FAILED] ❌ ${msg}\n` });
+        db.updateJob(id, { status: 'FAILED', current_step: 'FIXING', error_message: msg });
+        jobEventBus.emitJobStatus(id, { status: 'FAILED' });
+        jobEventBus.emitJobError(id, { error: msg });
+        return;
+      }
+
       // Model SystemOne CHI doc `state` - gateway bo qua field `files` (probe 2026-10-21).
       // => phai truyen NOI DUNG file that qua state de model doc duoc file dang sua.
       // Uu tien file lien quan stack trace + file vua sua (mtime), gom ca file untracked.
@@ -3632,20 +3838,15 @@ const executeStep = async (id, opts) => {
       } else {
         let fixAttempt = attempt;
         let fixingOk = false;
-        // Da het so vong sua (fix_attempt >= maxRetries) => while khong chay,
-        // `fixFailReason` rong => error_message "FIXING that bai sau 10/10 vong: ."
-        // (khong ro ly do). Khoi tao san ly do cho ca truong hop nay.
-        let fixFailReason = attempt >= maxRetries
-          ? `đã hết số vòng sửa (fix_attempt=${attempt}/${maxRetries})`
-          : '';
+        let fixFailReason = '';
         let fixRepeatedStop = null;
-        while (fixAttempt < maxRetries) {
-          // Lay config MOI NHAT tu DB (khong dung snapshot `job` dau executeStep) -
-          // `withFixAttempt` ghi de ca pipeline_config, dung ban cu se XOA
-          // `failure_history` vua ghi => co che so trung nguyen nhan vo hieu.
+        while (fixAttempt <= maxRetries) {
+          // Lay config MOI NHAT tu DB và cập nhật số vòng sửa thực tế
           const freshJob = db.getJobById(id) || job;
-          db.updateJob(id, { runner: fixingAgent, pipeline_config: systemone.withFixAttempt(freshJob, fixAttempt) });
-          jobEventBus.emitJobLog(id, { text: `\n[ERROR] Phát hiện sự cố. Đang sửa lỗi với 🤖 Agent: ${fixingAgent} (vòng ${fixAttempt}/${maxRetries})...\n` });
+          const currentPipe = systemone.withFixAttempt(freshJob, fixAttempt);
+          db.updateJob(id, { runner: fixingAgent, pipeline_config: currentPipe });
+          jobEventBus.emitJobStatus(id, { status: 'FIXING', runner: fixingAgent, pipeline_config: currentPipe, fix_attempt: fixAttempt });
+          jobEventBus.emitJobLog(id, { text: `\n[FIXING] 🔧 Đang sửa lỗi với 🤖 Agent: ${fixingAgent} (vòng ${fixAttempt}/${maxRetries})...\n` });
           const backoffMs = jobPolicy.resolveRetryBackoffMs(fixAttempt);
           if (backoffMs > 0) {
             jobEventBus.emitJobLog(id, { text: `[RETRY-BACKOFF] Chờ ${backoffMs}ms trước vòng sửa thứ ${fixAttempt}/${maxRetries}.\n` });
@@ -3654,9 +3855,22 @@ const executeStep = async (id, opts) => {
           const fixCheckCancelled = db.getJobById(id);
           if (fixCheckCancelled && fixCheckCancelled.status === 'CANCELLED') return;
           let fixingResult = null;
+          const fixingPromptFile = path.join(featureDir, 'prompt_fixing.md');
+          try {
+            fs.writeFileSync(fixingPromptFile, fixingGuard.promptToUse, 'utf8');
+          } catch (err) {
+            console.warn('[PROMPT-FILE] Không thể ghi prompt_fixing.md:', err.message);
+          }
+
           try {
             fixingResult = await runner.execute({
-              prompt: fixingGuard.promptToUse, cwd: workspacePath, jobId: id,
+              prompt: fixingGuard.promptToUse,
+              promptFilePath: fixingPromptFile,
+              featureDir,
+              step: 'FIXING',
+              taskCode,
+              cwd: workspacePath,
+              jobId: id,
               timeoutMs: stepTimeoutMs,
               onStdout: (text) => jobEventBus.emitJobLog(id, { text }),
               onStderr: (text) => jobEventBus.emitJobLog(id, { text })
@@ -3695,6 +3909,11 @@ const executeStep = async (id, opts) => {
             break;
           }
           jobEventBus.emitJobLog(id, { text: `\n[FIXING-RETRY] Vòng sửa ${fixAttempt}/${maxRetries} thất bại (${fixFailReason}) - thử lại vòng ${fixAttempt + 1}.\n` });
+          fixAttempt += 1;
+          const retryJob = db.getJobById(id) || job;
+          const retryPipe = systemone.withFixAttempt(retryJob, fixAttempt);
+          db.updateJob(id, { pipeline_config: retryPipe });
+          jobEventBus.emitJobStatus(id, { status: 'FIXING', runner: fixingAgent, pipeline_config: retryPipe, fix_attempt: fixAttempt });
         }
         if (!fixingOk) {
           const repeatedNote = fixRepeatedStop
@@ -3712,7 +3931,7 @@ const executeStep = async (id, opts) => {
         }
         jobEventBus.emitJobLog(id, { text: `\n[FIXING] Hoàn tất sửa lỗi (vòng ${fixAttempt}/${maxRetries}).\n` });
         const checkAfterFix = db.getJobById(id);
-        if (checkAfterFix && checkAfterFix.status === 'CANCELLED') {
+        if (checkAfterFix && (checkAfterFix.status === 'CANCELLED' || checkAfterFix.status === 'PAUSED')) {
           return;
         }
       }
@@ -4191,6 +4410,109 @@ app.post('/api/v1/jobs/:id/cancel', async (req, res) => {
       success: true,
       message: 'Job đã được hủy bỏ thành công',
       killedProcesses: killedCount,
+      job: updatedJob
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+/**
+ * POST /api/v1/jobs/:id/pause và POST /api/v1/tasks/:id/pause
+ * Tạm dừng ngay tại bước đang làm và ngắt tiến trình con đang chạy
+ */
+app.post(['/api/v1/jobs/:id/pause', '/api/v1/tasks/:id/pause'], async (req, res) => {
+  try {
+    const { id } = req.params;
+    const job = db.getJobById(id);
+    if (!job) {
+      return res.status(404).json({ success: false, error: `Job with ID '${id}' not found` });
+    }
+    const runningStatuses = ['PLANNING', 'PENDING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING'];
+    if (!runningStatuses.includes((job.status || '').toUpperCase())) {
+      return res.status(400).json({
+        success: false,
+        error: `Không thể tạm dừng khi task không ở trạng thái đang chạy (hiện tại: ${job.status})`
+      });
+    }
+
+    const pausedStep = job.status;
+    let pipe = jobPolicy.parsePipelineConfig(job);
+    pipe.paused_step = pausedStep;
+
+    // Ngắt an toàn toàn bộ tiến trình con của job
+    let killedCount = 0;
+    try {
+      const { defaultProcessManager } = require('./execution/processManager');
+      if (defaultProcessManager) {
+        killedCount = await defaultProcessManager.killProcessesByJobId(id, 2000);
+      }
+    } catch (e) {
+      console.warn('[SERVER] Không thể gọi processManager khi pause:', e);
+    }
+
+    const updatedJob = db.updateJob(id, {
+      status: 'PAUSED',
+      current_step: pausedStep,
+      pipeline_config: pipe
+    });
+
+    jobEventBus.emitJobStatus(id, { status: 'PAUSED', current_step: pausedStep, job: updatedJob });
+    jobEventBus.emitJobLog(id, {
+      text: `\n[PAUSE] ⏸ Đã tạm dừng task ngay tại bước [${pausedStep}] theo yêu cầu người dùng (tiến trình dừng: ${killedCount}).\n`,
+      level: 'warn'
+    });
+
+    return res.json({
+      success: true,
+      message: `Đã tạm dừng task tại bước ${pausedStep}`,
+      paused_step: pausedStep,
+      job: updatedJob
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * POST /api/v1/jobs/:id/resume và POST /api/v1/tasks/:id/resume
+ * Tiếp tục thực thi ngay tại bước đang đứng trước khi tạm dừng
+ */
+app.post(['/api/v1/jobs/:id/resume', '/api/v1/tasks/:id/resume'], async (req, res) => {
+  try {
+    const { id } = req.params;
+    const job = db.getJobById(id);
+    if (!job) {
+      return res.status(404).json({ success: false, error: `Job with ID '${id}' not found` });
+    }
+    if ((job.status || '').toUpperCase() !== 'PAUSED') {
+      return res.status(400).json({
+        success: false,
+        error: `Chỉ có thể tiếp tục khi task ở trạng thái PAUSED (hiện tại: ${job.status})`
+      });
+    }
+
+    let pipe = jobPolicy.parsePipelineConfig(job);
+    const resumeStep = pipe.paused_step || job.current_step || 'PLANNING';
+    delete pipe.paused_step;
+
+    const updatedJob = db.updateJob(id, {
+      status: resumeStep,
+      current_step: resumeStep,
+      pipeline_config: pipe
+    });
+
+    jobEventBus.emitJobStatus(id, { status: resumeStep, current_step: resumeStep, job: updatedJob });
+    jobEventBus.emitJobLog(id, {
+      text: `\n[RESUME] ▶ Tiếp tục thực thi task ngay tại bước [${resumeStep}]...\n`
+    });
+
+    // Kích hoạt tiếp tục pipeline
+    scheduleNextStep(id, {}, 100);
+
+    return res.json({
+      success: true,
+      message: `Đã tiếp tục task tại bước ${resumeStep}`,
+      resumed_step: resumeStep,
       job: updatedJob
     });
   } catch (err) {
@@ -4886,6 +5208,180 @@ app.delete(['/api/v1/jobs/:id/logs', '/api/v1/tasks/:id/logs'], (req, res) => {
     return res.status(500).json({ success: false, error: err.message });
   }
 });
+/**
+ * GET /api/v1/system/logs
+ * Lấy log toàn hệ thống theo chunk (hỗ trợ phân trang ngược xem log cũ)
+ * Query params:
+ *   - limit: số dòng trong 1 chunk (mặc định 100, max 300)
+ *   - endLine: dòng kết thúc (mặc định là dòng mới nhất)
+ */
+app.get('/api/v1/system/logs', (req, res) => {
+  try {
+    const limit = Math.min(Math.max(1, parseInt(req.query.limit || '100', 10)), 300);
+    const endLineParam = req.query.endLine ? parseInt(req.query.endLine, 10) : null;
+
+    const bgLogPath = path.join(config.LOG_DIR, 'server-bg.log');
+    let lines = [];
+    if (fs.existsSync(bgLogPath)) {
+      try {
+        const raw = fs.readFileSync(bgLogPath, 'utf8');
+        lines = raw.split(/\r?\n/).filter(Boolean);
+      } catch (e) {
+        lines = [];
+      }
+    }
+
+    if (lines.length === 0 && systemLogBuffer.length > 0) {
+      lines = systemLogBuffer.map(e => e.text);
+    }
+
+    const totalLines = lines.length;
+    if (totalLines === 0) {
+      return res.json({
+        success: true,
+        totalLines: 0,
+        startLine: 0,
+        endLine: 0,
+        hasMoreOlder: false,
+        logs: []
+      });
+    }
+
+    const targetEnd = Number.isInteger(endLineParam) && endLineParam > 0
+      ? Math.min(endLineParam, totalLines)
+      : totalLines;
+
+    const targetStart = Math.max(1, targetEnd - limit + 1);
+    const sliced = lines.slice(targetStart - 1, targetEnd);
+
+    const logs = sliced.map((text, idx) => {
+      const lineNum = targetStart + idx;
+      const isError = text.includes('[ERROR]') || text.includes('Error:') || text.includes('FAIL') || text.includes('Unhandled');
+      return {
+        lineNum,
+        text,
+        isError
+      };
+    });
+
+    return res.json({
+      success: true,
+      totalLines,
+      startLine: targetStart,
+      endLine: targetEnd,
+      hasMoreOlder: targetStart > 1,
+      logs
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+/**
+ * GET /api/v1/system/logs/stream
+ * SSE realtime stream log toàn hệ thống của Worker Server
+ */
+app.get('/api/v1/system/logs/stream', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+  // 1. Gửi dữ liệu ban đầu
+  let initialLogs = systemLogBuffer.slice(-150);
+  if (initialLogs.length < 20) {
+    const bgLogPath = path.join(config.LOG_DIR, 'server-bg.log');
+    if (fs.existsSync(bgLogPath)) {
+      try {
+        const content = fs.readFileSync(bgLogPath, 'utf8');
+        const fileLines = content.split(/\r?\n/).filter(Boolean).map((l, i) => ({
+          id: `init-${i}`,
+          timestamp: new Date().toISOString(),
+          text: l,
+          isError: l.includes('[ERROR]') || l.includes('Error:')
+        }));
+        if (fileLines.length > 0) initialLogs = fileLines.slice(-150);
+      } catch (e) {}
+    }
+  }
+
+  res.write(`event: init\ndata: ${JSON.stringify({ logs: initialLogs })}\n\n`);
+
+  // 2. Lắng nghe log mới
+  const onLog = (entry) => {
+    try {
+      res.write(`event: log\ndata: ${JSON.stringify(entry)}\n\n`);
+    } catch (e) {}
+  };
+
+  systemLogEmitter.on('log', onLog);
+
+  // 3. Heartbeat keepalive mỗi 15 giây
+  const keepAlive = setInterval(() => {
+    try {
+      res.write(': keepalive\n\n');
+    } catch (e) {}
+  }, 15000);
+
+  req.on('close', () => {
+    clearInterval(keepAlive);
+    systemLogEmitter.off('log', onLog);
+  });
+});
+
+/**
+ * DELETE /api/v1/system/logs
+ * Xóa sạch buffer và làm trống log file thực sự của Worker Server trên ổ đĩa
+ */
+app.delete('/api/v1/system/logs', async (req, res) => {
+  try {
+    systemLogBuffer.length = 0;
+    const bgLogPath = path.join(config.LOG_DIR, 'server-bg.log');
+    const bgErrPath = path.join(config.LOG_DIR, 'server-bg-err.log');
+
+    // Đóng write stream để giải phóng handle trên Windows
+    if (systemLogFileStream) {
+      try {
+        systemLogFileStream.end();
+        systemLogFileStream = null;
+      } catch (e) {}
+    }
+
+    // Chờ 50ms để OS giải phóng file descriptor
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    let fileCleared = false;
+    if (fs.existsSync(bgLogPath)) {
+      try {
+        fs.truncateSync(bgLogPath, 0);
+        fileCleared = true;
+      } catch (e) {
+        try {
+          fs.writeFileSync(bgLogPath, '', 'utf8');
+          fileCleared = true;
+        } catch (err) {}
+      }
+    }
+
+    if (fs.existsSync(bgErrPath)) {
+      try { fs.truncateSync(bgErrPath, 0); } catch (e) { try { fs.writeFileSync(bgErrPath, '', 'utf8'); } catch (err) {} }
+    }
+
+    // Mở lại stream mới sẵn sàng cho các log tiếp theo
+    getSystemLogStream();
+
+    const currentSize = fs.existsSync(bgLogPath) ? fs.statSync(bgLogPath).size : 0;
+
+    return res.json({
+      success: true,
+      fileCleared,
+      currentSize,
+      message: 'Đã xóa log thực sự từ file log trên ổ đĩa thành công (0 bytes)'
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
 
 // Catch-all middleware cho SPA Dashboard (tương thích Express 5)
 app.use((req, res, next) => {
@@ -4916,6 +5412,7 @@ app.use((err, req, res, next) => {
 
 module.exports = {
   app,
+  systemLogEmitter,
   jobEventBus,
   verifyTaskEvidence,
   verifyTaskEvidenceAsync,

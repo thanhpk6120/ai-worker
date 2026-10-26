@@ -3,54 +3,64 @@
  * Thẩm định bằng chứng hình ảnh (UI_SCREENSHOT) hoàn toàn bằng AI Vision.
  * TUYỆT ĐỐI KHÔNG sử dụng OCR để tránh sai sót chữ và layout.
  *
- * Nhận vào: đường dẫn file ảnh, tiêu chí kỳ vọng (expected criteria / pass criteria), tên test case.
- * Trả về JSON: { passed: boolean, reason: string, details?: string }
+ * Chỉ sử dụng duy nhất CLAUDE_MODEL từ file .env, không dùng cấu hình riêng hay model fallback.
  */
 'use strict';
 
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const config = require('../config');
 
 /**
- * Đọc API key & Base URL từ môi trường hoặc settings local (không bao giờ hardcode trong source)
+ * Đọc API key & Base URL từ settings/môi trường và model từ CLAUDE_MODEL trong .env
  */
 function resolveVisionConfig() {
-  let apiKey = process.env.AI_VISION_API_KEY || '';
-  let baseUrl = process.env.AI_VISION_BASE_URL || '';
+  let apiKey = '';
+  let baseUrl = '';
 
-  // Đọc từ ~/.claude/settings.json (nơi cấu hình omniroute và token thật của agent)
+  // Đọc baseUrl & apiKey từ ~/.claude/settings.json của agent
   try {
     const claudeSettingsPath = path.join(os.homedir(), '.claude', 'settings.json');
     if (fs.existsSync(claudeSettingsPath)) {
       const raw = fs.readFileSync(claudeSettingsPath, 'utf8');
       const parsed = JSON.parse(raw);
       const env = parsed && parsed.env ? parsed.env : {};
-      if (!baseUrl && env.ANTHROPIC_BASE_URL) baseUrl = env.ANTHROPIC_BASE_URL;
-      if (!apiKey && env.ANTHROPIC_AUTH_TOKEN) apiKey = env.ANTHROPIC_AUTH_TOKEN;
+      if (env.ANTHROPIC_BASE_URL) baseUrl = env.ANTHROPIC_BASE_URL;
+      if (env.ANTHROPIC_AUTH_TOKEN) apiKey = env.ANTHROPIC_AUTH_TOKEN;
     }
   } catch (e) {}
 
-  // Fallback sang các biến môi trường hệ thống khác nếu vẫn chưa có
   if (!baseUrl) {
-    baseUrl = process.env.ANTHROPIC_BASE_URL || 'https://omniroute.thanhpk.io.vn/v1';
-  }
-  // Các model Vision có tiền tố 9r/* chỉ định tuyến được trên omniroute gateway (trên 9router báo lỗi thiếu provider)
-  if (baseUrl.includes('9router.thanhpk.io.vn')) {
-    baseUrl = 'https://omniroute.thanhpk.io.vn/v1';
+    baseUrl = process.env.ANTHROPIC_BASE_URL || 'http://100.96.124.76:20126/v1';
   }
   if (!apiKey) {
-    apiKey = process.env.ANTHROPIC_AUTH_TOKEN || process.env.SYSTEMONE_API_KEY || '';
+    apiKey = process.env.ANTHROPIC_AUTH_TOKEN || '';
+  }
+
+  // Bắt buộc sử dụng CLAUDE_MODEL từ .env (không dùng fallback hay model phụ khác)
+  let model = String(config.CLAUDE_MODEL || process.env.CLAUDE_MODEL || '').trim();
+  if (!model) {
+    try {
+      const claudeSettingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+      if (fs.existsSync(claudeSettingsPath)) {
+        const raw = fs.readFileSync(claudeSettingsPath, 'utf8');
+        const parsed = JSON.parse(raw);
+        const env = parsed && parsed.env ? parsed.env : {};
+        if (env.ANTHROPIC_MODEL) model = String(env.ANTHROPIC_MODEL).trim();
+      }
+    } catch (e) {}
+  }
+  if (!model) {
+    model = 'claude-sonnet-5';
   }
 
   return {
     baseUrl: baseUrl.replace(/\/+$/, ''),
-    apiKey
+    apiKey,
+    model
   };
 }
-
-const PRIMARY_MODEL = process.env.AI_VISION_MODEL || '9r/claude-sonnet-5';
-const FALLBACK_MODELS = ['9r/claude-sonnet-5-medium', '9r/claude-sonnet-5-low'];
 
 /**
  * Xác định MIME type từ đuôi file
@@ -74,7 +84,7 @@ function getMimeType(filePath) {
  * @param {string} [params.expectedCriteria] Tiêu chí nghiệm thu cần đạt được trong ảnh
  * @param {string} [params.testCaseName] Tên test case / bước kiểm thử
  * @param {string} [params.stepName] Tên step hoặc mô tả
- * @param {number} [params.timeoutMs=35000] Timeout gọi API
+ * @param {number} [params.timeoutMs=45000] Timeout gọi API
  * @returns {Promise<{ passed: boolean, reason: string, details: string, modelUsed: string }>}
  */
 async function verifyImageWithAI({
@@ -82,7 +92,7 @@ async function verifyImageWithAI({
   expectedCriteria = '',
   testCaseName = '',
   stepName = '',
-  timeoutMs = 35000
+  timeoutMs = 45000
 }) {
   if (!fs.existsSync(imagePath)) {
     return {
@@ -142,94 +152,100 @@ YÊU CẦU THẨM ĐỊNH (BẮT BUỘC):
   "details": "Chi tiết những gì nhìn thấy trên ảnh so với tiêu chí kỳ vọng"
 }`;
 
-  const { baseUrl, apiKey } = resolveVisionConfig();
+  const { baseUrl, apiKey, model } = resolveVisionConfig();
   if (!apiKey) {
     return {
       passed: false,
-      reason: 'Thiếu API Key để gọi AI Vision verifier (cần cấu hình AI_VISION_API_KEY hoặc ANTHROPIC_AUTH_TOKEN)',
+      reason: 'Thiếu API Key để gọi AI Vision verifier (cần cấu hình ANTHROPIC_AUTH_TOKEN trong ~/.claude/settings.json)',
       details: 'Missing vision API credentials',
       modelUsed: 'none'
     };
   }
 
-  const modelsToTry = [PRIMARY_MODEL, ...FALLBACK_MODELS];
-  let lastError = null;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  for (const model of modelsToTry) {
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const endpoint = `${baseUrl}/chat/completions`;
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: userPrompt },
+              { type: 'image_url', image_url: { url: dataUrl } }
+            ]
+          }
+        ],
+        max_tokens: 400,
+        stream: false,
+        response_format: { type: 'json_object' }
+      }),
+      signal: controller.signal
+    });
 
-      const endpoint = `${baseUrl.replace(/\/+$/, '')}/chat/completions`;
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`
-        },
-        body: JSON.stringify({
-          model,
-          messages: [
-            {
-              role: 'user',
-              content: [
-                { type: 'text', text: userPrompt },
-                { type: 'image_url', image_url: { url: dataUrl } }
-              ]
-            }
-          ],
-          max_tokens: 300,
-          response_format: { type: 'json_object' }
-        }),
-        signal: controller.signal
-      });
+    clearTimeout(timer);
 
-      clearTimeout(timer);
-
-      if (!response.ok) {
-        const errBody = await response.text().catch(() => '');
-        lastError = new Error(`AI Vision HTTP ${response.status} (${model}): ${errBody.slice(0, 150)}`);
-        continue;
-      }
-
-      const resData = await response.json();
-      const content = resData.choices && resData.choices[0] && resData.choices[0].message && resData.choices[0].message.content;
-      if (!content) {
-        lastError = new Error(`AI Vision trả về rỗng (${model})`);
-        continue;
-      }
-
-      let parsedResult;
-      try {
-        const cleanJson = content.replace(/^```json/i, '').replace(/^```/, '').replace(/```$/, '').trim();
-        parsedResult = JSON.parse(cleanJson);
-      } catch (parseErr) {
-        const match = content.match(/\{[\s\S]*\}/);
-        if (match) {
-          parsedResult = JSON.parse(match[0]);
-        } else {
-          lastError = new Error(`Không thể parse JSON từ AI Vision (${model}): ${content.slice(0, 100)}`);
-          continue;
-        }
-      }
-
+    if (!response.ok) {
+      const errBody = await response.text().catch(() => '');
       return {
-        passed: parsedResult.passed === true,
-        reason: parsedResult.reason || (parsedResult.passed ? 'Hình ảnh đáp ứng đầy đủ tiêu chí kỳ vọng' : 'Hình ảnh không đạt tiêu chí kỳ vọng'),
-        details: parsedResult.details || '',
+        passed: false,
+        reason: `Lỗi kết nối AI Vision khi thẩm định ảnh ${path.basename(imagePath)}: AI Vision HTTP ${response.status} (${model}): ${errBody.slice(0, 150)}`,
+        details: errBody,
         modelUsed: model
       };
-    } catch (err) {
-      lastError = err;
     }
-  }
 
-  return {
-    passed: false,
-    reason: `Lỗi kết nối AI Vision khi thẩm định ảnh ${path.basename(imagePath)}: ${lastError ? lastError.message : 'Unknown error'}`,
-    details: lastError ? lastError.stack : '',
-    modelUsed: 'failed-all'
-  };
+    const resData = await response.json();
+    const content = resData.choices && resData.choices[0] && resData.choices[0].message && resData.choices[0].message.content;
+    if (!content) {
+      return {
+        passed: false,
+        reason: `Lỗi kết nối AI Vision khi thẩm định ảnh ${path.basename(imagePath)}: AI Vision trả về rỗng (${model})`,
+        details: 'Empty choice content',
+        modelUsed: model
+      };
+    }
+
+    let parsedResult;
+    try {
+      const cleanJson = content.replace(/^```json/i, '').replace(/^```/, '').replace(/```$/, '').trim();
+      parsedResult = JSON.parse(cleanJson);
+    } catch (parseErr) {
+      const match = content.match(/\{[\s\S]*\}/);
+      if (match) {
+        parsedResult = JSON.parse(match[0]);
+      } else {
+        return {
+          passed: false,
+          reason: `Không thể parse JSON từ AI Vision (${model}): ${content.slice(0, 100)}`,
+          details: content,
+          modelUsed: model
+        };
+      }
+    }
+
+    return {
+      passed: parsedResult.passed === true,
+      reason: parsedResult.reason || (parsedResult.passed ? 'Hình ảnh đáp ứng đầy đủ tiêu chí kỳ vọng' : 'Hình ảnh không đạt tiêu chí kỳ vọng'),
+      details: parsedResult.details || '',
+      modelUsed: model
+    };
+  } catch (err) {
+    return {
+      passed: false,
+      reason: `Lỗi kết nối AI Vision khi thẩm định ảnh ${path.basename(imagePath)}: ${err.message}`,
+      details: err.stack,
+      modelUsed: model
+    };
+  }
 }
 
 module.exports = {

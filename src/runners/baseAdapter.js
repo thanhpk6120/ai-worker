@@ -178,17 +178,47 @@ class BaseAdapter {
   }
 
   /**
+   * Tạo prompt điều phối ngắn gọn hướng dẫn Agent đọc file prompt tuyệt đối
+   * Giúp tránh lỗi tràn giới hạn độ dài dòng lệnh hệ thống (ENAMETOOLONG / 32,767 ký tự) trên Windows CLI.
+   * @param {string} absolutePromptPath
+   * @param {object} options
+   * @returns {string}
+   */
+  formatDispatchPrompt(absolutePromptPath, options = {}) {
+    const path = require('node:path');
+    const stepLabel = options.step ? ` [Bước: ${options.step}]` : '';
+    const taskLabel = options.taskCode ? ` [Task: ${options.taskCode}]` : '';
+    const normalizedPath = path.resolve(absolutePromptPath);
+    return [
+      `Hãy đọc kỹ và thực thi toàn bộ yêu cầu, chỉ dẫn được chỉ định trong tệp sau:${stepLabel}${taskLabel}`,
+      `Đường dẫn tuyệt đối: ${normalizedPath}`,
+      '',
+      'BẮT BUỘC: Bạn phải mở và đọc toàn bộ nội dung tệp trên trước khi thực hiện bất kỳ hành động nào, sau đó tuân thủ 100% các quy tắc và chỉ dẫn trong tệp đó để hoàn thành nhiệm vụ.'
+    ].join('\n');
+  }
+
+  /**
    * Xây dựng câu lệnh và tham số thực thi
    * @param {string} prompt
    * @param {object} options
    * @returns {{ command: string, args: string[] }}
    */
   buildCommand(prompt, options = {}) {
-    // KHÔNG ghi file prompt ra cwd/workspace root. Prompt đã được build sẵn
-    // từ templates/prompt/*.md và file ngữ cảnh trong feature dir, truyền trực tiếp qua args.
+    const path = require('node:path');
+    let effectivePrompt = prompt;
+    if (options && !options.rawPrompt) {
+      if (options.promptFilePath) {
+        effectivePrompt = this.formatDispatchPrompt(options.promptFilePath, options);
+      } else if (options.featureDir) {
+        const stepName = String(options.step || 'task').toLowerCase().replace(/[^a-z0-9_-]/g, '');
+        const promptFileName = options.promptFileName || `prompt_${stepName}.md`;
+        const resolvedPromptPath = path.resolve(path.join(options.featureDir, promptFileName));
+        effectivePrompt = this.formatDispatchPrompt(resolvedPromptPath, options);
+      }
+    }
     return {
       command: this.command,
-      args: this.buildArgs(prompt, options)
+      args: this.buildArgs(effectivePrompt, options)
     };
   }
 
@@ -314,6 +344,51 @@ class BaseAdapter {
     candidates.sort((a, b) => b.mtime - a.mtime);
     return candidates.length > 0 ? candidates[0].path : null;
   }
+  /**
+   * Quét tất cả các file session và subagent đang hoạt động
+   * Hỗ trợ:
+   * 1. File session chính tại root sessionDir (*.jsonl)
+   * 2. Mọi file subagent trong các thư mục con <sessionId>/subagents/*.jsonl (Claude Code)
+   * 3. Thư mục con của OMP, Codex, OpenCode
+   */
+  findActiveSessionFiles(sessionDir, minMtime = 0) {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const files = [];
+
+    const scanDir = (dir, depth = 0) => {
+      if (depth > 2 || !fs.existsSync(dir)) return;
+      try {
+        const entries = fs.readdirSync(dir);
+        for (const entry of entries) {
+          if (entry.startsWith('.') || entry.startsWith('__')) continue;
+          const fullPath = path.join(dir, entry);
+          try {
+            const stat = fs.statSync(fullPath);
+            if (stat.isFile() && entry.endsWith('.jsonl')) {
+              if (stat.mtimeMs >= minMtime) {
+                const isSubagent = fullPath.includes('subagents') || entry.startsWith('agent-');
+                let agentLabel = '';
+                if (isSubagent) {
+                  const m = entry.match(/^agent-([a-zA-Z0-9]+)/);
+                  agentLabel = m ? m[1].slice(0, 8) : 'subagent';
+                }
+                files.push({ path: fullPath, mtime: stat.mtimeMs, size: stat.size, isSubagent, agentLabel });
+              }
+            } else if (stat.isDirectory() && depth < 2) {
+              if (depth === 0 || entry === 'subagents') {
+                scanDir(fullPath, depth + 1);
+              }
+            }
+          } catch (e) {}
+        }
+      } catch (e) {}
+    };
+
+    scanDir(sessionDir, 0);
+    files.sort((a, b) => a.mtime - b.mtime);
+    return files;
+  }
 
   parseSummary(fullOutput) {
     if (typeof fullOutput !== 'string') {
@@ -345,7 +420,19 @@ class BaseAdapter {
    * Thực thi tiến trình Agent CLI qua processManager
    */
   async execute(options = {}) {
-    const { prompt = '', cwd = process.cwd(), onStderr = null, jobId = null, extraArgs = [] } = options;
+    const {
+      prompt = '',
+      cwd = process.cwd(),
+      onStderr = null,
+      jobId = null,
+      extraArgs = [],
+      promptFilePath = null,
+      featureDir = null,
+      step = null,
+      taskCode = null,
+      rawPrompt = false,
+      promptFileName = null
+    } = options;
     const originalOnStdout = options.onStdout;
     const fs = require('node:fs');
     const path = require('node:path');
@@ -413,9 +500,47 @@ class BaseAdapter {
     };
 
 
-    // Truyền trực tiếp prompt vào args qua buildArgs, không tạo file đệm prompt.md
-    // Tránh sinh file rác, tránh lỗi quyền thư mục và Agent không phải tốn turn đọc file
-    const effectiveArgs = this.buildArgs(prompt, options);
+    // Xử lý tạo tệp prompt hoàn chỉnh riêng để tránh lỗi giới hạn dòng lệnh Windows (ENAMETOOLONG / 32,767 ký tự)
+    let effectivePrompt = prompt;
+    let resolvedPromptPath = promptFilePath ? path.resolve(promptFilePath) : null;
+
+    if (!rawPrompt) {
+      const isAlreadyDispatch = typeof prompt === 'string' && prompt.includes('Đường dẫn tuyệt đối:');
+      if (!isAlreadyDispatch) {
+        if (resolvedPromptPath) {
+          if (prompt && prompt.length > 0) {
+            fs.mkdirSync(path.dirname(resolvedPromptPath), { recursive: true });
+            fs.writeFileSync(resolvedPromptPath, prompt, 'utf8');
+          }
+          effectivePrompt = this.formatDispatchPrompt(resolvedPromptPath, { step, taskCode });
+        } else if (featureDir) {
+          const stepName = String(step || 'task').toLowerCase().replace(/[^a-z0-9_-]/g, '');
+          const fileName = promptFileName || `prompt_${stepName}.md`;
+          resolvedPromptPath = path.resolve(path.join(featureDir, fileName));
+          fs.mkdirSync(path.dirname(resolvedPromptPath), { recursive: true });
+          fs.writeFileSync(resolvedPromptPath, prompt, 'utf8');
+          effectivePrompt = this.formatDispatchPrompt(resolvedPromptPath, { step, taskCode });
+        } else if (typeof prompt === 'string' && prompt.length > 8000) {
+          const os = require('node:os');
+          const tempDir = path.join(os.tmpdir(), 'ai-worker-prompts');
+          fs.mkdirSync(tempDir, { recursive: true });
+          resolvedPromptPath = path.resolve(path.join(tempDir, `prompt_${jobId || 'job'}_${Date.now()}.md`));
+          fs.writeFileSync(resolvedPromptPath, prompt, 'utf8');
+          effectivePrompt = this.formatDispatchPrompt(resolvedPromptPath, { step, taskCode });
+        }
+      }
+    }
+
+    if (resolvedPromptPath && typeof onStdout === 'function') {
+      let promptSize = 0;
+      try {
+        promptSize = fs.existsSync(resolvedPromptPath) ? fs.statSync(resolvedPromptPath).size : 0;
+      } catch (e) {}
+      const stepStr = step ? `bước ${step}` : 'nhiệm vụ';
+      onStdout(`\x1b[90m[PROMPT-FILE] Đã chuẩn bị tệp prompt hoàn chỉnh cho ${stepStr}: ${resolvedPromptPath} (${promptSize} bytes)\x1b[0m\r\n`);
+    }
+
+    const effectiveArgs = this.buildArgs(effectivePrompt, options);
     const detection = this.detect();
     const effectiveCommand = (detection && detection.installed && detection.path) ? detection.path : this.command;
 
@@ -463,7 +588,7 @@ class BaseAdapter {
     const executeStartTime = Date.now();
     const tailState = {
       fileOffsets: new Map(), // Lưu offset riêng theo từng file, không bao giờ reset về 0
-      lineBuffer: ''
+      lineBuffers: new Map()  // Lưu buffer dòng dở dang riêng cho từng file
     };
 
     const tailTimer = setInterval(() => {
@@ -473,30 +598,47 @@ class BaseAdapter {
 
         if (sessionDir && fs.existsSync(sessionDir)) {
           try {
-            const latestFile = this.findLatestSessionFile(sessionDir);
-            if (latestFile) {
-              const stat = fs.statSync(latestFile);
+            // Quét cả session chính lẫn mọi subagent active (kể cả subagent trong các thư mục con)
+            const activeFiles = typeof this.findActiveSessionFiles === 'function'
+              ? this.findActiveSessionFiles(sessionDir, executeStartTime - 60000)
+              : [];
+
+            // Nếu không quét được mảng, fallback về file session chính
+            if (activeFiles.length === 0) {
+              const single = this.findLatestSessionFile(sessionDir);
+              if (single) activeFiles.push({ path: single, isSubagent: false, agentLabel: '' });
+            }
+
+            for (const fileInfo of activeFiles) {
+              const targetFile = fileInfo.path;
+              if (!fs.existsSync(targetFile)) continue;
+              const stat = fs.statSync(targetFile);
 
               // Quản lý offset riêng cho từng file để tránh replay lịch sử cũ khi đổi file
-              if (!tailState.fileOffsets.has(latestFile)) {
+              if (!tailState.fileOffsets.has(targetFile)) {
                 // Lần đầu gặp file: nếu file đã tồn tại trước khi execute chạy, bỏ qua phần cũ
                 const initOffset = (stat.mtimeMs < executeStartTime) ? stat.size : 0;
-                tailState.fileOffsets.set(latestFile, initOffset);
-                tailState.lineBuffer = '';
+                tailState.fileOffsets.set(targetFile, initOffset);
+                tailState.lineBuffers.set(targetFile, '');
               }
 
-              const currentOffset = tailState.fileOffsets.get(latestFile) || 0;
+              const currentOffset = tailState.fileOffsets.get(targetFile) || 0;
               if (stat.size > currentOffset) {
                 const readLength = stat.size - currentOffset;
-                const fd = fs.openSync(latestFile, 'r');
+                const fd = fs.openSync(targetFile, 'r');
                 const buffer = Buffer.alloc(readLength);
                 fs.readSync(fd, buffer, 0, readLength, currentOffset);
                 fs.closeSync(fd);
-                tailState.fileOffsets.set(latestFile, stat.size);
-                const chunkText = tailState.lineBuffer + buffer.toString('utf-8');
+                tailState.fileOffsets.set(targetFile, stat.size);
+                const prevBuffer = tailState.lineBuffers.get(targetFile) || '';
+                const chunkText = prevBuffer + buffer.toString('utf-8');
                 const lines = chunkText.split(/\r?\n/);
-                // Giữ lại phần dư chưa hoàn thành dòng cuối cùng vào lineBuffer
-                tailState.lineBuffer = lines.pop() || '';
+                // Giữ lại phần dư chưa hoàn thành dòng cuối cùng vào lineBuffers
+                tailState.lineBuffers.set(targetFile, lines.pop() || '');
+
+                const prefix = fileInfo.isSubagent
+                  ? `\x1b[38;5;208m[SUBAGENT:${fileInfo.agentLabel || 'agent'}]\x1b[0m `
+                  : '';
 
                 for (const line of lines) {
                   const trimmed = line.trim();
@@ -529,7 +671,7 @@ class BaseAdapter {
                     if (thoughtText && typeof onStdout === 'function') {
                       const firstLine = thoughtText.split('\n')[0].trim();
                       if (firstLine) {
-                        onStdout(`\x1b[36m[AGENT THOUGHT]\x1b[0m ${firstLine.substring(0, 140)}...\n`);
+                        onStdout(`${prefix}\x1b[36m[AGENT THOUGHT]\x1b[0m ${firstLine.substring(0, 140)}...\n`);
                       }
                     }
 
@@ -542,7 +684,7 @@ class BaseAdapter {
                           try {
                             argsPreview = JSON.stringify(part.arguments || part.input || {}).substring(0, 100);
                           } catch (e) {}
-                          onStdout(`\x1b[35m[TOOL CALL]\x1b[0m ${toolName} (${argsPreview})\n`);
+                          onStdout(`${prefix}\x1b[35m[TOOL CALL]\x1b[0m ${toolName} (${argsPreview})\n`);
                         }
                       }
                     }
@@ -550,7 +692,7 @@ class BaseAdapter {
                     // B. ACTION
                     const actionName = obj.action || obj.title || (obj.message && obj.message.action);
                     if (actionName && typeof onStdout === 'function') {
-                      onStdout(`\x1b[33m[AGENT ACTION]\x1b[0m ${String(actionName).substring(0, 140)}\n`);
+                      onStdout(`${prefix}\x1b[33m[AGENT ACTION]\x1b[0m ${String(actionName).substring(0, 140)}\n`);
                     }
 
                     // C. TOOL CALL
@@ -568,17 +710,17 @@ class BaseAdapter {
                     }
 
                     if (toolName && typeof onStdout === 'function') {
-                      onStdout(`\x1b[35m[TOOL CALL]\x1b[0m ${toolName} (${toolInput})\n`);
+                      onStdout(`${prefix}\x1b[35m[TOOL CALL]\x1b[0m ${toolName} (${toolInput})\n`);
                     }
                   } catch (e) {
                     // 2. Phân tích raw text dòng log nếu không phải JSON
                     if (typeof onStdout === 'function' && trimmed.length > 5) {
                       if (/thinking|thought|reasoning/i.test(trimmed)) {
-                        onStdout(`\x1b[36m[AGENT THOUGHT]\x1b[0m ${trimmed.substring(0, 140)}\n`);
+                        onStdout(`${prefix}\x1b[36m[AGENT THOUGHT]\x1b[0m ${trimmed.substring(0, 140)}\n`);
                       } else if (/executing|action|running/i.test(trimmed)) {
-                        onStdout(`\x1b[33m[AGENT ACTION]\x1b[0m ${trimmed.substring(0, 140)}\n`);
+                        onStdout(`${prefix}\x1b[33m[AGENT ACTION]\x1b[0m ${trimmed.substring(0, 140)}\n`);
                       } else if (/tool|call|function/i.test(trimmed)) {
-                        onStdout(`\x1b[35m[TOOL CALL]\x1b[0m ${trimmed.substring(0, 140)}\n`);
+                        onStdout(`${prefix}\x1b[35m[TOOL CALL]\x1b[0m ${trimmed.substring(0, 140)}\n`);
                       }
                     }
                   }

@@ -207,3 +207,126 @@ test('PATCH /api/v1/jobs/:id/status: chuyển sang các bước khác (PLANNING,
     taskQueue.cancel(jobId);
   }
 });
+test('computeJobRuntimeMs: tính tổng thời gian thực tế của mọi lần chạy, trả về 0 nếu chưa chạy', () => {
+  const { computeJobRuntimeMs } = require('../src/server');
+  const dummyJob = { id: 'test-runtime-dummy', status: 'TO DO' };
+
+  // 1. Chưa từng chạy
+  assert.equal(computeJobRuntimeMs(dummyJob, []), 0, 'Chưa chạy phải trả về 0, không được trả về null');
+
+  // 2. Chạy 2 steps (ví dụ PLANNING 2000ms và IMPLEMENT 3000ms)
+  const steps = [
+    {
+      id: 1, job_id: dummyJob.id, step_type: 'PLANNING',
+      started_at: '2026-10-23T10:00:00.000Z',
+      finished_at: '2026-10-23T10:00:02.000Z'
+    },
+    {
+      id: 2, job_id: dummyJob.id, step_type: 'IMPLEMENT',
+      started_at: '2026-10-23T10:00:05.000Z',
+      finished_at: '2026-10-23T10:00:08.000Z'
+    }
+  ];
+  assert.equal(computeJobRuntimeMs(dummyJob, steps), 5000, 'Tổng thời gian phải là 5000ms');
+
+  // 3. Chạy lại (thêm vòng FIXING sau khi chạy lại)
+  steps.push({
+    id: 3, job_id: dummyJob.id, step_type: 'FIXING',
+    started_at: '2026-10-23T10:05:00.000Z',
+    finished_at: '2026-10-23T10:05:04.000Z'
+  });
+  assert.equal(computeJobRuntimeMs(dummyJob, steps), 9000, 'Chạy lại phải cộng dồn thời gian (5000 + 4000 = 9000ms)');
+});
+
+test('verifyTaskEvidence: không đánh FAILED nếu 2 file trùng MD5 thuộc cùng 1 test case', () => {
+  const { verifyTaskEvidence } = require('../src/server');
+  const taskCode = 'TASK-DUP-SAME-CASE';
+  const featDir = path.join(tmpWorkspace, 'docs', 'features', taskCode);
+  const evDir = path.join(featDir, 'evidence');
+  fs.mkdirSync(evDir, { recursive: true });
+
+  const testPlanContent = `# Test Plan\n- TC-UI-01: UI list (UI_SCREENSHOT)\n`;
+  fs.writeFileSync(path.join(featDir, 'test_plan.md'), testPlanContent, 'utf8');
+
+  // Tạo 2 file ảnh PNG có nội dung giống hệt nhau
+  const pngDummy = Buffer.alloc(6000, 0xAA);
+  fs.writeFileSync(path.join(evDir, '01_ui_list_en.png'), pngDummy);
+  fs.writeFileSync(path.join(evDir, '01_ui_list_vi.png'), pngDummy);
+
+  // Metadata khai báo cả 2 file cho CÙNG 1 test case TC-UI-01
+  const meta = {
+    taskCode,
+    verdict: 'PASS',
+    tests: [
+      {
+        id: 'TC-UI-01',
+        name: 'UI List',
+        status: 'PASSED',
+        evidence: ['01_ui_list_en.png', '01_ui_list_vi.png']
+      }
+    ]
+  };
+  fs.writeFileSync(path.join(evDir, 'metadata.json'), JSON.stringify(meta, null, 2), 'utf8');
+
+  const res = verifyTaskEvidence({
+    jobId: 'dummy-verify-job',
+    evidenceDir: evDir,
+    featureDir: featDir,
+    taskCode,
+    emit: () => {}
+  });
+
+  // Không được coi là failed vì cả 2 thuộc cùng 1 test case (file alias/duplicate cùng case)
+  assert.equal(res.failed, false, 'Không được đánh FAILED khi 2 ảnh trùng nội dung thuộc cùng 1 test case');
+  assert.equal(res.failedEvidenceFiles.has('01_ui_list_vi.png'), false, 'Không được đưa vào failedEvidenceFiles');
+});
+
+test('verifyTaskEvidence: đánh FAILED nếu 2 file trùng MD5 thuộc 2 test case KHÁC NHAU', () => {
+  const { verifyTaskEvidence } = require('../src/server');
+  const taskCode = 'TASK-DUP-DIFF-CASE';
+  const featDir = path.join(tmpWorkspace, 'docs', 'features', taskCode);
+  const evDir = path.join(featDir, 'evidence');
+  fs.mkdirSync(evDir, { recursive: true });
+
+  const testPlanContent = `# Test Plan\n- TC-UI-01: UI list\n- TC-UI-02: UI detail\n`;
+  fs.writeFileSync(path.join(featDir, 'test_plan.md'), testPlanContent, 'utf8');
+
+  const pngDummy = Buffer.alloc(6000, 0xBB);
+  fs.writeFileSync(path.join(evDir, '01_list.png'), pngDummy);
+  fs.writeFileSync(path.join(evDir, '02_detail.png'), pngDummy);
+
+  // Metadata khai báo 2 file cho 2 test case KHÁC NHAU
+  const meta = {
+    taskCode,
+    verdict: 'PASS',
+    tests: [
+      { id: 'TC-UI-01', name: 'UI List', status: 'PASSED', evidence: ['01_list.png'] },
+      { id: 'TC-UI-02', name: 'UI Detail', status: 'PASSED', evidence: ['02_detail.png'] }
+    ]
+  };
+  fs.writeFileSync(path.join(evDir, 'metadata.json'), JSON.stringify(meta, null, 2), 'utf8');
+
+  const res = verifyTaskEvidence({
+    jobId: 'dummy-diff-verify-job',
+    evidenceDir: evDir,
+    featureDir: featDir,
+    taskCode,
+    emit: () => {}
+  });
+
+  // Bắt buộc phải đánh FAILED vì lấy 1 ảnh giả mạo cho 2 test case khác nhau
+  assert.equal(res.failed, true, 'Phải đánh FAILED khi 2 ảnh trùng MD5 thuộc 2 test case khác nhau');
+  assert.equal(res.failedEvidenceFiles.has('02_detail.png'), true, '02_detail.png phải bị đánh FAILED');
+});
+
+test('GET /api/v1/jobs: trả về runtime_ms dạng số cho từng task trong danh sách', async () => {
+  const res = await fetch(`${baseUrl}/api/v1/jobs`);
+  assert.equal(res.status, 200);
+  const data = await res.json();
+  assert.ok(Array.isArray(data.jobs));
+  if (data.jobs.length > 0) {
+    for (const j of data.jobs) {
+      assert.equal(typeof j.runtime_ms, 'number', 'Mỗi job trong danh sách phải có trường runtime_ms là number');
+    }
+  }
+});

@@ -56,6 +56,7 @@
     'VERIFY': 'status-verify',
     'FIXING': 'status-fixing',
     'PENDING': 'status-pending bg-amber-500/20 text-amber-300 border border-amber-500/40',
+    'PAUSED': 'status-pending bg-amber-500/20 text-amber-300 border border-amber-500/40',
     'DONE': 'status-done',
     'CANCELLED': 'status-cancelled',
     'TIMED_OUT': 'status-failed',
@@ -470,6 +471,8 @@
     document.getElementById('editTaskCode')?.addEventListener('input', updateEditFeaturePathPreview);
     document.getElementById('editTaskWorkspace')?.addEventListener('change', updateEditFeaturePathPreview);
     document.getElementById('btnStartTask')?.addEventListener('click', handleStartTask);
+    document.getElementById('btnPauseTask')?.addEventListener('click', handlePauseTask);
+    document.getElementById('btnResumeTask')?.addEventListener('click', handleResumeTask);
     document.getElementById('btnCancelTask')?.addEventListener('click', handleCancelActiveJob);
     document.getElementById('btnDeleteTask')?.addEventListener('click', handleDeleteTask);
     document.getElementById('btnUpdateStatus')?.addEventListener('click', handleUpdateTaskStatus);
@@ -736,10 +739,18 @@
       state.dualPlan = (data.job && (data.job.dual_plan || data.job.dualPlan)) || data.dual_plan || data.dualPlan || null;
       state.currentQuestion = (data.job && (data.job.question || data.job.pending_question)) || data.question || null;
 
+      // Invalidate planCache nếu dualPlan có dữ liệu mới từ backend
+      if (state.dualPlan && (state.dualPlan.dev_plan || state.dualPlan.test_plan)) {
+        state.planCache.delete(jobId);
+      }
+
       renderActiveJobDetail();
 
-      // Kết nối Realtime Log Stream SSE
-      connectLogStream(jobId, clearTerm);
+      // Kết nối Realtime Log Stream SSE nếu chưa có hoặc đổi job
+      if (!state.eventSource || state.connectedJobId !== jobId) {
+        state.connectedJobId = jobId;
+        connectLogStream(jobId, clearTerm);
+      }
     } catch (err) {
       console.error('Error fetching job details:', err);
     }
@@ -869,11 +880,16 @@
           targetJob.updated_at = payload.timestamp || new Date().toISOString();
         }
 
+        // Xóa cache plan khi chuyển bước để luôn nạp plan mới nhất
+        state.planCache.delete(targetJobId);
+
         if (state.activeJob && (state.activeJob.id === targetJobId || !payload.jobId)) {
           if (newStep) state.activeJob.current_step = newStep;
           if (payload.runner) state.activeJob.runner = payload.runner;
           renderActiveJobDetail();
           updateStepper(state.activeJob);
+          loadPlanFiles(targetJobId);
+          fetchJobDetails(targetJobId, false);
         }
         renderJobsList();
       } catch (e) {
@@ -896,6 +912,9 @@
           targetJob.updated_at = payload.timestamp || new Date().toISOString();
         }
 
+        // Xóa cache plan khi status thay đổi để hiển thị ngay Dev/Test plan mới
+        state.planCache.delete(targetJobId);
+
         if (state.activeJob && (state.activeJob.id === targetJobId || !payload.jobId)) {
           state.activeJob.status = newStatus;
           if (payload.current_step) state.activeJob.current_step = payload.current_step;
@@ -903,11 +922,10 @@
           if (newStatus === 'PENDING') state.activeJob.had_pending = 1;
           if (newStatus === 'FIXING') state.activeJob.fix_attempt = 1;
           renderActiveJobDetail();
+          loadPlanFiles(targetJobId);
         }
-        // Nếu chuyển sang PENDING, hiển thị question modal
-        if (newStatus === 'PENDING') {
-          fetchJobDetails(jobId, false);
-        }
+        // Luôn fetch lại job details khi status thay đổi để đồng bộ toàn bộ DB state
+        fetchJobDetails(targetJobId, false);
         renderJobsList();
       } catch (e) {
         console.warn('Status event error:', e);
@@ -1296,7 +1314,7 @@
     const statusBadge = document.getElementById('activeJobStatusBadge');
     if (statusBadge) {
       const status = (job.status || 'TO DO').toUpperCase();
-      statusBadge.textContent = status === 'PENDING' ? 'Chờ giải đáp' : status;
+      statusBadge.textContent = status === 'PENDING' ? 'Chờ giải đáp' : (status === 'PAUSED' ? 'Tạm dừng' : status);
       statusBadge.className = `status-badge ${STATUS_CLASSES[status] || 'status-todo'}`;
       const errBox = document.getElementById('activeJobErrorBox');
       if (status === 'FAILED' && job.error_message) {
@@ -1355,19 +1373,51 @@
       createdEl.textContent = job.created_at ? new Date(job.created_at).toLocaleString('vi-VN') : '--';
     }
 
-    // Start Button State: Nút Chạy Pipeline luôn hiển thị sẵn sàng (trừ khi đang chạy IMPLEMENT/TESTING)
+    const isPipelineRunning = ['PLANNING', 'PENDING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING'].includes((job.status || '').toUpperCase());
+    const isPaused = (job.status || '').toUpperCase() === 'PAUSED';
+
+    // Start Button State: Disable khi task đang chạy hoặc tạm dừng
     const startBtn = document.getElementById('btnStartTask');
     if (startBtn) {
-      const isRunning = ['IMPLEMENT', 'TESTING', 'VERIFY'].includes((job.status || '').toUpperCase());
-      if (isRunning) {
-        startBtn.classList.add('hidden');
+      startBtn.classList.remove('hidden');
+      if (isPipelineRunning || isPaused) {
+        startBtn.disabled = true;
+        startBtn.title = isPaused ? 'Task đang tạm dừng, hãy nhấn Tiếp tục' : 'Task đang chạy Pipeline (đã vô hiệu hóa)';
+        startBtn.classList.add('opacity-40', 'cursor-not-allowed');
       } else {
-        startBtn.classList.remove('hidden');
         startBtn.disabled = false;
+        startBtn.title = 'Kích hoạt chạy Pipeline';
+        startBtn.classList.remove('opacity-40', 'cursor-not-allowed');
       }
     }
 
-    // Cancel Button State
+    // Pause & Resume Buttons: Dừng ngay tại bước đang làm hoặc tiếp tục
+    const pauseBtn = document.getElementById('btnPauseTask');
+    if (pauseBtn) {
+      if (isPipelineRunning) {
+        pauseBtn.classList.remove('hidden');
+        pauseBtn.disabled = false;
+        pauseBtn.title = `Tạm dừng ngay tại bước ${job.status}`;
+      } else {
+        pauseBtn.classList.add('hidden');
+      }
+    }
+
+    const resumeBtn = document.getElementById('btnResumeTask');
+    if (resumeBtn) {
+      if (isPaused) {
+        resumeBtn.classList.remove('hidden');
+        resumeBtn.disabled = false;
+        resumeBtn.title = `Tiếp tục thực thi tại bước ${job.current_step || 'PLANNING'}`;
+      } else {
+        resumeBtn.classList.add('hidden');
+      }
+    }
+
+    const cancelTaskBtn = document.getElementById('btnCancelTask');
+    if (cancelTaskBtn) {
+      cancelTaskBtn.disabled = !(isPipelineRunning || isPaused);
+    }
     
     // Edit Button State: chỉ hiện khi task ở TO DO
     // Edit Button State: hiển thị trên thanh điều khiển chi tiết task
@@ -1714,8 +1764,9 @@
     }
 
     // Dung ket qua cache neu da parse Markdown roi (T2.4)
+    // Dùng kết quả cache nếu có nội dung thực sự đã parse Markdown
     const cached = state.activeJobId ? state.planCache.get(state.activeJobId) : null;
-    if (cached && cached.devHtml) {
+    if (cached && cached.hasRealPlan && cached.devHtml) {
       if (devContainer) devContainer.innerHTML = cached.devHtml;
       if (testContainer) testContainer.innerHTML = cached.testHtml;
       return;
@@ -2143,36 +2194,31 @@
     if (uptimeEl) {
       uptimeEl.textContent = formatDuration(state.systemStatus.uptimeSeconds);
     }
+    // Chỉ đếm thời lượng khi task thực sự đang chạy (PLANNING, IMPLEMENT, TESTING, VERIFY, FIXING)
+    if (state.activeJob) {
+      const status = ((state.activeJob.status || '')).toUpperCase();
+      const isRunning = ['PLANNING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING'].includes(status);
+      if (isRunning) {
+        state.activeJob.runtime_ms = (Number(state.activeJob.runtime_ms) || 0) + 1000;
+      }
+    }
     renderActiveJobDuration();
   }
 
-  // Render "Thoi luong" cua job dang xem.
-  // "Thoi luong" = thoi gian worker THUC SU chay task, khong phai wall-clock
-  // tu created_at (sai: tinh ca thoi gian cho queue + thoi gian cho user).
-  // `runtime_ms` do server cong don tu cac doan `steps` da/đang chay.
+  // Render "Thoi luong" cua job dang xem:
+  // "Thoi luong" = tong thoi gian worker THUC SU chay task qua tat ca cac step (ke ca chay lai).
+  // Tuyet doi khong tinh wall-clock tu created_at de khong dem thoi gian nam cho.
   function renderActiveJobDuration() {
     if (!state.activeJob) return;
     const durationEl = document.getElementById('activeJobDuration');
     if (!durationEl) return;
 
-    // `runtime_ms` = null => job CHUA TUNG CHAY / job cu khong co du lieu
-    // runtime => fallback wall-clock. `runtime_ms` = 0 => da chay nhung tong 0ms
-    // (doan 0ms) => hien "0s", KHONG fallback.
-    const runtimeMs = state.activeJob.runtime_ms;
-    if (runtimeMs !== null && runtimeMs !== undefined && Number.isFinite(Number(runtimeMs))) {
-      durationEl.textContent = formatDuration(Math.floor(Number(runtimeMs) / 1000));
+    const runtimeMs = Number(state.activeJob.runtime_ms);
+    if (Number.isFinite(runtimeMs) && runtimeMs >= 0) {
+      durationEl.textContent = formatDuration(Math.floor(runtimeMs / 1000));
       return;
     }
-
-    // Job cu (API chua co runtime_ms) => fallback ve wall-clock.
-    if (state.activeJob.created_at) {
-      const start = new Date(state.activeJob.created_at).getTime();
-      const end = state.activeJob.completed_at
-        ? new Date(state.activeJob.completed_at).getTime()
-        : Date.now();
-      const seconds = Math.max(0, Math.floor((end - start) / 1000));
-      durationEl.textContent = formatDuration(seconds);
-    }
+    durationEl.textContent = '00:00:00';
   }
 
   // =========================================================================
@@ -2389,6 +2435,59 @@
       fetchJobsList();
     } catch (err) {
       alert('Lỗi: ' + err.message);
+    }
+  }
+  async function handlePauseTask() {
+    if (!state.activeJobId) return;
+    const btn = document.getElementById('btnPauseTask');
+    const oldHtml = btn ? btn.innerHTML : '';
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1"></i> <span>Đang dừng...</span>';
+    }
+    try {
+      const res = await fetch(`/api/v1/jobs/${state.activeJobId}/pause`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Tạm dừng task thất bại');
+      }
+      showToast(data.message || 'Đã tạm dừng task thành công!', 'info');
+      await fetchJobDetails(state.activeJobId, false);
+      await fetchJobsListSilently();
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = oldHtml;
+      }
+    }
+  }
+
+  async function handleResumeTask() {
+    if (!state.activeJobId) return;
+    const btn = document.getElementById('btnResumeTask');
+    const oldHtml = btn ? btn.innerHTML : '';
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1"></i> <span>Đang tiếp tục...</span>';
+    }
+    try {
+      const res = await fetch(`/api/v1/jobs/${state.activeJobId}/resume`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Tiếp tục task thất bại');
+      }
+      showToast(data.message || 'Đã tiếp tục chạy task!', 'success');
+      await fetchJobDetails(state.activeJobId, false);
+      await fetchJobsListSilently();
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = oldHtml;
+      }
     }
   }
 
@@ -3783,9 +3882,9 @@
     const devContainer = document.getElementById('devPlanMarkdownContainer') || document.getElementById('devPlanContent');
     const testContainer = document.getElementById('testPlanMarkdownContainer') || document.getElementById('testPlanContent');
 
-    // Kiem tra cache (T2.3, T2.4)
+    // Kiểm tra cache (chỉ nhận cache nếu có nội dung thật)
     const cached = state.planCache.get(jobId);
-    if (cached && cached.devHtml !== undefined) {
+    if (cached && cached.hasRealPlan && cached.devHtml !== undefined) {
       if (devContainer) devContainer.innerHTML = cached.devHtml;
       if (testContainer) testContainer.innerHTML = cached.testHtml;
       return;
@@ -3793,13 +3892,12 @@
     if (cached && cached.promise) {
       await cached.promise;
       const updated = state.planCache.get(jobId);
-      if (updated && state.activeJobId === jobId) {
+      if (updated && state.activeJobId === jobId && updated.hasRealPlan) {
         if (devContainer) devContainer.innerHTML = updated.devHtml;
         if (testContainer) testContainer.innerHTML = updated.testHtml;
       }
       return;
     }
-
     let devContent = state.dualPlan?.dev_plan || '';
     let testContent = state.dualPlan?.test_plan || '';
 
@@ -3836,10 +3934,15 @@
           </div>
         `;
 
-      state.planCache.set(jobId, { devHtml, testHtml });
+      const hasRealPlan = Boolean((devContent && devContent.trim().length > 30) || (testContent && testContent.trim().length > 30));
+      if (hasRealPlan) {
+        state.planCache.set(jobId, { devHtml, testHtml, hasRealPlan: true });
+      } else {
+        // Không cache chuỗi rỗng/chưa có plan để lần sau gọi lại sẽ nạp từ server
+        state.planCache.delete(jobId);
+      }
       return { devHtml, testHtml };
     })();
-
     state.planCache.set(jobId, { promise: fetchPromise });
     const result = await fetchPromise;
 
@@ -4145,14 +4248,24 @@
           }
         }
       } catch (e) { console.warn('Lỗi lưu chế độ NHANH:', e); }
-
+      const targetId = editingTaskId;
       showToast('Đã cập nhật thông tin Task thành công!', 'success');
       closeEditTaskModal();
-      await fetchJobsListSilently();
-      if (state.activeJobId === editingTaskId) {
-        await fetchJobDetails(editingTaskId, false);
+
+      // Cập nhật ngay lập tức dữ liệu mới vào state local để hiển thị thông tin mới ngay
+      if (data && data.job) {
+        const idx = state.jobs.findIndex(j => j.id === targetId);
+        if (idx >= 0) state.jobs[idx] = { ...state.jobs[idx], ...data.job };
+        if (state.activeJobId === targetId) {
+          state.activeJob = { ...state.activeJob, ...data.job };
+          renderActiveJobDetail();
+        }
       }
-    } catch (err) {
+
+      await fetchJobsListSilently();
+      if (state.activeJobId === targetId) {
+        await fetchJobDetails(targetId, false);
+      }
       showToast(err.message, 'error', 7000);
     } finally {
       if (submitBtn) {
@@ -4658,7 +4771,387 @@
       }
     }
   });
+  // =========================================================================
+  // WORKER SYSTEM LOGS MODAL (Hiển thị dạng Code, Nền đen & Load theo Chunk)
+  // =========================================================================
+  let workerLogsEventSource = null;
+  let workerLogsAutoScroll = true;
+  let workerLogsFilter = '';
+  let workerLogsEntries = [];
+  let workerLogsStartLine = 0;
+  let workerLogsEndLine = 0;
+  let workerLogsTotalLines = 0;
+  let workerLogsHasMoreOlder = false;
+  let workerLogsIsLoadingOlder = false;
+  const WORKER_LOGS_CHUNK_SIZE = 100;
 
+  function colorizeCodeLog(text, isError) {
+    if (!text) return '';
+    const escaped = escapeHtml(text);
+    if (isError || /\[ERROR\]|Unhandled|Error:|Failed|FAIL/i.test(text)) {
+      return `<span class="text-rose-400 font-semibold">${escaped}</span>`;
+    }
+    if (/\[WARN\]|Warning:|WARNING/i.test(text)) {
+      return `<span class="text-amber-300">${escaped}</span>`;
+    }
+    if (/\[BOOT\]|✓|Sẵn sàng/i.test(text)) {
+      return `<span class="text-emerald-400">${escaped}</span>`;
+    }
+    if (/\[TIMEOUT\]/i.test(text)) {
+      return `<span class="text-rose-300 font-bold bg-rose-950/60 px-1 rounded">${escaped}</span>`;
+    }
+    if (/(GET|POST|PATCH|PUT|DELETE)\s+\/api\/v1\/\S+/i.test(text)) {
+      return escaped.replace(/(GET|POST|PATCH|PUT|DELETE)\s+(\/api\/v1\/\S+)\s+(\d{3})/i, (m, meth, url, status) => {
+        const methColor = meth === 'GET' ? 'text-sky-400' : (meth === 'POST' ? 'text-emerald-400' : (meth === 'DELETE' ? 'text-rose-400' : 'text-purple-400'));
+        const statusColor = status.startsWith('2') ? 'text-emerald-400' : (status.startsWith('4') || status.startsWith('5') ? 'text-rose-400' : 'text-slate-400');
+        return `<span class="${methColor} font-bold">${meth}</span> <span class="text-slate-200">${url}</span> <span class="${statusColor} font-bold">${status}</span>`;
+      });
+    }
+    return `<span class="text-slate-300">${escaped}</span>`;
+  }
+
+  function createLogLineRow(entry) {
+    const row = document.createElement('div');
+    row.className = 'flex items-baseline hover:bg-[#121212] py-[0.5px] px-1 font-mono text-[10.5px] leading-[16px] select-text transition-colors';
+    row.dataset.lineNum = entry.lineNum || '';
+
+    const lineNumStr = entry.lineNum ? String(entry.lineNum) : '';
+    row.innerHTML = `<span class="text-zinc-600 select-none text-right pr-2 pl-0.5 w-12 shrink-0 font-mono text-[10px] border-r border-[#1a1a1a] mr-2">${lineNumStr}</span>
+      <div class="flex-1 whitespace-pre font-mono text-zinc-300">${colorizeCodeLog(entry.text, entry.isError)}</div>`;
+    return row;
+  }
+
+  function updateFooterInfo() {
+    const rangeLabel = document.getElementById('workerLogsRangeLabel');
+    const totalLabel = document.getElementById('workerLogsTotalLabel');
+    const reachedStartEl = document.getElementById('workerLogsReachedStart');
+    const loadOlderBtn = document.getElementById('btnLoadOlderWorkerLogs');
+
+    if (rangeLabel) rangeLabel.textContent = `${workerLogsStartLine || 0} - ${workerLogsEndLine || 0}`;
+    if (totalLabel) totalLabel.textContent = `${workerLogsTotalLines || 0} dòng`;
+
+    if (reachedStartEl) {
+      if (workerLogsStartLine <= 1 && workerLogsEntries.length > 0) {
+        reachedStartEl.classList.remove('hidden');
+      } else {
+        reachedStartEl.classList.add('hidden');
+      }
+    }
+
+    if (loadOlderBtn) {
+      if (workerLogsHasMoreOlder && workerLogsStartLine > 1) {
+        loadOlderBtn.classList.remove('opacity-40', 'pointer-events-none');
+        loadOlderBtn.title = 'Tải thêm log cũ hơn';
+      } else {
+        loadOlderBtn.classList.add('opacity-40', 'pointer-events-none');
+        loadOlderBtn.title = 'Đã tải hết log cũ nhất';
+      }
+    }
+  }
+
+  function renderAllWorkerLogs(preserveScrollBottom = false) {
+    const container = document.getElementById('workerLogsContainer');
+    if (!container) return;
+
+    const filterTerm = workerLogsFilter.toLowerCase();
+    const visibleEntries = filterTerm
+      ? workerLogsEntries.filter(e => (e.text || '').toLowerCase().includes(filterTerm))
+      : workerLogsEntries;
+
+    if (visibleEntries.length === 0) {
+      container.innerHTML = `<div class="text-slate-500 italic py-6 text-center">${filterTerm ? 'Không có dòng log nào khớp với từ khóa tìm kiếm.' : 'Chưa có nhật ký ghi nhận.'}</div>`;
+      updateFooterInfo();
+      return;
+    }
+
+    const frag = document.createDocumentFragment();
+    for (const entry of visibleEntries) {
+      frag.appendChild(createLogLineRow(entry));
+    }
+
+    container.innerHTML = '';
+    container.appendChild(frag);
+    updateFooterInfo();
+
+    if (preserveScrollBottom || workerLogsAutoScroll) {
+      container.scrollTop = container.scrollHeight;
+    }
+  }
+
+  async function loadOlderLogs() {
+    if (workerLogsIsLoadingOlder || !workerLogsHasMoreOlder || workerLogsStartLine <= 1) {
+      return;
+    }
+
+    workerLogsIsLoadingOlder = true;
+    const loadingBanner = document.getElementById('workerLogsLoadingOlder');
+    if (loadingBanner) loadingBanner.classList.remove('hidden');
+
+    const container = document.getElementById('workerLogsContainer');
+    const prevScrollHeight = container ? container.scrollHeight : 0;
+    const prevScrollTop = container ? container.scrollTop : 0;
+
+    try {
+      const targetEndLine = workerLogsStartLine - 1;
+      const res = await fetch(`/api/v1/system/logs?endLine=${targetEndLine}&limit=${WORKER_LOGS_CHUNK_SIZE}`);
+      const data = await res.json();
+
+      if (res.ok && data.success && Array.isArray(data.logs) && data.logs.length > 0) {
+        // Prepend vào danh sách entries
+        workerLogsEntries = [...data.logs, ...workerLogsEntries];
+        workerLogsStartLine = data.startLine;
+        workerLogsHasMoreOlder = data.hasMoreOlder;
+        workerLogsTotalLines = data.totalLines;
+
+        // Prepend các elements vào container
+        if (container) {
+          const filterTerm = workerLogsFilter.toLowerCase();
+          const visibleNewLogs = filterTerm
+            ? data.logs.filter(e => (e.text || '').toLowerCase().includes(filterTerm))
+            : data.logs;
+
+          const frag = document.createDocumentFragment();
+          for (const entry of visibleNewLogs) {
+            frag.appendChild(createLogLineRow(entry));
+          }
+
+          container.insertBefore(frag, container.firstChild);
+
+          // Giữ vị trí cuộn mượt mà
+          const newScrollHeight = container.scrollHeight;
+          container.scrollTop = newScrollHeight - prevScrollHeight + prevScrollTop;
+        }
+
+        updateFooterInfo();
+      } else {
+        workerLogsHasMoreOlder = false;
+        updateFooterInfo();
+      }
+    } catch (err) {
+      console.warn('Lỗi khi tải log cũ:', err);
+    } finally {
+      workerLogsIsLoadingOlder = false;
+      if (loadingBanner) loadingBanner.classList.add('hidden');
+    }
+  }
+
+  async function loadLatestChunkAndConnect() {
+    const container = document.getElementById('workerLogsContainer');
+    if (container) {
+      container.innerHTML = '<div class="text-slate-500 italic py-6 text-center"><i class="fa-solid fa-spinner fa-spin mr-2"></i>Đang tải chunk log mới nhất...</div>';
+    }
+
+    workerLogsEntries = [];
+    workerLogsStartLine = 0;
+    workerLogsEndLine = 0;
+    workerLogsTotalLines = 0;
+    workerLogsHasMoreOlder = false;
+
+    try {
+      const res = await fetch(`/api/v1/system/logs?limit=${WORKER_LOGS_CHUNK_SIZE}`);
+      const data = await res.json();
+
+      if (res.ok && data.success && Array.isArray(data.logs)) {
+        workerLogsEntries = data.logs;
+        workerLogsStartLine = data.startLine;
+        workerLogsEndLine = data.endLine;
+        workerLogsTotalLines = data.totalLines;
+        workerLogsHasMoreOlder = data.hasMoreOlder;
+        renderAllWorkerLogs(true);
+      }
+    } catch (e) {
+      if (container) {
+        container.innerHTML = `<div class="text-rose-400 italic py-6 text-center">Lỗi tải log ban đầu: ${e.message}</div>`;
+      }
+    }
+
+    // Kết nối SSE realtime
+    if (workerLogsEventSource) {
+      workerLogsEventSource.close();
+      workerLogsEventSource = null;
+    }
+
+    workerLogsEventSource = new EventSource('/api/v1/system/logs/stream');
+
+    workerLogsEventSource.addEventListener('log', (e) => {
+      try {
+        const entry = JSON.parse(e.data);
+        workerLogsEndLine++;
+        workerLogsTotalLines = Math.max(workerLogsTotalLines, workerLogsEndLine);
+        if (workerLogsStartLine === 0) workerLogsStartLine = workerLogsEndLine;
+
+        const fullEntry = {
+          lineNum: workerLogsEndLine,
+          text: entry.text,
+          isError: entry.isError
+        };
+
+        workerLogsEntries.push(fullEntry);
+        // Giữ buffer RAM hợp lý (tối đa 2500 dòng)
+        if (workerLogsEntries.length > 2500) {
+          workerLogsEntries.shift();
+          workerLogsStartLine++;
+        }
+
+        // Kiểm tra filter
+        if (!workerLogsFilter || (entry.text || '').toLowerCase().includes(workerLogsFilter.toLowerCase())) {
+          if (container) {
+            // Xóa thông báo placeholder nếu có
+            const emptyNotice = container.querySelector('.text-slate-500');
+            if (emptyNotice && workerLogsEntries.length === 1) {
+              container.innerHTML = '';
+            }
+
+            container.appendChild(createLogLineRow(fullEntry));
+
+            // Xóa DOM cũ nếu vượt quá 1200 nodes để không bị lag DOM
+            while (container.childNodes.length > 1200) {
+              container.removeChild(container.firstChild);
+            }
+
+            if (workerLogsAutoScroll) {
+              container.scrollTop = container.scrollHeight;
+            }
+          }
+        }
+        updateFooterInfo();
+      } catch (err) {}
+    });
+
+    workerLogsEventSource.onerror = () => {
+      const badge = document.getElementById('workerLogsLiveBadge');
+      if (badge) {
+        badge.className = 'flex items-center gap-1 px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-400 border border-rose-500/30 text-[10px] font-semibold';
+        badge.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-rose-400"></span><span>Mất kết nối</span>';
+      }
+    };
+
+    workerLogsEventSource.onopen = () => {
+      const badge = document.getElementById('workerLogsLiveBadge');
+      if (badge) {
+        badge.className = 'flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[10px] font-semibold';
+        badge.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span><span>Live Streaming</span>';
+      }
+    };
+  }
+
+  function openWorkerLogsModal() {
+    const modal = document.getElementById('workerLogsModal');
+    if (!modal) return;
+    modal.classList.remove('hidden');
+    loadLatestChunkAndConnect();
+  }
+
+  function closeWorkerLogsModal() {
+    const modal = document.getElementById('workerLogsModal');
+    if (modal) modal.classList.add('hidden');
+    if (workerLogsEventSource) {
+      workerLogsEventSource.close();
+      workerLogsEventSource = null;
+    }
+  }
+
+  // Khởi tạo các event listeners cho Worker Logs
+  document.getElementById('btnOpenWorkerLogsModal')?.addEventListener('click', openWorkerLogsModal);
+  document.getElementById('btnCloseWorkerLogsModal')?.addEventListener('click', closeWorkerLogsModal);
+  document.getElementById('workerLogsModal')?.addEventListener('click', (e) => {
+    if (e.target.id === 'workerLogsModal') closeWorkerLogsModal();
+  });
+
+  // Lắng nghe sự kiện lăn chuột lên đỉnh để tự động load chunk cũ hơn (Infinite Scroll Upwards)
+  const logsContainer = document.getElementById('workerLogsContainer');
+  logsContainer?.addEventListener('scroll', () => {
+    if (logsContainer.scrollTop < 40 && workerLogsHasMoreOlder && !workerLogsIsLoadingOlder) {
+      loadOlderLogs();
+    }
+  });
+
+  // Nút bấm thủ công "Tải log cũ"
+  document.getElementById('btnLoadOlderWorkerLogs')?.addEventListener('click', loadOlderLogs);
+
+  document.getElementById('btnToggleWorkerLogsAutoScroll')?.addEventListener('click', () => {
+    workerLogsAutoScroll = !workerLogsAutoScroll;
+    const label = document.getElementById('workerLogsAutoScrollLabel');
+    const btn = document.getElementById('btnToggleWorkerLogsAutoScroll');
+    if (label) label.textContent = workerLogsAutoScroll ? 'ON' : 'OFF';
+    if (btn) {
+      btn.className = workerLogsAutoScroll
+        ? 'px-2.5 py-1 rounded-lg text-xs bg-surface-800 text-emerald-400 border border-slate-700 hover:bg-surface-750 transition flex items-center gap-1.5'
+        : 'px-2.5 py-1 rounded-lg text-xs bg-surface-800 text-slate-400 border border-slate-700 hover:bg-surface-750 transition flex items-center gap-1.5';
+    }
+    if (workerLogsAutoScroll && logsContainer) {
+      logsContainer.scrollTop = logsContainer.scrollHeight;
+    }
+  });
+
+  document.getElementById('workerLogsFilterInput')?.addEventListener('input', (e) => {
+    workerLogsFilter = e.target.value.trim();
+    renderAllWorkerLogs(false);
+  });
+
+  document.getElementById('btnRefreshWorkerLogs')?.addEventListener('click', () => {
+    loadLatestChunkAndConnect();
+    showToast('Đã làm mới logs mới nhất!', 'info');
+  });
+
+  document.getElementById('btnCopyWorkerLogs')?.addEventListener('click', () => {
+    const text = workerLogsEntries.map(e => e.text).join('\n');
+    if (!text) {
+      showToast('Chưa có log nào để sao chép', 'warning');
+      return;
+    }
+    navigator.clipboard.writeText(text).then(() => {
+      showToast('Đã sao chép toàn bộ logs vào Clipboard!', 'success');
+    }).catch(() => {
+      showToast('Không thể sao chép logs', 'error');
+    });
+  });
+
+  document.getElementById('btnClearWorkerLogsView')?.addEventListener('click', () => {
+    workerLogsEntries = [];
+    workerLogsStartLine = 0;
+    workerLogsEndLine = 0;
+    if (logsContainer) logsContainer.innerHTML = '<div class="text-slate-500 italic py-6 text-center">Đã xóa màn hình hiển thị. Đang chờ log mới...</div>';
+    updateFooterInfo();
+    showToast('Đã xóa màn hình hiển thị log', 'info');
+  });
+
+  document.getElementById('btnClearServerLogFile')?.addEventListener('click', async () => {
+    if (!confirm('Bạn có chắc chắn muốn xóa sạch toàn bộ file logs của máy chủ worker trên ổ đĩa không?')) {
+      return;
+    }
+    try {
+      const res = await fetch('/api/v1/system/logs', { method: 'DELETE' });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        workerLogsEntries = [];
+        workerLogsStartLine = 0;
+        workerLogsEndLine = 0;
+        workerLogsTotalLines = 0;
+        workerLogsHasMoreOlder = false;
+        if (logsContainer) logsContainer.innerHTML = '<div class="text-slate-500 italic py-6 text-center">Toàn bộ logs trên máy chủ đã được làm trống.</div>';
+        updateFooterInfo();
+        showToast('Đã làm trống toàn bộ file log trên server!', 'success');
+      } else {
+        showToast(data.error || 'Lỗi khi xóa log', 'error');
+      }
+    } catch (e) {
+      showToast('Lỗi kết nối: ' + e.message, 'error');
+    }
+  });
+
+  // Hỗ trợ phím ESC để đóng modal
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      const modal = document.getElementById('workerLogsModal');
+      if (modal && !modal.classList.contains('hidden')) {
+        closeWorkerLogsModal();
+      }
+    }
+  });
+
+  window.aiWorker.openWorkerLogsModal = openWorkerLogsModal;
+  window.aiWorker.closeWorkerLogsModal = closeWorkerLogsModal;
   window.aiWorker.openCloneTaskModal = openCloneTaskModal;
   window.aiWorker.closeCloneTaskModal = closeCloneTaskModal;
 })();

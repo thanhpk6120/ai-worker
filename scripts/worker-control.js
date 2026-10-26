@@ -75,7 +75,7 @@ function isAlive(pid) {
 
 function ps(cmdArgs) {
   try {
-    return execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', cmdArgs], { encoding: 'utf8' });
+    return execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', cmdArgs], { encoding: 'utf8' });
   } catch (e) { return ''; }
 }
 
@@ -140,8 +140,9 @@ async function start() {
   ].join(';');
   const psScript = [
     `$ErrorActionPreference='Stop'`,
-    `$cmd = 'cmd.exe /c "set PATH=${PATH_ENTRIES} && ""${node}"" src/index.js >> ""${LOG_FILE}"" 2>&1"'`,
-    `$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmd; CurrentDirectory = '${ROOT}' }`,
+    `$si = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [UInt16]0 }`,
+    `$cmd = 'cmd.exe /c "set PATH=${PATH_ENTRIES} && ""${node}"" src/index.js"'`,
+    `$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmd; CurrentDirectory = '${ROOT}'; ProcessStartupInformation = $si }`,
     `Write-Output $r.ProcessId`,
   ].join('; ');
   const out = ps(psScript).trim().split(/\r?\n/).filter(Boolean);

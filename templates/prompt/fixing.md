@@ -45,9 +45,11 @@ Nhiệm vụ của bạn là tiếp nhận toàn bộ ngữ cảnh kiểm thử 
      * CHỈ sửa đúng nguyên nhân gây ra lỗi đó trong mã nguồn. TUYỆT ĐỐI KHÔNG sửa lan man các phần code không liên quan.
    - **UNITTEST ĐÚNG PHẦN ĐÃ FIX:**
      * Sau khi sửa mã nguồn, BẮT BUỘC chạy unit test của đúng hàm/class vừa sửa để đảm bảo lỗi đã được khắc phục hoàn toàn.
-   - **CẬP NHẬT EVIDENCE & CHUYỂN TRẠNG THÁI ĐỂ VERIFY LẠI:**
-     * Chạy lại test case tương ứng để thu thập lại đúng file evidence bị lỗi (ví dụ: chụp lại ảnh mới đúng tiêu chí, gọi lại API mới, xuất lại log).
-     * Cập nhật `metadata.json` với trạng thái `NOT VERIFY` cho các file evidence mới.
+   - **CẬP NHẬT EVIDENCE & CHUYỂN TRẠNG THÁI ĐỂ VERIFY LẠI (CHỐNG DUPLICATE):**
+     * **CHỈ THU THẬP/CHỤP ẢNH LẠI ĐÚNG TRƯỜNG HỢP BỊ FAILED:** Chỉ chụp lại ảnh hoặc chạy lại đúng test case được báo FAILED trong `Error Context`. Giữ nguyên các test case và bằng chứng đã đạt PASS trước đó.
+     * **GHI ĐÈ ĐÚNG TÊN FILE CHUẨN:** Lưu ảnh ghi đè trực tiếp vào đúng tên file ảnh quy định trong `test_plan.md`.
+     * **TUYỆT ĐỐI KHÔNG TẠO FILE ALIAS / BẢN SAO TRÙNG LẶP:** Không tạo file tạm/tiếng Việt rồi dùng lệnh `cp` nhân bản sang tên tiếng Anh (hoặc ngược lại). Nếu phát hiện file thừa, file trùng lặp cũ trong `evidence/`, hãy dọn dẹp xóa bỏ để tránh vi phạm bộ lọc MD5 duplicate.
+     * **KHAI BÁO CHUẨN TRONG METADATA.JSON:** Mỗi test case chỉ liên kết với đúng 1 file ảnh chuẩn tương ứng, không khai báo nhiều file trùng nội dung cho cùng 1 test case.
      * Kết thúc lượt để hệ thống tự động chuyển trạng thái sang [VERIFY] đối soát lại!
 5. **XỬ LÝ LỖI LỆCH DỮ LIỆU API & DATABASE (DATA MISMATCH & RECONCILIATION):**
    - Nếu lỗi do dữ liệu trả về giữa API và câu lệnh SELECT trong CSDL không khớp:
