@@ -552,20 +552,12 @@ function normalizeEvidenceTypeHint(meta) {
   return null;
 }
 function hasApiRuntimeShape(parsedData) {
-  if (!parsedData || typeof parsedData !== 'object') return false;
-  if (Array.isArray(parsedData)) {
-    return parsedData.some(item => hasApiRuntimeShape(item));
-  }
+  if (!parsedData || typeof parsedData !== 'object' || Array.isArray(parsedData)) return false;
   const req = parsedData.request && typeof parsedData.request === 'object' ? parsedData.request : null;
   const hasEndpoint = !!(parsedData.endpoint || parsedData.url || (req && (req.url || req.endpoint || req.path)));
   const hasMethod = !!(parsedData.method || (req && req.method));
-  const hasStatus = parsedData.status !== undefined || parsedData.statusCode !== undefined || parsedData.status_code !== undefined || parsedData.responseStatus !== undefined || (parsedData.response && typeof parsedData.response === 'object' && parsedData.response.status !== undefined);
-  if (hasEndpoint && (hasMethod || hasStatus)) return true;
-  const list = Array.isArray(parsedData.cases) ? parsedData.cases : Array.isArray(parsedData.items) ? parsedData.items : Array.isArray(parsedData.endpointsChecked) ? parsedData.endpointsChecked : null;
-  if (list && list.length > 0) {
-    return list.some(item => hasApiRuntimeShape(item));
-  }
-  return false;
+  const hasStatus = parsedData.status !== undefined || parsedData.statusCode !== undefined || parsedData.status_code !== undefined || (parsedData.response && typeof parsedData.response === 'object' && parsedData.response.status !== undefined);
+  return hasEndpoint && (hasMethod || hasStatus);
 }
 function hasDbShape(parsedData, filename) {
   const name = String(filename || '').toLowerCase();
@@ -2493,35 +2485,20 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
               let hasStatus = !!(objA && (objA.status || objA.responseStatus || objA.statusCode || objA.httpStatus || eps.some(e => e && (e.status || e.httpStatus || e.statusCode))));
               let hasBody = !!(objA && (objA.body || objA.data || objA.response || objA.payload || objA.result || objA.count !== undefined || objA.items || objA.rows || objA.records || objA.total !== undefined || objA.itemCount !== undefined || objA.firstItem !== undefined || eps.length > 0));
 
-              // Ho tro cau truc mang test case trong cac thuoc tinh: cases, items, tests, endpoints, calls
-              const arrayCases = (objA && typeof objA === 'object' && !Array.isArray(objA)) ? (
-                Array.isArray(objA.cases) ? objA.cases :
-                Array.isArray(objA.items) ? objA.items :
-                Array.isArray(objA.tests) ? objA.tests :
-                Array.isArray(objA.endpoints) ? objA.endpoints :
-                Array.isArray(objA.calls) ? objA.calls : []
-              ) : [];
-              if (arrayCases.length > 0) {
-                if (!hasMethod && arrayCases.some(s => s && (s.endpoint || s.url || s.method || s.httpMethod))) hasMethod = true;
-                if (!hasUrl && (objA.baseUrl || arrayCases.some(s => s && (s.endpoint || s.url || s.baseUrl)))) hasUrl = true;
-                if (!hasStatus && arrayCases.some(s => s && (s.status || s.responseStatus || s.httpStatus || s.statusCode))) hasStatus = true;
-                if (!hasBody && arrayCases.some(s => s && (s.body || s.data || s.response || s.responseBody || s.payload || s.result || s.itemCount !== undefined || s.items || s.firstItem !== undefined))) hasBody = true;
-              }
-
               // Ho tro cau truc long test case (nested testcases: { login: { endpoint, httpStatus }, tc15_hub: { httpStatus, httpMethod }... })
               if (objA && typeof objA === 'object' && !Array.isArray(objA)) {
                 const subValues = Object.values(objA).filter(v => v && typeof v === 'object' && !Array.isArray(v));
                 if (subValues.length > 0) {
                   if (!hasMethod && subValues.some(s => s.endpoint || s.url || s.method || s.httpMethod)) hasMethod = true;
                   if (!hasUrl && (objA.baseUrl || subValues.some(s => s.endpoint || s.url || s.baseUrl))) hasUrl = true;
-                  if (!hasStatus && subValues.some(s => s.status || s.responseStatus || s.httpStatus || s.statusCode)) hasStatus = true;
-                  if (!hasBody && subValues.some(s => s.body || s.data || s.response || s.responseBody || s.payload || s.result || s.itemCount !== undefined || s.items || s.keys || s.count !== undefined || s.firstItem !== undefined)) hasBody = true;
+                  if (!hasStatus && subValues.some(s => s.status || s.httpStatus || s.statusCode)) hasStatus = true;
+                  if (!hasBody && subValues.some(s => s.body || s.data || s.response || s.payload || s.result || s.itemCount !== undefined || s.items || s.keys || s.count !== undefined || s.firstItem !== undefined)) hasBody = true;
                 }
               } else if (Array.isArray(objA)) {
                 if (objA.some(s => s && (s.endpoint || s.url || s.method || s.httpMethod))) hasMethod = true;
                 if (objA.some(s => s && (s.endpoint || s.url || s.baseUrl))) hasUrl = true;
-                if (objA.some(s => s && (s.status || s.responseStatus || s.httpStatus || s.statusCode))) hasStatus = true;
-                if (objA.some(s => s && (s.body || s.data || s.response || s.responseBody || s.payload || s.result || s.itemCount !== undefined || s.items || s.firstItem !== undefined))) hasBody = true;
+                if (objA.some(s => s && (s.status || s.httpStatus || s.statusCode))) hasStatus = true;
+                if (objA.some(s => s && (s.body || s.data || s.response || s.payload || s.result || s.itemCount !== undefined || s.items || s.firstItem !== undefined))) hasBody = true;
               }
 
               const buildOnlyApi = /npm install|npm run build|building|compiled|vite|webpack|tsc -b/i.test(strA) && !HTTP_RUNTIME_RE.test(strA);
