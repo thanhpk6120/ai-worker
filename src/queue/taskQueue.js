@@ -9,6 +9,7 @@ class TaskQueue extends EventEmitter {
     this.runningJobs = new Map(); // jobId -> { job, runFn, priority, workspaceKey, startTime }
     this.queue = []; // Array of { job, runFn, priority, enqueuedAt }
     this.activeWorkspaces = new Map(); // workspaceKey -> jobId
+    this.devBranchLocks = new Map(); // "${workspaceId}:${serviceKey}" -> jobId
   }
 
   /**
@@ -19,7 +20,7 @@ class TaskQueue extends EventEmitter {
    */
   _getWorkspaceKey(job) {
     if (!job) return null;
-    const p = job.repo_path || job.worktree_path || job.repoPath || job.worktreePath;
+    const p = job.worktree_path || job.worktreePath || job.repo_path || job.repoPath;
     if (p && typeof p === 'string' && p.trim()) {
       const resolved = path.resolve(p.trim());
       return `path:${process.platform === 'win32' ? resolved.toLowerCase() : resolved}`;
@@ -114,6 +115,7 @@ class TaskQueue extends EventEmitter {
       .then(() => runFn(job, { timeoutMs }))
       .then((result) => {
         this.runningJobs.delete(jobId);
+        this.releaseAllDevLocksForJob(jobId);
         if (wsKey && this.activeWorkspaces.get(wsKey) === jobId) {
           this.activeWorkspaces.delete(wsKey);
         }
@@ -128,6 +130,7 @@ class TaskQueue extends EventEmitter {
       })
       .catch((error) => {
         this.runningJobs.delete(jobId);
+        this.releaseAllDevLocksForJob(jobId);
         if (wsKey && this.activeWorkspaces.get(wsKey) === jobId) {
           this.activeWorkspaces.delete(wsKey);
         }
@@ -157,6 +160,7 @@ class TaskQueue extends EventEmitter {
       this.emit('job:cancelled', { jobId, status: 'RUNNING' });
       this.runningJobs.delete(jobId);
       this.releaseWorkspaceLock(jobId);
+      this.releaseAllDevLocksForJob(jobId);
       return { cancelled: true, state: 'RUNNING', job: runningInfo.job };
     }
 
@@ -175,6 +179,105 @@ class TaskQueue extends EventEmitter {
       }
     }
     return false;
+  }
+  /**
+   * Khóa độc quyền nhánh phát triển (Exclusive Dev Lock) cho bước MERGING trên repo gốc.
+   * Đảm bảo chỉ 1 job được phép merge/re-test trên repo gốc của 1 service tại 1 thời điểm.
+   * @param {string} serviceKey Tên service
+   * @param {string} jobId ID của job
+   * @param {string} [workspaceId='default'] ID workspace
+   * @returns {boolean} true nếu giành được lock
+   */
+  acquireDevLock(serviceKey, jobId, workspaceId = 'default') {
+    const lockKey = `${workspaceId}:${serviceKey}`;
+    const currentHolder = this.devBranchLocks.get(lockKey);
+    if (!currentHolder || currentHolder === jobId) {
+      this.devBranchLocks.set(lockKey, jobId);
+      this.emit('dev_lock:acquired', { workspaceId, serviceKey, jobId });
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Nhả khóa độc quyền nhánh phát triển của service.
+   * @param {string} serviceKey Tên service
+   * @param {string} jobId ID của job
+   * @param {string} [workspaceId='default'] ID workspace
+   * @returns {boolean} true nếu nhả thành công
+   */
+  releaseDevLock(serviceKey, jobId, workspaceId = 'default') {
+    const lockKey = `${workspaceId}:${serviceKey}`;
+    if (this.devBranchLocks.get(lockKey) === jobId) {
+      this.devBranchLocks.delete(lockKey);
+      this.emit('dev_lock:released', { workspaceId, serviceKey, jobId });
+      this._processNext();
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Kiểm tra xem service có đang bị khóa bởi job khác không
+   */
+  isDevLocked(serviceKey, workspaceId = 'default', excludeJobId = null) {
+    const lockKey = `${workspaceId}:${serviceKey}`;
+    const holder = this.devBranchLocks.get(lockKey);
+    if (!holder) return false;
+    if (excludeJobId && holder === excludeJobId) return false;
+    return true;
+  }
+
+  /**
+   * Giải phóng toàn bộ dev lock do một job nắm giữ (khi hoàn tất, fail hoặc cancel)
+   */
+  releaseAllDevLocksForJob(jobId) {
+    let releasedCount = 0;
+    for (const [lockKey, holderId] of this.devBranchLocks.entries()) {
+      if (holderId === jobId) {
+        this.devBranchLocks.delete(lockKey);
+        const [wsId, svcKey] = lockKey.split(':');
+        this.emit('dev_lock:released', { workspaceId: wsId, serviceKey: svcKey, jobId });
+        releasedCount++;
+      }
+    }
+    if (releasedCount > 0) {
+      this._processNext();
+    }
+    return releasedCount;
+  }
+
+  /**
+   * Chờ đến khi giành được dev lock cho service (hoặc timeout)
+   */
+  waitForDevLock(serviceKey, jobId, workspaceId = 'default', timeoutMs = 60000) {
+    if (this.acquireDevLock(serviceKey, jobId, workspaceId)) {
+      return Promise.resolve(true);
+    }
+
+    return new Promise((resolve) => {
+      let timer = null;
+      const onReleased = (evt) => {
+        if (evt.serviceKey === serviceKey && evt.workspaceId === workspaceId) {
+          if (this.acquireDevLock(serviceKey, jobId, workspaceId)) {
+            cleanup();
+            resolve(true);
+          }
+        }
+      };
+
+      const cleanup = () => {
+        if (timer) clearTimeout(timer);
+        this.removeListener('dev_lock:released', onReleased);
+      };
+
+      this.on('dev_lock:released', onReleased);
+
+      timer = setTimeout(() => {
+        cleanup();
+        resolve(this.acquireDevLock(serviceKey, jobId, workspaceId));
+      }, timeoutMs);
+    });
   }
 
   /**

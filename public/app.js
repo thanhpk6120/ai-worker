@@ -420,6 +420,15 @@
     document.getElementById('btnOpenNewWorkspaceModal')?.addEventListener('click', openWorkspaceModal);
     document.getElementById('btnCloseWorkspaceModal')?.addEventListener('click', closeWorkspaceModal);
     document.getElementById('btnCancelWorkspaceModal')?.addEventListener('click', closeWorkspaceModal);
+    // Workspace Services Modal
+    document.getElementById('btnCloseWorkspaceServicesModal')?.addEventListener('click', closeWorkspaceServicesModal);
+    document.getElementById('btnScanWorkspaceServices')?.addEventListener('click', handleScanWorkspaceServices);
+    document.getElementById('btnToggleAddServiceForm')?.addEventListener('click', () => {
+      const form = document.getElementById("wsServiceForm");
+      if (form) form.classList.toggle("hidden");
+    });
+    document.getElementById('btnCancelEditService')?.addEventListener('click', resetServiceForm);
+    document.getElementById('wsServiceForm')?.addEventListener('submit', handleSaveServiceForm);
 
     // Feature Path Preview
     const updateFeaturePathPreview = () => {
@@ -1565,8 +1574,8 @@
     const pTest = getNodeCenter('stepNode_TESTING');
     const pVerify = getNodeCenter('stepNode_VERIFY');
     const pFix = getNodeCenter('stepNode_FIXING');
+    const pMerge = getNodeCenter('stepNode_MERGING');
     const pDone = getNodeCenter('stepNode_DONE');
-
     const createPath = (d, className) => {
       const pathEl = document.createElementNS('http://www.w3.org/2000/svg', 'path');
       pathEl.setAttribute('d', d);
@@ -1616,6 +1625,7 @@
       `M ${pTest.x + 17} 17 L ${pVerify.x - 17} 17`,
       hasReachedVerify ? 'stepper-svg-path active' : 'stepper-svg-path'
     );
+    const hasReachedMerging = status === 'MERGING' || currentStep === 'MERGING' || isDone;
     if (hasTouchedFixing) {
       // Đường chính đi xuyên qua node FIXING: vàng khi active, xanh khi xong
       createPath(
@@ -1623,17 +1633,22 @@
         status === 'FIXING' ? 'stepper-svg-path pending stroke-amber-400' : 'stepper-svg-path active'
       );
       createPath(
-        `M ${pFix.x + 17} 17 L ${pDone.x - 17} 17`,
-        isDone ? 'stepper-svg-path active' : 'stepper-svg-path'
+        `M ${pFix.x + 17} 17 L ${pMerge.x - 17} 17`,
+        hasReachedMerging ? 'stepper-svg-path active' : 'stepper-svg-path'
       );
     } else {
-      // KHÔNG chạm FIXING: ĐƯỜNG NỐI VÒNG LÊN TRÊN ĐẦU FIXING RỒI VÒNG XUỐNG DONE!
-      // Bắt đầu và kết thúc tại mép trên-ngoài của hình tròn (r=17, góc 30 độ: dx=15, dy=8 -> y=9)
+      // KHÔNG chạm FIXING: ĐƯỜNG NỐI VÒNG LÊN TRÊN ĐẦU FIXING RỒI VÒNG XUỐNG MERGING!
       createPath(
-        `M ${pVerify.x + 15} 9 Q ${pFix.x} -14 ${pDone.x - 15} 9`,
-        isDone ? 'stepper-svg-path stepper-svg-bridge' : 'stepper-svg-path'
+        `M ${pVerify.x + 15} 9 Q ${pFix.x} -14 ${pMerge.x - 15} 9`,
+        hasReachedMerging ? 'stepper-svg-path stepper-svg-bridge' : 'stepper-svg-path'
       );
     }
+
+    // 5. Đường nối MERGING -> DONE
+    createPath(
+      `M ${pMerge.x + 17} 17 L ${pDone.x - 17} 17`,
+      isDone ? 'stepper-svg-path active' : 'stepper-svg-path'
+    );
   }
 
 
@@ -1653,15 +1668,16 @@
     const nodeTesting = document.getElementById('stepNode_TESTING');
     const nodeVerify = document.getElementById('stepNode_VERIFY');
     const nodeFixing = document.getElementById('stepNode_FIXING');
+    const nodeMerging = document.getElementById('stepNode_MERGING');
     const nodeDone = document.getElementById('stepNode_DONE');
 
-    [nodeTodo, nodePlanning, nodePending, nodeImplement, nodeTesting, nodeVerify, nodeFixing, nodeDone].forEach(n => {
+    [nodeTodo, nodePlanning, nodePending, nodeImplement, nodeTesting, nodeVerify, nodeFixing, nodeMerging, nodeDone].forEach(n => {
       if (!n) return;
       n.classList.remove('completed', 'active', 'pending', 'failed', 'untouched');
       n.classList.add('untouched');
     });
 
-    const STEP_ORDER = ['TODO', 'PLANNING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'DONE'];
+    const STEP_ORDER = ['TODO', 'PLANNING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'MERGING', 'DONE'];
     const curStepIdx = STEP_ORDER.indexOf(currentStep);
     const statusIdx = STEP_ORDER.indexOf(status);
     const maxIdx = Math.max(curStepIdx, statusIdx);
@@ -1721,6 +1737,17 @@
         else nodeFixing.classList.add('completed');
       } else {
         nodeFixing.classList.add('untouched');
+      }
+    }
+    if (nodeMerging) {
+      if (status === 'MERGING' || currentStep === 'MERGING') {
+        nodeMerging.classList.remove('untouched');
+        nodeMerging.classList.add('active');
+      } else if (isDone) {
+        nodeMerging.classList.remove('untouched');
+        nodeMerging.classList.add('completed');
+      } else {
+        nodeMerging.classList.add('untouched');
       }
     }
 
@@ -4392,10 +4419,14 @@
         <tr class="hover:bg-surface-800/50 transition">
           <td class="p-3 font-medium text-slate-200">${escapeHtml(ws.name || ws.path)}</td>
           <td class="p-3 font-mono text-slate-400 text-[11px] truncate max-w-[200px]" title="${escapeHtml(ws.path)}">${escapeHtml(ws.path)}</td>
+          <td class="p-3 text-center">
+            <button type="button" onclick="openWorkspaceServicesModal('${ws.id}')" class="px-2 py-1 bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 border border-indigo-500/20 rounded text-[11px] font-semibold transition flex items-center gap-1 mx-auto" title="Quản lý các repo services của workspace">
+              <i class="fa-solid fa-network-wired text-[10px]"></i> Services
+            </button>
+          </td>
           <td class="p-3 font-mono text-slate-400 text-[11px]">${escapeHtml(ws.features_dir || "docs/features")}</td>
           <td class="p-3 text-center">${defBadge}</td>
           <td class="p-3 text-right">
-            <div class="flex items-center justify-end gap-2">
               <button type="button" onclick="editWorkspace('${ws.id}')" class="text-slate-400 hover:text-brand-400 transition" title="Sửa"><i class="fa-solid fa-pen-to-square"></i></button>
               <button type="button" onclick="handleDeleteWorkspace('${ws.id}')" class="text-slate-400 hover:text-rose-400 transition" title="Xóa"><i class="fa-solid fa-trash-can"></i></button>
             </div>
@@ -4505,6 +4536,236 @@
       showToast(err.message, "error");
     }
   };
+  // ==========================================
+  // WORKSPACE SERVICES MANAGEMENT (Polyrepo)
+  // ==========================================
+  let currentManagingWorkspaceId = null;
+  let currentWorkspaceServices = [];
+
+  window.openWorkspaceServicesModal = async (workspaceId) => {
+    currentManagingWorkspaceId = workspaceId;
+    const ws = state.workspaces.find(w => w.id === workspaceId);
+    if (!ws) return;
+
+    const modal = document.getElementById("modalWorkspaceServices");
+    const titleEl = document.getElementById("wsServicesModalTitle");
+    const subTitleEl = document.getElementById("wsServicesModalSubtitle");
+    if (titleEl) titleEl.textContent = ws.name || ws.path;
+    if (subTitleEl) subTitleEl.textContent = "Đường dẫn: " + ws.path;
+
+    if (modal) modal.classList.remove("hidden");
+    resetServiceForm();
+    await loadWorkspaceServices(workspaceId);
+  };
+
+  window.closeWorkspaceServicesModal = () => {
+    const modal = document.getElementById("modalWorkspaceServices");
+    if (modal) modal.classList.add("hidden");
+    currentManagingWorkspaceId = null;
+    currentWorkspaceServices = [];
+  };
+
+  async function loadWorkspaceServices(workspaceId) {
+    const tbody = document.getElementById("wsServicesTableBody");
+    if (tbody) {
+      tbody.innerHTML = '<tr><td colspan="6" class="p-4 text-center text-slate-500"><i class="fa-solid fa-spinner fa-spin mr-1"></i> Đang tải danh sách services...</td></tr>';
+    }
+    try {
+      const res = await fetch(`/api/v1/workspaces/${workspaceId}/services`);
+      const data = await res.json();
+      if (data.success) {
+        currentWorkspaceServices = data.services || [];
+        renderWorkspaceServicesTable(currentWorkspaceServices);
+      } else {
+        if (tbody) tbody.innerHTML = `<tr><td colspan="6" class="p-4 text-center text-rose-400">Lỗi: ${escapeHtml(data.error)}</td></tr>`;
+      }
+    } catch (err) {
+      if (tbody) tbody.innerHTML = `<tr><td colspan="6" class="p-4 text-center text-rose-400">Lỗi kết nối: ${escapeHtml(err.message)}</td></tr>`;
+    }
+  }
+
+  function renderWorkspaceServicesTable(services) {
+    const tbody = document.getElementById("wsServicesTableBody");
+    if (!tbody) return;
+
+    if (!services || services.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6" class="p-4 text-center text-slate-500">Chưa có service nào trong workspace này. Bấm "Quét Dịch vụ (Auto-Scan)" hoặc "Thêm thủ công".</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = services.map(s => {
+      const enabledChecked = s.is_enabled ? 'checked' : '';
+      return `
+        <tr class="hover:bg-surface-800/50 transition">
+          <td class="p-3 text-center">
+            <input type="checkbox" ${enabledChecked} onchange="handleToggleService('${s.id}', this.checked)" class="w-4 h-4 rounded bg-surface-800 border-slate-700 text-indigo-500 cursor-pointer">
+          </td>
+          <td class="p-3 font-semibold text-slate-200">
+            <i class="fa-solid fa-cube text-indigo-400 mr-1.5 text-[10px]"></i>${escapeHtml(s.service_key)}
+          </td>
+          <td class="p-3 font-mono text-slate-400 text-[11px]">${escapeHtml(s.repo_path)}</td>
+          <td class="p-3 font-mono text-emerald-400 text-[11px]">
+            <span class="px-2 py-0.5 bg-emerald-500/10 border border-emerald-500/20 rounded">${escapeHtml(s.dev_branch)}</span>
+          </td>
+          <td class="p-3 font-mono text-slate-400 text-[11px]">
+            ${s.deploy_branch ? `<span class="px-2 py-0.5 bg-purple-500/10 text-purple-400 border border-purple-500/20 rounded">${escapeHtml(s.deploy_branch)}</span>` : '<span class="text-slate-600">—</span>'}
+          </td>
+          <td class="p-3 text-right">
+            <div class="flex items-center justify-end gap-2">
+              <button type="button" onclick="editService('${s.id}')" class="text-slate-400 hover:text-indigo-400 transition" title="Sửa"><i class="fa-solid fa-pen-to-square"></i></button>
+              <button type="button" onclick="handleDeleteService('${s.id}')" class="text-slate-400 hover:text-rose-400 transition" title="Xóa"><i class="fa-solid fa-trash-can"></i></button>
+            </div>
+          </td>
+        </tr>
+      `;
+    }).join("");
+  }
+
+  function resetServiceForm() {
+    const form = document.getElementById("wsServiceForm");
+    if (!form) return;
+    document.getElementById("serviceEditId").value = "";
+    document.getElementById("serviceFormKey").value = "";
+    document.getElementById("serviceFormRepoPath").value = "";
+    document.getElementById("serviceFormDevBranch").value = "";
+    document.getElementById("serviceFormDeployBranch").value = "";
+    document.getElementById("serviceFormIsEnabled").checked = true;
+    document.getElementById("serviceFormTitle").innerHTML = '<i class="fa-solid fa-plus-circle"></i> Thêm Service Mới';
+    document.getElementById("serviceSubmitBtnText").textContent = "Lưu Service";
+    form.classList.add("hidden");
+  }
+
+  window.editService = (serviceId) => {
+    const s = currentWorkspaceServices.find(item => item.id === serviceId);
+    if (!s) return;
+    const form = document.getElementById("wsServiceForm");
+    if (!form) return;
+
+    form.classList.remove("hidden");
+    document.getElementById("serviceEditId").value = s.id;
+    document.getElementById("serviceFormKey").value = s.service_key;
+    document.getElementById("serviceFormRepoPath").value = s.repo_path;
+    document.getElementById("serviceFormDevBranch").value = s.dev_branch;
+    document.getElementById("serviceFormDeployBranch").value = s.deploy_branch || "";
+    document.getElementById("serviceFormIsEnabled").checked = Boolean(s.is_enabled);
+    document.getElementById("serviceFormTitle").innerHTML = `<i class="fa-solid fa-pen-to-square"></i> Sửa Service: <span class="text-slate-200">${escapeHtml(s.service_key)}</span>`;
+    document.getElementById("serviceSubmitBtnText").textContent = "Cập nhật";
+  };
+
+  window.handleToggleService = async (serviceId, isEnabled) => {
+    try {
+      const res = await fetch(`/api/v1/workspaces/${currentManagingWorkspaceId}/services/${serviceId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_enabled: isEnabled ? 1 : 0 })
+      });
+      const data = await res.json();
+      if (!data.success) {
+        showToast(data.error || 'Lỗi cập nhật trạng thái service', 'error');
+        await loadWorkspaceServices(currentManagingWorkspaceId);
+      }
+    } catch (err) {
+      showToast(err.message, 'error');
+    }
+  };
+
+  window.handleDeleteService = async (serviceId) => {
+    if (!confirm('Bạn có chắc chắn muốn xóa cấu hình service này khỏi workspace?')) return;
+    try {
+      const res = await fetch(`/api/v1/workspaces/${currentManagingWorkspaceId}/services/${serviceId}`, {
+        method: 'DELETE'
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast('Đã xóa service thành công', 'success');
+        await loadWorkspaceServices(currentManagingWorkspaceId);
+      } else {
+        showToast(data.error || 'Lỗi khi xóa service', 'error');
+      }
+    } catch (err) {
+      showToast(err.message, 'error');
+    }
+  };
+
+  async function handleScanWorkspaceServices() {
+    if (!currentManagingWorkspaceId) return;
+    const btn = document.getElementById("btnScanWorkspaceServices");
+    const origHtml = btn ? btn.innerHTML : '';
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang quét...';
+    }
+
+    try {
+      const res = await fetch(`/api/v1/workspaces/${currentManagingWorkspaceId}/services/scan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ auto_save: true })
+      });
+      const data = await res.json();
+      if (data.success) {
+        const count = (data.detected || []).length;
+        showToast(`Đã quét và cập nhật thành công ${count} service(s)!`, 'success');
+        await loadWorkspaceServices(currentManagingWorkspaceId);
+      } else {
+        showToast(data.error || 'Lỗi quét service', 'error');
+      }
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = origHtml;
+      }
+    }
+  }
+
+  async function handleSaveServiceForm(e) {
+    if (e) e.preventDefault();
+    if (!currentManagingWorkspaceId) return;
+
+    const id = document.getElementById("serviceEditId").value;
+    const service_key = document.getElementById("serviceFormKey").value.trim();
+    const repo_path = document.getElementById("serviceFormRepoPath").value.trim();
+    const dev_branch = document.getElementById("serviceFormDevBranch").value.trim();
+    const deploy_branch = document.getElementById("serviceFormDeployBranch").value.trim();
+    const is_enabled = document.getElementById("serviceFormIsEnabled").checked ? 1 : 0;
+
+    if (!service_key || !repo_path || !dev_branch) {
+      showToast('Vui lòng điền đủ Tên Service, Đường dẫn và Nhánh Dev', 'warning');
+      return;
+    }
+
+    const isEdit = Boolean(id);
+    const url = isEdit
+      ? `/api/v1/workspaces/${currentManagingWorkspaceId}/services/${id}`
+      : `/api/v1/workspaces/${currentManagingWorkspaceId}/services`;
+    const method = isEdit ? 'PUT' : 'POST';
+
+    try {
+      const res = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          service_key,
+          repo_path,
+          dev_branch,
+          deploy_branch,
+          is_enabled
+        })
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast(isEdit ? 'Cập nhật service thành công' : 'Thêm service thành công', 'success');
+        resetServiceForm();
+        await loadWorkspaceServices(currentManagingWorkspaceId);
+      } else {
+        showToast(data.error || 'Lỗi lưu service', 'error');
+      }
+    } catch (err) {
+      showToast(err.message, 'error');
+    }
+  }
 
   function updateFeaturePathHint() {
     const hintEl = document.getElementById("hintWorkspacePath");

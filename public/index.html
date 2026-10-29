@@ -4,7 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AI Worker - Autonomous Multi-Agent Pipeline</title>
-
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="alternate icon" type="image/x-icon" href="/favicon.ico">
   <!-- Precompiled Static Tailwind CSS -->
   <link rel="stylesheet" href="/tailwind.css">
 
@@ -375,6 +376,12 @@
                 <div class="stepper-sublabel">Sửa lỗi lặp</div>
               </div>
 
+              <!-- 6.1 MERGING -->
+              <div class="stepper-item untouched" data-step="MERGING" id="stepNode_MERGING">
+                <div class="stepper-circle"><i class="fa-solid fa-code-merge text-xs"></i></div>
+                <div class="stepper-label">MERGING</div>
+                <div class="stepper-sublabel">Tích hợp dev</div>
+              </div>
               <!-- 7. DONE -->
               <div class="stepper-item" data-step="DONE" id="stepNode_DONE">
                 <div class="stepper-circle"><i class="fa-solid fa-check text-xs"></i></div>
@@ -1046,6 +1053,7 @@
               <tr>
                 <th class="p-3 font-semibold">Tên Workspace</th>
                 <th class="p-3 font-semibold">Đường dẫn (Path)</th>
+                <th class="p-3 font-semibold text-center">Dịch vụ (Services)</th>
                 <th class="p-3 font-semibold">Thư mục Features</th>
                 <th class="p-3 font-semibold text-center">Mặc định</th>
                 <th class="p-3 font-semibold text-right">Thao tác</th>
@@ -1053,9 +1061,8 @@
             </thead>
             <tbody id="wsManagerTableBody" class="divide-y divide-slate-800/60 text-slate-300">
               <tr>
-                <td colspan="5" class="p-4 text-center text-slate-500">Đang tải danh sách...</td>
+                <td colspan="6" class="p-4 text-center text-slate-500">Đang tải danh sách...</td>
               </tr>
-            </tbody>
           </table>
         </div>
       </div>
@@ -1111,6 +1118,104 @@
     </div>
   </div>
 
+  <!-- ==================== MODAL: QUẢN LÝ DỊCH VỤ (WORKSPACE SERVICES) ==================== -->
+  <div id="modalWorkspaceServices" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm hidden">
+    <div class="bg-surface-900 border border-slate-800 rounded-2xl max-w-4xl w-full p-5 shadow-2xl flex flex-col max-h-[90vh] space-y-4 animate-in fade-in zoom-in-95 duration-150">
+      <!-- Header -->
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <div class="flex items-center gap-2.5">
+          <div class="w-9 h-9 rounded-xl bg-indigo-500/20 text-indigo-400 flex items-center justify-center border border-indigo-500/30">
+            <i class="fa-solid fa-network-wired text-base"></i>
+          </div>
+          <div>
+            <h3 class="text-sm font-bold text-white flex items-center gap-2">
+              Quản lý Dịch vụ (Polyrepo Services) — <span id="wsServicesModalTitle" class="text-indigo-400">Workspace</span>
+            </h3>
+            <p id="wsServicesModalSubtitle" class="text-[11px] text-slate-400 font-mono">Đường dẫn: ...</p>
+          </div>
+        </div>
+        <button id="btnCloseWorkspaceServicesModal" class="text-slate-400 hover:text-white p-1.5 rounded-lg hover:bg-surface-800 transition">
+          <i class="fa-solid fa-xmark text-base"></i>
+        </button>
+      </div>
+
+      <!-- Action Toolbar -->
+      <div class="flex items-center justify-between gap-2">
+        <div class="flex items-center gap-2">
+          <button type="button" id="btnScanWorkspaceServices" class="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-md transition flex items-center gap-1.5">
+            <i class="fa-solid fa-magnifying-glass"></i> Quét Dịch vụ (Auto-Scan)
+          </button>
+          <span class="text-[11px] text-slate-400">Tự quét thư mục cấp 1 &amp; nhận diện nhánh hiện tại</span>
+        </div>
+        <button type="button" id="btnToggleAddServiceForm" class="px-3 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-300 text-xs font-medium border border-slate-700 transition flex items-center gap-1.5">
+          <i class="fa-solid fa-plus text-emerald-400"></i> Thêm thủ công
+        </button>
+      </div>
+
+      <!-- Danh sách Services (Table) -->
+      <div class="flex-1 overflow-hidden flex flex-col min-h-0 border border-slate-800 rounded-xl bg-surface-950/40">
+        <div class="flex-1 overflow-y-auto custom-scrollbar p-0">
+          <table class="w-full text-left border-collapse text-xs">
+            <thead class="bg-surface-900 sticky top-0 text-[11px] uppercase tracking-wider text-slate-400 border-b border-slate-800">
+              <tr>
+                <th class="p-3 font-semibold text-center w-12">Bật</th>
+                <th class="p-3 font-semibold">Tên Service</th>
+                <th class="p-3 font-semibold">Thư mục (Repo Path)</th>
+                <th class="p-3 font-semibold">Nhánh Dev</th>
+                <th class="p-3 font-semibold">Nhánh Deploy</th>
+                <th class="p-3 font-semibold text-right">Thao tác</th>
+              </tr>
+            </thead>
+            <tbody id="wsServicesTableBody" class="divide-y divide-slate-800/60 text-slate-300">
+              <tr>
+                <td colspan="6" class="p-4 text-center text-slate-500">Chưa có service nào. Bấm "Quét Dịch vụ" để tự động nhận diện.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Form Thêm / Sửa Service (Ẩn/Hiện) -->
+      <form id="wsServiceForm" class="hidden border border-slate-800 rounded-xl p-4 bg-surface-850/60 space-y-3">
+        <div class="flex items-center justify-between">
+          <span id="serviceFormTitle" class="text-xs font-bold text-indigo-400 uppercase tracking-wider flex items-center gap-1.5">
+            <i class="fa-solid fa-plus-circle"></i> Thêm Service Mới
+          </span>
+          <button type="button" id="btnCancelEditService" class="text-[11px] text-slate-400 hover:text-rose-400 transition">
+            <i class="fa-solid fa-xmark mr-1"></i>Đóng form
+          </button>
+        </div>
+        <input type="hidden" id="serviceEditId" value="">
+        <div class="grid grid-cols-1 sm:grid-cols-4 gap-3">
+          <div class="space-y-1">
+            <label class="block text-[11px] font-semibold text-slate-300">Tên Service <span class="text-rose-400">*</span></label>
+            <input type="text" id="serviceFormKey" required placeholder="auth-service, docs..." class="w-full bg-surface-800 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition">
+          </div>
+          <div class="space-y-1">
+            <label class="block text-[11px] font-semibold text-slate-300">Đường dẫn Repo <span class="text-rose-400">*</span></label>
+            <input type="text" id="serviceFormRepoPath" required placeholder="./auth-service" class="w-full bg-surface-800 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 font-mono placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition">
+          </div>
+          <div class="space-y-1">
+            <label class="block text-[11px] font-semibold text-slate-300">Nhánh Phát Triển (Dev) <span class="text-rose-400">*</span></label>
+            <input type="text" id="serviceFormDevBranch" required placeholder="develop, main..." class="w-full bg-surface-800 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 font-mono placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition">
+          </div>
+          <div class="space-y-1">
+            <label class="block text-[11px] font-semibold text-slate-300">Nhánh Triển Khai (Deploy)</label>
+            <input type="text" id="serviceFormDeployBranch" placeholder="production, release..." class="w-full bg-surface-800 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 font-mono placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition">
+          </div>
+        </div>
+        <div class="flex items-center justify-between pt-1">
+          <label class="inline-flex items-center gap-2 cursor-pointer select-none">
+            <input type="checkbox" id="serviceFormIsEnabled" checked class="w-4 h-4 rounded bg-surface-800 border-slate-700 text-indigo-500 focus:ring-0 cursor-pointer">
+            <span class="text-xs text-slate-300 font-medium">Kích hoạt service này</span>
+          </label>
+          <button type="submit" id="btnSaveService" class="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-md transition flex items-center gap-1.5">
+            <i class="fa-solid fa-floppy-disk"></i> <span id="serviceSubmitBtnText">Lưu Service</span>
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
   <!-- ==================== MODAL: FOLDER BROWSER ==================== -->
   <div id="modalFolderBrowser" class="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm hidden">
     <div class="bg-surface-900 border border-slate-800 rounded-2xl max-w-2xl w-full p-5 shadow-2xl flex flex-col h-[70vh] space-y-4 animate-in fade-in zoom-in-95 duration-150">

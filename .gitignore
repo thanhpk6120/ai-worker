@@ -20,7 +20,10 @@ logs/
 .task_prompt.txt
 temp/
 worktrees/
+.worktrees/
 /evidence/
+.trash/
+*.tmp
 
 # OS and IDE files
 .DS_Store

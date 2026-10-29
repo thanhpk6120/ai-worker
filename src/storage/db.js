@@ -187,6 +187,38 @@ function initDb() {
     console.error('[DB] Lỗi migration workspaces features_dir:', err);
   }
 
+  // Bảng workspace_services (Quản lý các repo service con trong một workspace)
+  dbInstance.exec(`
+    CREATE TABLE IF NOT EXISTS workspace_services (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      service_key TEXT NOT NULL,
+      repo_path TEXT NOT NULL,
+      dev_branch TEXT NOT NULL,
+      deploy_branch TEXT,
+      is_enabled INTEGER DEFAULT 1,
+      created_at TEXT,
+      updated_at TEXT,
+      FOREIGN KEY (workspace_id) REFERENCES workspaces (id) ON DELETE CASCADE
+    );
+  `);
+
+  // Bảng job_worktrees (Theo dõi các worktree mount cho từng job)
+  dbInstance.exec(`
+    CREATE TABLE IF NOT EXISTS job_worktrees (
+      id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      service_key TEXT NOT NULL,
+      worktree_path TEXT NOT NULL,
+      task_branch TEXT NOT NULL,
+      base_dev_branch TEXT NOT NULL,
+      base_commit TEXT,
+      status TEXT DEFAULT 'ACTIVE',
+      created_at TEXT,
+      updated_at TEXT,
+      FOREIGN KEY (job_id) REFERENCES jobs (id) ON DELETE CASCADE
+    );
+  `);
   // Khởi tạo workspace mặc định nếu bảng trống
   try {
     const wsCount = dbInstance.prepare("SELECT COUNT(*) as count FROM workspaces").get();
@@ -850,6 +882,115 @@ function deleteWorkspace(id) {
 }
 
 // ==========================================
+// WORKSPACE_SERVICES CRUD
+// ==========================================
+function listWorkspaceServices(workspaceId) {
+  const db = getDb();
+  const stmt = db.prepare('SELECT * FROM workspace_services WHERE workspace_id = ? ORDER BY service_key ASC');
+  return stmt.all(workspaceId);
+}
+
+function getWorkspaceServiceById(id) {
+  const db = getDb();
+  const stmt = db.prepare('SELECT * FROM workspace_services WHERE id = ?');
+  return stmt.get(id) || null;
+}
+
+function getWorkspaceServiceByKey(workspaceId, serviceKey) {
+  const db = getDb();
+  const stmt = db.prepare('SELECT * FROM workspace_services WHERE workspace_id = ? AND service_key = ?');
+  return stmt.get(workspaceId, serviceKey) || null;
+}
+
+function addWorkspaceService({ workspace_id, service_key, repo_path, dev_branch, deploy_branch, is_enabled = 1 }) {
+  const db = getDb();
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const stmt = db.prepare(`
+    INSERT INTO workspace_services (id, workspace_id, service_key, repo_path, dev_branch, deploy_branch, is_enabled, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  stmt.run(id, workspace_id, service_key, repo_path, dev_branch, deploy_branch || null, is_enabled ? 1 : 0, now, now);
+  return getWorkspaceServiceById(id);
+}
+
+function updateWorkspaceService(id, updates) {
+  const db = getDb();
+  const current = getWorkspaceServiceById(id);
+  if (!current) return null;
+
+  const now = new Date().toISOString();
+  const service_key = updates.service_key !== undefined ? updates.service_key : current.service_key;
+  const repo_path = updates.repo_path !== undefined ? updates.repo_path : current.repo_path;
+  const dev_branch = updates.dev_branch !== undefined ? updates.dev_branch : current.dev_branch;
+  const deploy_branch = updates.deploy_branch !== undefined ? updates.deploy_branch : current.deploy_branch;
+  const is_enabled = updates.is_enabled !== undefined ? (updates.is_enabled ? 1 : 0) : current.is_enabled;
+
+  const stmt = db.prepare(`
+    UPDATE workspace_services
+    SET service_key = ?, repo_path = ?, dev_branch = ?, deploy_branch = ?, is_enabled = ?, updated_at = ?
+    WHERE id = ?
+  `);
+  stmt.run(service_key, repo_path, dev_branch, deploy_branch, is_enabled, now, id);
+  return getWorkspaceServiceById(id);
+}
+
+function deleteWorkspaceService(id) {
+  const db = getDb();
+  const stmt = db.prepare('DELETE FROM workspace_services WHERE id = ?');
+  const result = stmt.run(id);
+  return { success: result.changes > 0, id };
+}
+
+// ==========================================
+// JOB_WORKTREES CRUD
+// ==========================================
+function addJobWorktree({ job_id, service_key, worktree_path, task_branch, base_dev_branch, base_commit = null, status = 'ACTIVE' }) {
+  const db = getDb();
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const stmt = db.prepare(`
+    INSERT INTO job_worktrees (id, job_id, service_key, worktree_path, task_branch, base_dev_branch, base_commit, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  stmt.run(id, job_id, service_key, worktree_path, task_branch, base_dev_branch, base_commit, status, now, now);
+  return getJobWorktreeById(id);
+}
+
+function getJobWorktreeById(id) {
+  const db = getDb();
+  const stmt = db.prepare('SELECT * FROM job_worktrees WHERE id = ?');
+  return stmt.get(id) || null;
+}
+
+function listJobWorktrees(jobId) {
+  const db = getDb();
+  const stmt = db.prepare('SELECT * FROM job_worktrees WHERE job_id = ? ORDER BY created_at ASC');
+  return stmt.all(jobId);
+}
+
+function getJobWorktree(jobId, serviceKey) {
+  const db = getDb();
+  const stmt = db.prepare('SELECT * FROM job_worktrees WHERE job_id = ? AND service_key = ?');
+  return stmt.get(jobId, serviceKey) || null;
+}
+
+function updateJobWorktreeStatus(id, status) {
+  const db = getDb();
+  const now = new Date().toISOString();
+  const stmt = db.prepare('UPDATE job_worktrees SET status = ?, updated_at = ? WHERE id = ?');
+  stmt.run(status, now, id);
+  return getJobWorktreeById(id);
+}
+
+function deleteJobWorktree(id) {
+  const db = getDb();
+  const stmt = db.prepare('DELETE FROM job_worktrees WHERE id = ?');
+  const result = stmt.run(id);
+  return { success: result.changes > 0, id };
+}
+
+// ==========================================
 // SETTINGS CRUD
 // ==========================================
 function getSetting(key, def = null) {
@@ -893,7 +1034,20 @@ module.exports = {
   deleteWorkspace,
   updateWorkspace,
   setDefaultWorkspace,
-  // Settings
+  // Workspace Services
+  listWorkspaceServices,
+  getWorkspaceServiceById,
+  getWorkspaceServiceByKey,
+  addWorkspaceService,
+  updateWorkspaceService,
+  deleteWorkspaceService,
+  // Job Worktrees
+  addJobWorktree,
+  getJobWorktreeById,
+  listJobWorktrees,
+  getJobWorktree,
+  updateJobWorktreeStatus,
+  deleteJobWorktree,
   getSetting,
   setSetting,
   // Steps
