@@ -223,6 +223,38 @@ function pullLatestCode(repoFullPath, branch = '') {
   }
 }
 /**
+ * Đảm bảo .worktrees/ được ignore cục bộ tại repo con bằng .git/info/exclude,
+ * giữ git status của repo luôn sạch sẽ mà không làm thay đổi file .gitignore tracked.
+ */
+function ensureLocalGitExclude(repoFullPath) {
+  try {
+    const gitDir = path.join(repoFullPath, '.git');
+    if (!fs.existsSync(gitDir)) return;
+
+    let targetExcludeDir = path.join(gitDir, 'info');
+    if (fs.statSync(gitDir).isFile()) {
+      const gitContent = fs.readFileSync(gitDir, 'utf-8').trim();
+      const match = gitContent.match(/^gitdir:\s*(.+)$/i);
+      if (match) {
+        targetExcludeDir = path.join(path.resolve(repoFullPath, match[1]), 'info');
+      }
+    }
+
+    if (!fs.existsSync(targetExcludeDir)) {
+      fs.mkdirSync(targetExcludeDir, { recursive: true });
+    }
+
+    const excludeFile = path.join(targetExcludeDir, 'exclude');
+    let content = fs.existsSync(excludeFile) ? fs.readFileSync(excludeFile, 'utf-8') : '';
+    if (!content.includes('.worktrees')) {
+      content = (content.trim() ? content.trim() + '\n' : '') + '.worktrees/\n';
+      fs.writeFileSync(excludeFile, content, 'utf-8');
+    }
+  } catch (err) {
+    console.warn('[WorktreeManager] Không thể cập nhật .git/info/exclude:', err.message);
+  }
+}
+/**
  * Tạo worktree mới cho một service của task
  * @param {object} params
  * @param {string} params.repoFullPath Đường dẫn tuyệt đối repo gốc của service
@@ -242,9 +274,11 @@ function createTaskWorktree({ repoFullPath, worktreeDestPath, taskBranch, baseDe
     fs.mkdirSync(parentDir, { recursive: true });
   }
 
-  // 0. Luôn pull code mới nhất của baseDevBranch về trước khi phân nhánh worktree
-  pullLatestCode(repoFullPath, baseDevBranch);
+  // 0. Đảm bảo .worktrees/ được ignore cục bộ trong .git/info/exclude (không bẩn git status của repo con)
+  ensureLocalGitExclude(repoFullPath);
 
+  // 0b. Luôn pull code mới nhất của baseDevBranch về trước khi phân nhánh worktree
+  pullLatestCode(repoFullPath, baseDevBranch);
   // 1. Kiểm tra xem worktree path đã tồn tại chưa
   if (fs.existsSync(resolvedWorktree)) {
     try {

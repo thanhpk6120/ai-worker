@@ -174,8 +174,8 @@ describe('Polyrepo Multi-Service & Worktree Merging Test Suite', () => {
       assert.equal(orderSvc.dev_branch, 'main', 'Nhánh dev của order-service đúng là main');
     });
 
-    test('createTaskWorktree() và removeTaskWorktree() tạo và xóa worktree an toàn', () => {
-      const wtDest = path.join(testTmpDir, '.worktrees', 'TASK-TEST-01', 'auth-service');
+    test('createTaskWorktree() và removeTaskWorktree() tạo và xóa worktree an toàn bên trong repo con', () => {
+      const wtDest = path.join(serviceARepoPath, '.worktrees', 'TASK-TEST-01');
       const createRes = worktreeManager.createTaskWorktree({
         repoFullPath: serviceARepoPath,
         worktreeDestPath: wtDest,
@@ -184,9 +184,15 @@ describe('Polyrepo Multi-Service & Worktree Merging Test Suite', () => {
       });
 
       assert.equal(createRes.success, true, 'Tạo worktree thành công');
-      assert.ok(fs.existsSync(wtDest), 'Thư mục worktree tồn tại');
+      assert.ok(fs.existsSync(wtDest), 'Thư mục worktree tồn tại bên trong service');
       assert.ok(fs.existsSync(path.join(wtDest, '.git')), 'Thư mục .git worktree tồn tại');
 
+      // Kiểm tra xem .git/info/exclude đã tự động có .worktrees chưa
+      const excludePath = path.join(serviceARepoPath, '.git', 'info', 'exclude');
+      if (fs.existsSync(excludePath)) {
+        const excludeContent = fs.readFileSync(excludePath, 'utf-8');
+        assert.ok(excludeContent.includes('.worktrees'), 'Repo con đã tự động ignore .worktrees/ trong .git/info/exclude');
+      }
       // Kiểm tra nhánh của worktree
       const wtBranch = worktreeManager.getRepoCurrentBranch(wtDest);
       assert.equal(wtBranch, 'feature/TASK-TEST-01', 'Worktree đang ở nhánh feature/TASK-TEST-01');
@@ -217,7 +223,7 @@ describe('Polyrepo Multi-Service & Worktree Merging Test Suite', () => {
 
     test('mergeBranch() xử lý clean merge thành công', () => {
       // 1. Tạo worktree và sửa file
-      const wtDest = path.join(testTmpDir, '.worktrees', 'TASK-MERGE-CLEAN', 'order-service');
+      const wtDest = path.join(serviceBRepoPath, '.worktrees', 'TASK-MERGE-CLEAN');
       worktreeManager.createTaskWorktree({
         repoFullPath: serviceBRepoPath,
         worktreeDestPath: wtDest,
@@ -246,7 +252,7 @@ describe('Polyrepo Multi-Service & Worktree Merging Test Suite', () => {
     test('mergeBranch() phát hiện conflict và abortMerge() hoàn tác an toàn', () => {
       // Tạo conflict giữa repo gốc và task branch
       const conflictTaskBranch = 'feature/TASK-CONFLICT-TEST';
-      const wtDest = path.join(testTmpDir, '.worktrees', 'TASK-CONFLICT-TEST', 'order-service');
+      const wtDest = path.join(serviceBRepoPath, '.worktrees', 'TASK-CONFLICT-TEST');
       worktreeManager.createTaskWorktree({
         repoFullPath: serviceBRepoPath,
         worktreeDestPath: wtDest,
@@ -373,7 +379,7 @@ describe('Polyrepo Multi-Service & Worktree Merging Test Suite', () => {
   // ========================================================
   describe('5. Three-Tier State (Manifest & Registry) & Re-test Runner', () => {
     test('saveTaskManifest() và loadTaskManifest() đọc ghi .task-manifest.json chuẩn xác', () => {
-      const taskWtDir = path.join(testTmpDir, '.worktrees', 'TASK-MANIFEST-TEST');
+      const taskWtDir = path.join(serviceARepoPath, '.worktrees', 'TASK-MANIFEST-TEST');
       const manifestData = {
         task_code: 'TASK-MANIFEST-TEST',
         branch: 'feature/TASK-MANIFEST-TEST',

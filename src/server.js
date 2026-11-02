@@ -1248,12 +1248,10 @@ app.post('/api/v1/jobs/:id/worktrees/expand', (req, res) => {
       }
     }
 
-    // 3. Chuẩn bị đường dẫn worktree: <workspace>/.worktrees/<task_code>/<service_key>
+    // 3. Chuẩn bị đường dẫn worktree bên trong service repo: <serviceRepoPath>/.worktrees/<task_code>
     const taskCode = job.task_code || job.id;
     const taskBranch = `feature/${taskCode}`;
-    const baseWorktreesDir = path.join(ws.path, '.worktrees', taskCode);
-    const worktreeDestPath = path.join(baseWorktreesDir, service_key);
-
+    const worktreeDestPath = path.join(repoFullPath, '.worktrees', taskCode);
     // 4. Tạo worktree qua worktreeManager
     const wtResult = worktreeManager.createTaskWorktree({
       repoFullPath,
@@ -1278,7 +1276,7 @@ app.post('/api/v1/jobs/:id/worktrees/expand', (req, res) => {
 
     // Cập nhật worktree_path của job nếu chưa có
     if (!job.worktree_path) {
-      db.updateJob(id, { worktree_path: baseWorktreesDir });
+      db.updateJob(id, { worktree_path: wtResult.worktree_path });
     }
 
     // Lưu cấu hình task manifest riêng (Tầng 2)
@@ -1400,8 +1398,7 @@ function ensureTargetServicesWorktrees(jobId) {
       if (!fs.existsSync(rPath) || !fs.existsSync(path.join(rPath, '.git'))) continue;
 
       const bBranch = svcConf.dev_branch || worktreeManager.getRepoCurrentBranch(rPath) || 'main';
-      const destP = path.join(baseWorktreesDir, sKey);
-
+      const destP = path.join(rPath, '.worktrees', taskCode);
       const crRes = worktreeManager.createTaskWorktree({
         repoFullPath: rPath,
         worktreeDestPath: destP,
@@ -1423,8 +1420,9 @@ function ensureTargetServicesWorktrees(jobId) {
     }
 
     if (createdWorktrees.length > 0) {
-      db.updateJob(jobId, { worktree_path: baseWorktreesDir });
-      worktreeManager.saveTaskManifest(baseWorktreesDir, {
+      const primaryWt = createdWorktrees[0];
+      db.updateJob(jobId, { worktree_path: primaryWt.worktree_path });
+      worktreeManager.saveTaskManifest(primaryWt.worktree_path, {
         task_code: taskCode,
         workspace_id: ws.id,
         services: createdWorktrees.map(w => ({
@@ -1440,7 +1438,7 @@ function ensureTargetServicesWorktrees(jobId) {
       } catch {}
 
       jobEventBus.emitJobLog(jobId, {
-        text: `\n[WORKTREE] 🌿 Đã tách Git Worktree riêng cho service: [${targetServices.join(', ')}] tại .worktrees/${taskCode}/\n`
+        text: `\n[WORKTREE] 🌿 Đã tách Git Worktree riêng bên trong service: [${targetServices.join(', ')}] tại <service>/.worktrees/${taskCode}/\n`
       });
     }
 
@@ -3491,13 +3489,18 @@ const executeStep = async (id, opts) => {
   }
   
   const taskCode = job.task_code || job.id;
-  const workspacePath = (job.worktree_path && fs.existsSync(job.worktree_path)) ? job.worktree_path : (job.repo_path || './');
-  let wsFeaturesDir = 'docs/features';
+  let ws = null;
   try {
-    const ws = job.workspace_id ? db.getWorkspaceById(job.workspace_id) : (db.listWorkspaces ? db.listWorkspaces().find(w => path.resolve(w.path) === path.resolve(workspacePath)) : null);
-    if (ws && ws.features_dir) wsFeaturesDir = ws.features_dir;
+    ws = job.workspace_id ? db.getWorkspaceById(job.workspace_id) : (db.listWorkspaces ? db.listWorkspaces().find(w => path.resolve(w.path) === path.resolve(job.repo_path || '')) : null);
   } catch (e) {}
-  const { dir: featureDir, evidenceDir } = fileManager.ensureFeatureDirectory(workspacePath, taskCode, { allowExisting: true, featuresDir: wsFeaturesDir });
+  const docBasePath = (ws && ws.path) ? ws.path : (job.repo_path || './');
+  let wsFeaturesDir = (ws && ws.features_dir) ? ws.features_dir : 'docs/features';
+
+  // Thư mục tài liệu (features & evidence) luôn nằm tại docBasePath của Workspace
+  const { dir: featureDir, evidenceDir } = fileManager.ensureFeatureDirectory(docBasePath, taskCode, { allowExisting: true, featuresDir: wsFeaturesDir });
+
+  // Thư mục thực thi của Runner: ưu tiên worktree bên trong service nếu đã được tạo
+  const workspacePath = (job.worktree_path && fs.existsSync(job.worktree_path)) ? job.worktree_path : docBasePath;
 
   // Tự động đồng bộ và mở rộng worktree cho các service được chỉ định trong .task-manifest.json hoặc pipeline_config
   try {
@@ -3517,7 +3520,7 @@ const executeStep = async (id, opts) => {
             const rPath = svcConf ? (path.isAbsolute(svcConf.repo_path) ? svcConf.repo_path : path.resolve(wsObj.path, svcConf.repo_path)) : path.resolve(wsObj.path, sKey);
             if (fs.existsSync(rPath) && fs.existsSync(path.join(rPath, '.git'))) {
               const bBranch = svcConf ? (svcConf.dev_branch || 'main') : worktreeManager.getRepoCurrentBranch(rPath);
-              const destP = path.join(wsObj.path, '.worktrees', taskCode, sKey);
+              const destP = path.join(rPath, '.worktrees', taskCode);
               const crRes = worktreeManager.createTaskWorktree({
                 repoFullPath: rPath,
                 worktreeDestPath: destP,
@@ -3701,7 +3704,7 @@ const executeStep = async (id, opts) => {
           return;
         }
         // Trích xuất dev_plan.md và test_plan.md từ stdout nếu chưa được tạo trên ổ cứng
-        let planFiles = fileManager.readPlanFiles(workspacePath, taskCode);
+        let planFiles = fileManager.readPlanFiles(docBasePath, taskCode, wsFeaturesDir);
         let effectiveDevPlan = planFiles.devPlan || planFiles.dev_plan || '';
         let effectiveTestPlan = planFiles.testPlan || planFiles.test_plan || '';
         // LỖI 4 (job bd88ae0a): Agent PLANNING timeout / lỗi KHÔNG được coi là "đã xong".
@@ -3776,7 +3779,7 @@ const executeStep = async (id, opts) => {
               fs.writeFileSync(path.join(featureDir, 'test_plan.md'), effectiveTestPlan, 'utf8');
             }
           }
-          planFiles = fileManager.readPlanFiles(workspacePath, taskCode);
+          planFiles = fileManager.readPlanFiles(docBasePath, taskCode, wsFeaturesDir);
         }
 
         // Trích xuất JSON questions nếu có
@@ -3849,8 +3852,8 @@ const executeStep = async (id, opts) => {
     }
 
     if (job.status === 'IMPLEMENT') {
-      const prevContext = fileManager.loadPreviousContext(workspacePath, taskCode, 'implement');
-      const planFiles = fileManager.readPlanFiles(workspacePath, taskCode);
+      const prevContext = fileManager.loadPreviousContext(docBasePath, taskCode, 'implement');
+      const planFiles = fileManager.readPlanFiles(docBasePath, taskCode, wsFeaturesDir);
       const devPlanText = (planFiles && planFiles.devPlan) || (typeof prevContext === 'string' ? prevContext : '');
 
       // CODE DA DUOC IMPLEMENT CHUA? Ket luan do PLANNING ghi trong dev_plan.md
