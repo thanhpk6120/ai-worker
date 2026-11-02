@@ -4524,9 +4524,37 @@ const executeStep = async (id, opts) => {
           if (stashInfo.stashed) {
             jobEventBus.emitJobLog(id, { text: `[MERGING] Đã tự động stash uncommitted changes tại repo gốc '${serviceKey}'.\n` });
           }
+          const taskBranch = wt.task_branch || `feature/${taskCode}`;
+
+          // 2b. Tự động commit các thay đổi trong worktree lên taskBranch nếu Agent chưa commit
+          if (wt.worktree_path && fs.existsSync(wt.worktree_path)) {
+            try {
+              // Unstage file manifest nội bộ của ai-worker nếu có
+              try {
+                require('node:child_process').execSync('git reset HEAD -- .task-manifest.json', { cwd: wt.worktree_path, stdio: 'ignore' });
+              } catch (_) {}
+
+              const wtStatus = require('node:child_process').execSync('git status --porcelain', {
+                cwd: wt.worktree_path,
+                stdio: 'pipe',
+                encoding: 'utf-8'
+              });
+              const relevantChanges = wtStatus.split('\n').filter(l => l.trim() && !l.includes('.task-manifest.json'));
+              if (relevantChanges.length > 0) {
+                jobEventBus.emitJobLog(id, { text: `[MERGING] 📦 Phát hiện thay đổi mã nguồn trong worktree '${serviceKey}', tự động commit lên nhánh '${taskBranch}'...\n` });
+                require('node:child_process').execSync('git add -A', { cwd: wt.worktree_path, stdio: 'pipe' });
+                try {
+                  require('node:child_process').execSync('git reset HEAD -- .task-manifest.json', { cwd: wt.worktree_path, stdio: 'ignore' });
+                } catch (_) {}
+                require('node:child_process').execSync(`git commit -m "${taskCode}: hoàn thành triển khai mã nguồn"`, { cwd: wt.worktree_path, stdio: 'pipe' });
+                jobEventBus.emitJobLog(id, { text: `[MERGING] ✅ Đã commit mã nguồn lên nhánh '${taskBranch}'.\n` });
+              }
+            } catch (cErr) {
+              jobEventBus.emitJobLog(id, { text: `[MERGING] Cảnh báo tự động commit worktree: ${cErr.message}\n` });
+            }
+          }
 
           // 3. Thực hiện merge branch task vào dev_branch
-          const taskBranch = wt.task_branch || `feature/${taskCode}`;
           jobEventBus.emitJobLog(id, { text: `[MERGING] Merge nhánh '${taskBranch}' vào nhánh phát triển '${targetDevBranch}'...\n` });
           const mRes = worktreeManager.mergeBranch({
             repoFullPath,
