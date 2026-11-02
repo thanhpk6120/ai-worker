@@ -4666,6 +4666,7 @@ const executeStep = async (id, opts) => {
               break;
             }
           }
+        } catch (mErr) {
           worktreeManager.abortMerge(repoFullPath);
           worktreeManager.restoreWorkingTree(repoFullPath, stashInfo);
           taskQueue.releaseDevLock(serviceKey, id, wsId);
