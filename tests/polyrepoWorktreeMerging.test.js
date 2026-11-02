@@ -469,4 +469,86 @@ describe('Polyrepo Multi-Service & Worktree Merging Test Suite', () => {
       execSync('git checkout develop', { cwd: serviceARepoPath, stdio: 'ignore' });
     });
   });
+  // ========================================================
+  // 7. Parallel PLANNING & Exclusive Workspace Merge Lock
+  // ========================================================
+  describe('7. Parallel PLANNING & Exclusive Workspace Merge Lock', () => {
+    test('Cho phép các job cùng workspace chạy song song ở bước PLANNING', async () => {
+      const { TaskQueue } = require('../src/queue/taskQueue');
+      const queue = new TaskQueue(3);
+      const wsPath = 'C:\\TestWorkspaces\\PolyrepoBank';
+
+      let maxConcurrent = 0;
+      let active = 0;
+      const resolvers = [];
+      const createPlanningJob = (id) => {
+        let r;
+        const p = new Promise((resolve) => { r = resolve; });
+        resolvers.push(r);
+        return {
+          job: {
+            id: `plan-job-${id}`,
+            task_code: `TASK-${id}`,
+            repo_path: wsPath,
+            status: 'TO DO',
+            current_step: 'PLANNING'
+          },
+          runFn: async () => {
+            active++;
+            if (active > maxConcurrent) maxConcurrent = active;
+            await p;
+            active--;
+          }
+        };
+      };
+
+      const j1 = createPlanningJob(1);
+      const j2 = createPlanningJob(2);
+      const j3 = createPlanningJob(3);
+
+      // Cả 3 job cùng workspace nhưng ở bước PLANNING (Read-Only)
+      queue.enqueue(j1.job, j1.runFn);
+      queue.enqueue(j2.job, j2.runFn);
+      queue.enqueue(j3.job, j3.runFn);
+
+      await new Promise(r => setTimeout(r, 20));
+
+      // Cả 3 job phải cùng chạy song song (concurrency = 3)
+      assert.equal(queue.getRunningJobs().length, 3, '3 job PLANNING cùng chạy song song');
+      assert.equal(queue.getQueuedJobs().length, 0);
+      assert.equal(maxConcurrent, 3);
+
+      resolvers[0]();
+      resolvers[1]();
+      resolvers[2]();
+      await new Promise(r => setTimeout(r, 20));
+      assert.equal(queue.getRunningJobs().length, 0);
+    });
+
+    test('Bảo vệ đơn luồng tuyệt đối khi MERGING (Exclusive Workspace Merge Lock)', async () => {
+      const { TaskQueue } = require('../src/queue/taskQueue');
+      const queue = new TaskQueue(3);
+      const wsKey = 'C:\\TestWorkspaces\\PolyrepoBank';
+
+      // Task 1 giành khóa merge
+      const lock1 = queue.acquireWorkspaceMergeLock(wsKey, 'task-1');
+      assert.equal(lock1, true, 'Task 1 giành được merge lock');
+      assert.equal(queue.isWorkspaceMergeLocked(wsKey), true);
+
+      // Task 2 cố giành khóa merge trên cùng workspace -> thất bại
+      const lock2 = queue.acquireWorkspaceMergeLock(wsKey, 'task-2');
+      assert.equal(lock2, false, 'Task 2 bị từ chối merge lock vì Task 1 đang merge');
+
+      // Task 1 nhả khóa
+      const rel1 = queue.releaseWorkspaceMergeLock(wsKey, 'task-1');
+      assert.equal(rel1, true, 'Task 1 nhả merge lock thành công');
+
+      // Task 2 giành lại khóa merge
+      const lock2Retry = queue.acquireWorkspaceMergeLock(wsKey, 'task-2');
+      assert.equal(lock2Retry, true, 'Task 2 giành được merge lock sau khi Task 1 nhả');
+
+      queue.releaseWorkspaceMergeLock(wsKey, 'task-2');
+      assert.equal(queue.isWorkspaceMergeLocked(wsKey), false);
+    });
+  });
 });

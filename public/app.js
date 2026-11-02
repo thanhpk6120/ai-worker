@@ -1548,14 +1548,22 @@
     svg.innerHTML = ''; // Xóa các đường vẽ cũ
 
     const status = (job.status || 'TO DO').toUpperCase();
-    const hasReachedPlanning = ['PLANNING', 'PENDING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING', 'DONE'].includes(status);
-    const hasReachedImplement = ['IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING', 'DONE'].includes(status);
-    const hasReachedTesting = ['TESTING', 'VERIFY', 'FIXING', 'DONE'].includes(status);
-    const hasReachedVerify = ['VERIFY', 'FIXING', 'DONE'].includes(status);
-    const hasTouchedPending = status === 'PENDING' || Boolean(Number(job.had_pending)) || Boolean(job.had_pending) || (Array.isArray(job.questions) && job.questions.length > 0);
-    const hasTouchedFixing = status === 'FIXING' || Boolean(Number(job.had_fixing)) || Boolean(job.had_fixing) || getFixAttemptFromJob(job) > 0;
-    const isDone = status === 'DONE';
+    const currentStep = (job.current_step || status).toUpperCase();
 
+    const ALL_AFTER_PLANNING = ['PLANNING', 'PENDING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING', 'MERGING', 'DONE'];
+    const ALL_AFTER_IMPLEMENT = ['IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING', 'MERGING', 'DONE'];
+    const ALL_AFTER_TESTING = ['TESTING', 'VERIFY', 'FIXING', 'MERGING', 'DONE'];
+    const ALL_AFTER_VERIFY = ['VERIFY', 'FIXING', 'MERGING', 'DONE'];
+
+    const hasReachedPlanning = ALL_AFTER_PLANNING.includes(status) || ALL_AFTER_PLANNING.includes(currentStep);
+    const hasReachedImplement = ALL_AFTER_IMPLEMENT.includes(status) || ALL_AFTER_IMPLEMENT.includes(currentStep);
+    const hasReachedTesting = ALL_AFTER_TESTING.includes(status) || ALL_AFTER_TESTING.includes(currentStep);
+    const hasReachedVerify = ALL_AFTER_VERIFY.includes(status) || ALL_AFTER_VERIFY.includes(currentStep);
+    const hasReachedMerging = status === 'MERGING' || currentStep === 'MERGING' || status === 'DONE' || currentStep === 'DONE';
+    const isDone = status === 'DONE' || currentStep === 'DONE';
+
+    const hasTouchedPending = status === 'PENDING' || currentStep === 'PENDING' || Boolean(Number(job.had_pending)) || Boolean(job.had_pending) || (Array.isArray(job.questions) && job.questions.length > 0);
+    const hasTouchedFixing = status === 'FIXING' || currentStep === 'FIXING' || Boolean(Number(job.had_fixing)) || Boolean(job.had_fixing) || getFixAttemptFromJob(job) > 0;
     // Lấy toạ độ tâm các node (y luôn là 17px - tâm của vòng tròn 34px)
     const getNodeCenter = (id) => {
       const el = document.getElementById(id);
@@ -1625,7 +1633,6 @@
       `M ${pTest.x + 17} 17 L ${pVerify.x - 17} 17`,
       hasReachedVerify ? 'stepper-svg-path active' : 'stepper-svg-path'
     );
-    const hasReachedMerging = status === 'MERGING' || currentStep === 'MERGING' || isDone;
     if (hasTouchedFixing) {
       // Đường chính đi xuyên qua node FIXING: vàng khi active, xanh khi xong
       createPath(
@@ -1634,7 +1641,7 @@
       );
       createPath(
         `M ${pFix.x + 17} 17 L ${pMerge.x - 17} 17`,
-        hasReachedMerging ? 'stepper-svg-path active' : 'stepper-svg-path'
+        hasReachedMerging ? (status === 'MERGING' ? 'stepper-svg-path pending stroke-amber-400' : 'stepper-svg-path active') : 'stepper-svg-path'
       );
     } else {
       // KHÔNG chạm FIXING: ĐƯỜNG NỐI VÒNG LÊN TRÊN ĐẦU FIXING RỒI VÒNG XUỐNG MERGING!
@@ -1677,11 +1684,12 @@
       n.classList.add('untouched');
     });
 
-    const STEP_ORDER = ['TODO', 'PLANNING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'MERGING', 'DONE'];
-    const curStepIdx = STEP_ORDER.indexOf(currentStep);
-    const statusIdx = STEP_ORDER.indexOf(status);
+    const STEP_ORDER = ['TO DO', 'PLANNING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'MERGING', 'DONE'];
+    const normCurStep = currentStep === 'TODO' ? 'TO DO' : currentStep;
+    const normStatus = status === 'TODO' ? 'TO DO' : status;
+    const curStepIdx = STEP_ORDER.indexOf(normCurStep);
+    const statusIdx = STEP_ORDER.indexOf(normStatus);
     const maxIdx = Math.max(curStepIdx, statusIdx);
-
     const hasReachedPlanning = maxIdx >= 1 || ['PENDING', 'FIXING'].includes(status) || ['PENDING', 'FIXING'].includes(currentStep);
     const hasReachedImplement = maxIdx >= 2 || ['FIXING'].includes(status) || ['FIXING'].includes(currentStep);
     const hasReachedTesting = maxIdx >= 3 || ['FIXING'].includes(status) || ['FIXING'].includes(currentStep);

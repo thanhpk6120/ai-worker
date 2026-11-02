@@ -1309,6 +1309,147 @@ app.post('/api/v1/jobs/:id/worktrees/expand', (req, res) => {
     return res.status(500).json({ success: false, error: err.message });
   }
 });
+/**
+ * Trích xuất danh sách service mục tiêu từ dev_plan.md
+ */
+function extractTargetServicesFromDevPlan(devPlanText, wsServices = []) {
+  if (!devPlanText || typeof devPlanText !== 'string') return [];
+  const foundServices = new Set();
+  const availableKeys = wsServices.map(s => s.service_key).filter(Boolean);
+
+  // 1. Regex tìm mục "Service mục tiêu" / "Target Service"
+  const targetRegexes = [
+    /(?:Service\s*mục\s*tiêu|Target\s*Service|Service\s*chính|Dịch\s*vụ\s*mục\s*tiêu)[^`\r\n]*[`'"]([a-zA-Z0-9_\-\.\/]+)[`'"]/gi,
+    /(?:Service\s*mục\s*tiêu|Target\s*Service|Service\s*chính|Dịch\s*vụ\s*mục\s*tiêu)\s*[:=]\s*[*_]*([a-zA-Z0-9_\-\.\/]+)/gi
+  ];
+
+  for (const reg of targetRegexes) {
+    let match;
+    while ((match = reg.exec(devPlanText)) !== null) {
+      const candidate = match[1].trim();
+      if (candidate) foundServices.add(candidate);
+    }
+  }
+
+  // 2. Đối chiếu với danh sách service đã đăng ký trong workspace_services
+  if (availableKeys.length > 0) {
+    for (const sKey of availableKeys) {
+      if (sKey.toLowerCase() === 'docs') continue;
+      const escapedKey = sKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const keyRegex = new RegExp(`(?:service|module|dịch vụ)?\\s*[:=]?\\s*[\`'"]?${escapedKey}[\`'"]?`, 'i');
+      if (keyRegex.test(devPlanText)) {
+        foundServices.add(sKey);
+      }
+    }
+  }
+
+  let result = Array.from(foundServices);
+  if (availableKeys.length > 0) {
+    result = result.filter(s => availableKeys.includes(s));
+  }
+  return result;
+}
+
+/**
+ * Tự động tạo Git Worktree cho các service mục tiêu được xác định sau bước PLANNING.
+ * Chỉ tách worktree cho đúng những service đó, không tách chung cho toàn bộ workspace.
+ */
+function ensureTargetServicesWorktrees(jobId) {
+  try {
+    const job = db.getJobById(jobId);
+    if (!job || !job.workspace_id) return [];
+
+    const ws = db.getWorkspaceById(job.workspace_id);
+    if (!ws) return [];
+
+    const wsServices = db.listWorkspaceServices(ws.id);
+    if (!wsServices || wsServices.length === 0) return [];
+
+    const taskCode = job.task_code || job.id;
+    const planFiles = fileManager.readPlanFiles(job.repo_path || ws.path, taskCode);
+    const devPlanText = (planFiles && planFiles.devPlan) || '';
+
+    const pipeConf = jobPolicy.parsePipelineConfig(job);
+    let targetServices = (pipeConf && Array.isArray(pipeConf.target_services)) ? pipeConf.target_services : [];
+    if (targetServices.length === 0 && devPlanText) {
+      targetServices = extractTargetServicesFromDevPlan(devPlanText, wsServices);
+    }
+
+    if (targetServices.length === 0) {
+      console.log(`[WORKTREE] Task ${taskCode}: Không phát hiện service mục tiêu cụ thể từ dev_plan.md, tiếp tục trong workspace.`);
+      return [];
+    }
+
+    const baseWorktreesDir = path.join(ws.path, '.worktrees', taskCode);
+    const createdWorktrees = [];
+
+    for (const sKey of targetServices) {
+      const existingWt = db.getJobWorktree(jobId, sKey);
+      if (existingWt) {
+        createdWorktrees.push(existingWt);
+        continue;
+      }
+
+      const svcConf = db.getWorkspaceServiceByKey(ws.id, sKey);
+      if (!svcConf) continue;
+
+      const rPath = path.isAbsolute(svcConf.repo_path)
+        ? svcConf.repo_path
+        : path.resolve(ws.path, svcConf.repo_path);
+
+      if (!fs.existsSync(rPath) || !fs.existsSync(path.join(rPath, '.git'))) continue;
+
+      const bBranch = svcConf.dev_branch || worktreeManager.getRepoCurrentBranch(rPath) || 'main';
+      const destP = path.join(baseWorktreesDir, sKey);
+
+      const crRes = worktreeManager.createTaskWorktree({
+        repoFullPath: rPath,
+        worktreeDestPath: destP,
+        taskBranch: `feature/${taskCode}`,
+        baseDevBranch: bBranch
+      });
+
+      if (crRes.success) {
+        const newWt = db.addJobWorktree({
+          job_id: jobId,
+          service_key: sKey,
+          worktree_path: crRes.worktree_path,
+          task_branch: `feature/${taskCode}`,
+          base_dev_branch: bBranch,
+          status: 'ACTIVE'
+        });
+        createdWorktrees.push(newWt);
+      }
+    }
+
+    if (createdWorktrees.length > 0) {
+      db.updateJob(jobId, { worktree_path: baseWorktreesDir });
+      worktreeManager.saveTaskManifest(baseWorktreesDir, {
+        task_code: taskCode,
+        workspace_id: ws.id,
+        services: createdWorktrees.map(w => ({
+          service: w.service_key,
+          worktree_path: w.worktree_path,
+          dev_branch: w.base_dev_branch,
+          status: w.status
+        }))
+      });
+      try {
+        const allActiveWts = db.getDb().prepare("SELECT * FROM job_worktrees WHERE status = 'ACTIVE'").all();
+        worktreeManager.exportWorktreesRegistry(allActiveWts);
+      } catch {}
+
+      jobEventBus.emitJobLog(jobId, {
+        text: `\n[WORKTREE] 🌿 Đã tách Git Worktree riêng cho service: [${targetServices.join(', ')}] tại .worktrees/${taskCode}/\n`
+      });
+    }
+
+    return createdWorktrees;
+  } catch (err) {
+    console.warn('[WORKTREE-TARGET-SYNC-WARN]', err.message);
+    return [];
+  }
+}
 
 app.post('/api/v1/workspaces/browse', (req, res) => {
   try {
@@ -3472,11 +3613,11 @@ const executeStep = async (id, opts) => {
       const planMarker = stepGate.readPlanOkMarker(featureDir);
       const markerCheck = stepGate.isPlanMarkerValid(featureDir, planMarker);
       if (markerCheck.valid) {
+        ensureTargetServicesWorktrees(id);
         const markerPipe = jobPolicy.parsePipelineConfig(db.getJobById(id) || job);
         delete markerPipe.pending_started_at;
         db.updateJob(id, { status: 'IMPLEMENT', current_step: 'IMPLEMENT', runner: (agentMapping.IMPLEMENT || 'claude-code'), pipeline_config: markerPipe });
         jobEventBus.emitJobStatus(id, { status: 'IMPLEMENT', runner: (agentMapping.IMPLEMENT || 'claude-code') });
-        jobEventBus.emitJobLog(id, { text: `\n[PLANNING] Kế hoạch đã được verify lúc ${planMarker.at} và không thay đổi từ đó → BỎ QUA agent PLANNING, chuyển thẳng sang IMPLEMENT.\n` });
         scheduleNextStep(id, opts, 100);
         return;
       }
@@ -3696,14 +3837,14 @@ const executeStep = async (id, opts) => {
       }
 
       // Nếu không còn câu hỏi PENDING (hoặc các câu hỏi đã được giải đáp xong):
-      // Tự động hoàn thành Kế hoạch và chuyển tiếp sang bước IMPLEMENT để chạy tiếp
+      // Tự động phân tích dev_plan.md và chỉ tạo Git Worktree cho các service mục tiêu
+      ensureTargetServicesWorktrees(id);
       const implementAgent = agentMapping.IMPLEMENT || 'claude-code';
       // Resume deadline: cong lai thoi gian da cho user tra loi vao ngan sach.
       const resumedPipe = jobPolicy.resumeDeadlineAfterPending(db.getJobById(id) || job);
       db.updateJob(id, { status: 'IMPLEMENT', current_step: 'IMPLEMENT', runner: implementAgent, had_pending: (answeredQuestions.length > 0 ? 1 : (job.had_pending || 0)), pipeline_config: resumedPipe });
       jobEventBus.emitJobStatus(id, { status: 'IMPLEMENT', runner: implementAgent });
       jobEventBus.emitJobLog(id, { text: `\n[PLANNING -> IMPLEMENT] Hoàn tất Kế hoạch sau khi làm rõ. Tự động chuyển tiếp sang triển khai mã nguồn (IMPLEMENT) với 🤖 Agent: ${implementAgent}...\n` });
-      scheduleNextStep(id, opts, 100);
       return;
     }
 
@@ -4320,12 +4461,20 @@ const executeStep = async (id, opts) => {
         const defaultWs = db.listWorkspaces().find(w => w.is_default);
         ws = defaultWs || db.listWorkspaces()[0];
       }
-
       let allMergedSuccessfully = true;
       let conflictService = null;
       let conflictFiles = [];
 
-      for (const wt of activeWorktrees) {
+      const wsMergeKey = ws ? (ws.path || ws.id) : (job.repo_path || './');
+      jobEventBus.emitJobLog(id, { text: `\n[MERGING] ⏳ Đang yêu cầu Khóa Độc Quyền Workspace Merge để đảm bảo an toàn repo gốc...\n` });
+      const wsMergeAcquired = await taskQueue.waitForWorkspaceMergeLock(wsMergeKey, id, 120000);
+      if (!wsMergeAcquired) {
+        throw new Error(`Timeout chờ Khóa Độc Quyền Workspace Merge. Vui lòng thử lại.`);
+      }
+      jobEventBus.emitJobLog(id, { text: `[MERGING] 🔒 Đã nhận Khóa Độc Quyền Workspace Merge. Bắt đầu tích hợp trên repo gốc...\n` });
+
+      try {
+        for (const wt of activeWorktrees) {
         if (wt.status === 'MERGED') continue;
 
         const serviceKey = wt.service_key;
@@ -4444,6 +4593,10 @@ const executeStep = async (id, opts) => {
           taskQueue.releaseDevLock(serviceKey, id, wsId);
         }
       }
+    } finally {
+      taskQueue.releaseWorkspaceMergeLock(wsMergeKey, id);
+      jobEventBus.emitJobLog(id, { text: `[MERGING] 🔓 Đã giải phóng Khóa Độc Quyền Workspace Merge.\n` });
+    }
 
       if (!allMergedSuccessfully) {
         // Có conflict -> Chuyển về FIXING bên trong worktree để giải quyết
@@ -5160,7 +5313,8 @@ app.post(['/api/v1/jobs/:id/approve', '/api/v1/tasks/:id/approve'], (req, res) =
       return res.status(404).json({ success: false, error: 'Job not found' });
     }
 
-    // Chuyển sang IMPLEMENT và kích hoạt pipeline
+    // Tự động phân tích dev_plan.md và chỉ tạo worktree cho các service mục tiêu
+    ensureTargetServicesWorktrees(id);
     db.updateJob(id, { status: 'IMPLEMENT', current_step: 'IMPLEMENT' });
     jobEventBus.emitJobStatus(id, { status: 'IMPLEMENT' });
     jobEventBus.emitJobLog(id, { text: `\n[PLANNING-GATE] Người dùng đã DUYỆT kế hoạch (Dual Plan Approved). Chuyển sang bước IMPLEMENT...\n` });

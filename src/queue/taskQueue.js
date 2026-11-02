@@ -10,17 +10,30 @@ class TaskQueue extends EventEmitter {
     this.queue = []; // Array of { job, runFn, priority, enqueuedAt }
     this.activeWorkspaces = new Map(); // workspaceKey -> jobId
     this.devBranchLocks = new Map(); // "${workspaceId}:${serviceKey}" -> jobId
+    this.workspaceMergeLocks = new Map(); // workspaceKey -> jobId
   }
 
   /**
    * Trích xuất workspace key định danh cho job để khóa hàng đợi theo workspace.
-   * Ưu tiên chuẩn hóa theo đường dẫn vật lý (repo_path || worktree_path) để mọi job
-   * cùng thư mục dùng chung 1 lock, dù có/không có workspace_id. Chỉ fallback sang
-   * ws:<workspace_id> khi job không có path. Không path và không workspace_id -> null.
+   * - Nếu job đã được cấp phát worktree riêng: dùng đường dẫn worktree để không khóa workspace mẹ.
+   * - Nếu job đang ở bước PLANNING hoặc TO DO: trả về key theo task để chạy song song (Read-Only).
+   * - Nếu là Single-Repo ở các bước can thiệp code: khóa theo repo_path để an toàn.
    */
   _getWorkspaceKey(job) {
     if (!job) return null;
-    const p = job.worktree_path || job.worktreePath || job.repo_path || job.repoPath;
+    // 1. Đã có worktree riêng cho task -> dùng worktree path để cách ly hoàn toàn
+    const wtPath = job.worktree_path || job.worktreePath;
+    if (wtPath && typeof wtPath === 'string' && wtPath.trim()) {
+      const resolved = path.resolve(wtPath.trim());
+      return `path:${process.platform === 'win32' ? resolved.toLowerCase() : resolved}`;
+    }
+    // 2. Bước PLANNING là Read-Only (phân tích spec/code), không sửa mã nguồn service -> cho phép chạy song song
+    const step = String(job.current_step || job.status || '').toUpperCase();
+    if (job.is_planning || step === 'PLANNING' || step === 'TO DO') {
+      return `task:${job.id}`;
+    }
+    // 3. Fallback cho Single-Repo chưa có worktree: khóa theo repo_path để tránh ghi đè code
+    const p = job.repo_path || job.repoPath;
     if (p && typeof p === 'string' && p.trim()) {
       const resolved = path.resolve(p.trim());
       return `path:${process.platform === 'win32' ? resolved.toLowerCase() : resolved}`;
@@ -116,6 +129,7 @@ class TaskQueue extends EventEmitter {
       .then((result) => {
         this.runningJobs.delete(jobId);
         this.releaseAllDevLocksForJob(jobId);
+        this.releaseAllMergeLocksForJob(jobId);
         if (wsKey && this.activeWorkspaces.get(wsKey) === jobId) {
           this.activeWorkspaces.delete(wsKey);
         }
@@ -131,6 +145,7 @@ class TaskQueue extends EventEmitter {
       .catch((error) => {
         this.runningJobs.delete(jobId);
         this.releaseAllDevLocksForJob(jobId);
+        this.releaseAllMergeLocksForJob(jobId);
         if (wsKey && this.activeWorkspaces.get(wsKey) === jobId) {
           this.activeWorkspaces.delete(wsKey);
         }
@@ -161,9 +176,9 @@ class TaskQueue extends EventEmitter {
       this.runningJobs.delete(jobId);
       this.releaseWorkspaceLock(jobId);
       this.releaseAllDevLocksForJob(jobId);
+      this.releaseAllMergeLocksForJob(jobId);
       return { cancelled: true, state: 'RUNNING', job: runningInfo.job };
     }
-
     return { cancelled: false, message: 'Job not found in queue or running map' };
   }
 
@@ -279,6 +294,102 @@ class TaskQueue extends EventEmitter {
       }, timeoutMs);
     });
   }
+  /**
+   * Khóa độc quyền toàn bộ Workspace cho bước MERGING (Exclusive Workspace Merge Lock).
+   * Đảm bảo chỉ duy nhất 1 task được phép merge/re-test trên repo gốc của một workspace tại một thời điểm,
+   * ngăn chặn tuyệt đối tình trạng nhiều task merge song song làm hỏng git index hoặc đè bẩn code của nhau.
+   */
+  acquireWorkspaceMergeLock(workspaceKey, jobId) {
+    if (!workspaceKey) return true;
+    const resolvedKey = String(workspaceKey).trim().toLowerCase();
+    const currentHolder = this.workspaceMergeLocks.get(resolvedKey);
+    if (!currentHolder || currentHolder === jobId) {
+      this.workspaceMergeLocks.set(resolvedKey, jobId);
+      this.emit('workspace_merge_lock:acquired', { workspaceKey: resolvedKey, jobId });
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Nhả khóa độc quyền merge của Workspace.
+   */
+  releaseWorkspaceMergeLock(workspaceKey, jobId) {
+    if (!workspaceKey) return false;
+    const resolvedKey = String(workspaceKey).trim().toLowerCase();
+    if (this.workspaceMergeLocks.get(resolvedKey) === jobId) {
+      this.workspaceMergeLocks.delete(resolvedKey);
+      this.emit('workspace_merge_lock:released', { workspaceKey: resolvedKey, jobId });
+      this._processNext();
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Kiểm tra xem workspace có đang bị khóa bởi tiến trình MERGING của task khác không
+   */
+  isWorkspaceMergeLocked(workspaceKey, excludeJobId = null) {
+    if (!workspaceKey) return false;
+    const resolvedKey = String(workspaceKey).trim().toLowerCase();
+    const holder = this.workspaceMergeLocks.get(resolvedKey);
+    if (!holder) return false;
+    if (excludeJobId && holder === excludeJobId) return false;
+    return true;
+  }
+
+  /**
+   * Chờ đến khi giành được khóa Merge độc quyền cho Workspace (hoặc timeout)
+   */
+  waitForWorkspaceMergeLock(workspaceKey, jobId, timeoutMs = 120000) {
+    if (!workspaceKey) return Promise.resolve(true);
+    const resolvedKey = String(workspaceKey).trim().toLowerCase();
+    if (this.acquireWorkspaceMergeLock(resolvedKey, jobId)) {
+      return Promise.resolve(true);
+    }
+
+    return new Promise((resolve) => {
+      let timer = null;
+      const onReleased = (evt) => {
+        if (evt.workspaceKey === resolvedKey) {
+          if (this.acquireWorkspaceMergeLock(resolvedKey, jobId)) {
+            cleanup();
+            resolve(true);
+          }
+        }
+      };
+
+      const cleanup = () => {
+        if (timer) clearTimeout(timer);
+        this.removeListener('workspace_merge_lock:released', onReleased);
+      };
+
+      this.on('workspace_merge_lock:released', onReleased);
+
+      timer = setTimeout(() => {
+        cleanup();
+        resolve(this.acquireWorkspaceMergeLock(resolvedKey, jobId));
+      }, timeoutMs);
+    });
+  }
+
+  /**
+   * Giải phóng toàn bộ merge lock do một job nắm giữ
+   */
+  releaseAllMergeLocksForJob(jobId) {
+    let releasedCount = 0;
+    for (const [wsKey, holderId] of this.workspaceMergeLocks.entries()) {
+      if (holderId === jobId) {
+        this.workspaceMergeLocks.delete(wsKey);
+        this.emit('workspace_merge_lock:released', { workspaceKey: wsKey, jobId });
+        releasedCount++;
+      }
+    }
+    if (releasedCount > 0) {
+      this._processNext();
+    }
+    return releasedCount;
+  }
 
   /**
    * Kiểm tra job có đang nằm trong queue hoặc đang chạy không
@@ -289,20 +400,47 @@ class TaskQueue extends EventEmitter {
   }
 
   /**
-   * Kiểm tra xem một workspace có đang bị khóa bởi job nào không
+   * Kiểm tra xem một workspace có đang bị khóa bởi job nào không.
+   * - Nếu job đang ở TO DO hoặc PLANNING (Read-Only), chỉ bị khóa nếu workspace đang có task khác MERGING trên repo gốc.
+   * - Nếu workspace đang có task MERGING: luôn bị khóa để bảo vệ an toàn git repo.
    */
   isWorkspaceLocked(jobOrWorkspacePath) {
     let wsKey = null;
+    let isPlanningOrTodo = false;
+    let wsRawKey = null;
+
     if (typeof jobOrWorkspacePath === 'string') {
       const resolved = path.resolve(jobOrWorkspacePath.trim());
       wsKey = `path:${process.platform === 'win32' ? resolved.toLowerCase() : resolved}`;
-    } else {
+      wsRawKey = wsKey;
+    } else if (jobOrWorkspacePath && typeof jobOrWorkspacePath === 'object') {
+      const step = String(jobOrWorkspacePath.current_step || jobOrWorkspacePath.status || '').toUpperCase();
+      isPlanningOrTodo = (step === 'PLANNING' || step === 'TO DO' || jobOrWorkspacePath.is_planning === true);
+
+      const p = jobOrWorkspacePath.repo_path || jobOrWorkspacePath.repoPath;
+      if (p) {
+        const resolved = path.resolve(p.trim());
+        wsRawKey = `path:${process.platform === 'win32' ? resolved.toLowerCase() : resolved}`;
+      } else if (jobOrWorkspacePath.workspace_id) {
+        wsRawKey = `ws:${String(jobOrWorkspacePath.workspace_id).trim()}`;
+      }
+
       wsKey = this._getWorkspaceKey(jobOrWorkspacePath);
     }
+
+    // 1. Nếu workspace đang có tiến trình MERGING chạy trên repo gốc -> khóa tuyệt đối để chống xung đột git
+    if (wsRawKey && this.isWorkspaceMergeLocked(wsRawKey, typeof jobOrWorkspacePath === 'object' ? jobOrWorkspacePath.id : null)) {
+      return true;
+    }
+
+    // 2. Nếu task đang ở bước PLANNING hoặc TO DO (Read-Only) -> cho phép chạy song song!
+    if (isPlanningOrTodo) {
+      return false;
+    }
+
     if (!wsKey) return false;
     return this.activeWorkspaces.has(wsKey);
   }
-
   /**
    * Lấy job đang chạy trên workspace
    */
