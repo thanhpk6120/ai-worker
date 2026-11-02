@@ -1320,9 +1320,10 @@ function extractTargetServicesFromDevPlan(devPlanText, wsServices = []) {
   const availableKeys = wsServices.map(s => s.service_key).filter(Boolean);
 
   // 1. Regex tìm mục "Service mục tiêu" / "Target Service"
+  // 1. Regex tìm mục "Service mục tiêu" / "Phân hệ mục tiêu" / "Target Service"
   const targetRegexes = [
-    /(?:Service\s*mục\s*tiêu|Target\s*Service|Service\s*chính|Dịch\s*vụ\s*mục\s*tiêu)[^`\r\n]*[`'"]([a-zA-Z0-9_\-\.\/]+)[`'"]/gi,
-    /(?:Service\s*mục\s*tiêu|Target\s*Service|Service\s*chính|Dịch\s*vụ\s*mục\s*tiêu)\s*[:=]\s*[*_]*([a-zA-Z0-9_\-\.\/]+)/gi
+    /(?:Service\s*mục\s*tiêu|Phân\s*hệ\s*mục\s*tiêu|Module\s*mục\s*tiêu|Target\s*Service|Service\s*chính|Dịch\s*vụ\s*mục\s*tiêu)[^`\r\n]*[`'"]([a-zA-Z0-9_\-\.\/]+)[`'"]/gi,
+    /(?:Service\s*mục\s*tiêu|Phân\s*hệ\s*mục\s*tiêu|Module\s*mục\s*tiêu|Target\s*Service|Service\s*chính|Dịch\s*vụ\s*mục\s*tiêu)\s*[:=]\s*[*_]*([a-zA-Z0-9_\-\.\/]+)/gi
   ];
 
   for (const reg of targetRegexes) {
