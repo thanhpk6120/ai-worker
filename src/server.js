@@ -4555,6 +4555,11 @@ const executeStep = async (id, opts) => {
           }
 
           // 3. Thực hiện merge branch task vào dev_branch
+          let preMergeSha = null;
+          try {
+            preMergeSha = require('node:child_process').execSync('git rev-parse HEAD', { cwd: repoFullPath, stdio: 'pipe', encoding: 'utf-8' }).trim();
+          } catch (_) {}
+
           jobEventBus.emitJobLog(id, { text: `[MERGING] Merge nhánh '${taskBranch}' vào nhánh phát triển '${targetDevBranch}'...\n` });
           const mRes = worktreeManager.mergeBranch({
             repoFullPath,
@@ -4618,13 +4623,31 @@ const executeStep = async (id, opts) => {
           } else if (!mRes.success) {
             throw new Error(`Merge thất bại cho service '${serviceKey}': ${mRes.error || 'Lỗi không xác định'}`);
           } else {
-            // Clean Merge thành công
-            jobEventBus.emitJobLog(id, { text: `[MERGING] ✅ Clean merge thành công cho '${serviceKey}' vào nhánh '${targetDevBranch}'!\n` });
-            worktreeManager.restoreWorkingTree(repoFullPath, stashInfo);
-            worktreeManager.removeTaskWorktree(repoFullPath, wt.worktree_path);
-            db.updateJobWorktreeStatus(wt.id, 'MERGED');
+            // Clean Merge thành công -> VẪN BẮT BUỘC PHẢI CHẠY RE-TEST TRÊN REPO GỐC
+            jobEventBus.emitJobLog(id, { text: `[MERGING] ✅ Clean merge vào nhánh '${targetDevBranch}'. Đang chạy RE-TEST trực tiếp trên repo gốc '${serviceKey}'...\n` });
+            const testResult = worktreeManager.runServiceTest(repoFullPath);
+
+            if (testResult.passed) {
+              jobEventBus.emitJobLog(id, { text: `[MERGING] ✅ RE-TEST PASS trên repo gốc '${serviceKey}'!\n` });
+              worktreeManager.restoreWorkingTree(repoFullPath, stashInfo);
+              worktreeManager.removeTaskWorktree(repoFullPath, wt.worktree_path);
+              db.updateJobWorktreeStatus(wt.id, 'MERGED');
+            } else {
+              jobEventBus.emitJobLog(id, { text: `[MERGING] ❌ RE-TEST THẤT BẠI trên repo gốc '${serviceKey}' sau khi merge! Output:\n${testResult.output.slice(0, 400)}\n[MERGING] Hoàn tác merge trên repo gốc...\n` });
+              if (preMergeSha) {
+                try {
+                  require('node:child_process').execSync(`git reset --hard "${preMergeSha}"`, { cwd: repoFullPath, stdio: 'ignore' });
+                } catch (_) {}
+              } else {
+                worktreeManager.abortMerge(repoFullPath);
+              }
+              worktreeManager.restoreWorkingTree(repoFullPath, stashInfo);
+              conflictService = serviceKey;
+              conflictFiles = ['Re-test failed on target dev branch'];
+              allMergedSuccessfully = false;
+              break;
+            }
           }
-        } catch (mErr) {
           worktreeManager.abortMerge(repoFullPath);
           worktreeManager.restoreWorkingTree(repoFullPath, stashInfo);
           taskQueue.releaseDevLock(serviceKey, id, wsId);

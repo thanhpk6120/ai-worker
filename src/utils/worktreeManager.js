@@ -246,8 +246,16 @@ function ensureLocalGitExclude(repoFullPath) {
 
     const excludeFile = path.join(targetExcludeDir, 'exclude');
     let content = fs.existsSync(excludeFile) ? fs.readFileSync(excludeFile, 'utf-8') : '';
+    let updated = false;
     if (!content.includes('.worktrees')) {
       content = (content.trim() ? content.trim() + '\n' : '') + '.worktrees/\n';
+      updated = true;
+    }
+    if (!content.includes('.task-manifest.json')) {
+      content = (content.trim() ? content.trim() + '\n' : '') + '.task-manifest.json\n';
+      updated = true;
+    }
+    if (updated) {
       fs.writeFileSync(excludeFile, content, 'utf-8');
     }
   } catch (err) {
@@ -618,11 +626,31 @@ function runServiceTest(repoFullPath) {
       const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
       if (pkg.scripts && pkg.scripts.test) {
         testCmd = 'npm test';
+      } else if (pkg.scripts && pkg.scripts.build) {
+        testCmd = 'npm run build';
       }
     } catch {}
   }
 
-  // Nếu không có npm test hoặc file test khác, kiểm tra thư mục tests
+  // Kiểm tra Java / Maven (pom.xml)
+  const pomPath = path.join(repoFullPath, 'pom.xml');
+  if (!testCmd && fs.existsSync(pomPath)) {
+    const isWin = process.platform === 'win32';
+    const mvnwPath = path.join(repoFullPath, isWin ? 'mvnw.cmd' : 'mvnw');
+    const mvnCmd = fs.existsSync(mvnwPath) ? (isWin ? '.\\mvnw.cmd' : './mvnw') : (isWin ? 'mvn.cmd' : 'mvn');
+    testCmd = `${mvnCmd} test-compile`;
+  }
+
+  // Kiểm tra Gradle (build.gradle / gradlew)
+  const gradlePath = path.join(repoFullPath, 'build.gradle');
+  const gradleKtsPath = path.join(repoFullPath, 'build.gradle.kts');
+  if (!testCmd && (fs.existsSync(gradlePath) || fs.existsSync(gradleKtsPath))) {
+    const isWin = process.platform === 'win32';
+    const gradlew = path.join(repoFullPath, isWin ? 'gradlew.bat' : 'gradlew');
+    testCmd = fs.existsSync(gradlew) ? (isWin ? '.\\gradlew.bat testClasses' : './gradlew testClasses') : 'gradle testClasses';
+  }
+
+  // Nếu không có npm/mvn test hoặc file test khác, kiểm tra thư mục tests (Node.js test runner)
   if (!testCmd) {
     const testsDir = path.join(repoFullPath, 'tests');
     if (fs.existsSync(testsDir)) {
