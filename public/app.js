@@ -922,6 +922,7 @@
           targetJob.status = newStatus;
           if (payload.current_step) targetJob.current_step = payload.current_step;
           if (payload.runner) targetJob.runner = payload.runner;
+          if (payload.is_queued !== undefined) targetJob.is_queued = !!payload.is_queued;
           targetJob.updated_at = payload.timestamp || new Date().toISOString();
         }
 
@@ -932,6 +933,7 @@
           state.activeJob.status = newStatus;
           if (payload.current_step) state.activeJob.current_step = payload.current_step;
           if (payload.runner) state.activeJob.runner = payload.runner;
+          if (payload.is_queued !== undefined) state.activeJob.is_queued = !!payload.is_queued;
           if (newStatus === 'PENDING') state.activeJob.had_pending = 1;
           if (newStatus === 'FIXING') state.activeJob.fix_attempt = 1;
           renderActiveJobDetail();
@@ -1095,12 +1097,14 @@
         targetJob.status = payload.status;
         if (payload.current_step) targetJob.current_step = payload.current_step;
         if (payload.runner) targetJob.runner = payload.runner;
+        if (payload.is_queued !== undefined) targetJob.is_queued = !!payload.is_queued;
         targetJob.updated_at = payload.timestamp || new Date().toISOString();
       }
       if (state.activeJob && (!payload.jobId || state.activeJob.id === payload.jobId)) {
         state.activeJob.status = payload.status;
         if (payload.current_step) state.activeJob.current_step = payload.current_step;
         if (payload.runner) state.activeJob.runner = payload.runner;
+        if (payload.is_queued !== undefined) state.activeJob.is_queued = !!payload.is_queued;
         if (payload.status === 'PENDING') state.activeJob.had_pending = 1;
         if (payload.status === 'FIXING') state.activeJob.fix_attempt = 1;
         renderActiveJobDetail();
@@ -2480,15 +2484,16 @@
       if (!res.ok || !data.success) {
         throw new Error(data.error || 'Lỗi khi kích hoạt task');
       }
+      showToast(data.message || 'Đã kích hoạt task thành công!', data.queued ? 'info' : 'success');
       await fetchJobDetails(state.activeJobId, false);
       await fetchJobsList();
     } catch (err) {
-      alert('Lỗi kích hoạt task: ' + err.message);
+      showToast('Lỗi kích hoạt task: ' + err.message, 'error');
     } finally {
       if (btn) {
-        btn.disabled = false;
         btn.innerHTML = '<i class="fa-solid fa-play mr-1"></i> <span>Chạy Pipeline</span>';
       }
+      renderActiveJobDetail();
     }
   }
 
