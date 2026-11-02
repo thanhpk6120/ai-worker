@@ -3848,6 +3848,7 @@ const executeStep = async (id, opts) => {
       db.updateJob(id, { status: 'IMPLEMENT', current_step: 'IMPLEMENT', runner: implementAgent, had_pending: (answeredQuestions.length > 0 ? 1 : (job.had_pending || 0)), pipeline_config: resumedPipe });
       jobEventBus.emitJobStatus(id, { status: 'IMPLEMENT', runner: implementAgent });
       jobEventBus.emitJobLog(id, { text: `\n[PLANNING -> IMPLEMENT] Hoàn tất Kế hoạch sau khi làm rõ. Tự động chuyển tiếp sang triển khai mã nguồn (IMPLEMENT) với 🤖 Agent: ${implementAgent}...\n` });
+      scheduleNextStep(id, opts, 100);
       return;
     }
 
