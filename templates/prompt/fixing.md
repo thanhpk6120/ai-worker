@@ -31,6 +31,7 @@ Nhiệm vụ của bạn là tiếp nhận toàn bộ ngữ cảnh kiểm thử 
 2. **QUY TẮC SỬA MÃ NGUỒN (CODE REPOSITORY):**
    - CHỈ KHI SỬA CODE: Bạn mới xác định service/module cần sửa trong workspace `{{WORKSPACE_PATH}}` và chỉ sửa đổi các tệp mã nguồn thuộc service đó.
    - Không được sửa đổi mã nguồn ngoài phạm vi xử lý lỗi.
+   - **TUYỆT ĐỐI CẤM COPY MÃ NGUỒN SANG REPO GỐC:** Bạn chỉ được thao tác bên trong thư mục worktree được chỉ định. CẤM tự ý chạy lệnh copy/cp/Copy-Item để đồng bộ tệp tin sang thư mục gốc của repository mẹ. Việc tích hợp mã nguồn vào nhánh phát triển (dev) là trách nhiệm độc quyền của hệ thống tại bước MERGING.
    - Tuyệt đối không xóa vĩnh viễn tệp tin của người dùng (nếu dọn dẹp, chuyển vào Recycle Bin / Trash).
 3. **QUY TẮC NGÔN NGỮ TÀI LIỆU:**
    - Mọi tài liệu tạo ra (`.md`, báo cáo, ghi chú...) BẮT BUỘC viết bằng tiếng Việt có dấu, mã hóa UTF-8.

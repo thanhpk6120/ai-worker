@@ -29,6 +29,7 @@ Nhiệm vụ của bạn là hiện thực hóa toàn bộ mã nguồn của tas
 2. **QUY TẮC SỬA MÃ NGUỒN (CODE REPOSITORY):**
    - CHỈ KHI SỬA CODE / VIẾT MÃ NGUỒN: Bạn mới xác định service/module cần sửa trong workspace `{{WORKSPACE_PATH}}` (dựa trên bản thiết kế trong `dev_plan.md`) và chỉ sửa đổi các tệp mã nguồn thuộc service đó.
    - Không được sửa đổi mã nguồn hoặc tạo file rác bên ngoài service/module liên quan.
+   - **TUYỆT ĐỐI CẤM COPY MÃ NGUỒN SANG REPO GỐC:** Bạn chỉ được thao tác bên trong thư mục worktree được chỉ định. CẤM tự ý chạy lệnh copy/cp/Copy-Item để đồng bộ tệp tin sang thư mục gốc của repository mẹ. Việc tích hợp mã nguồn vào nhánh phát triển (dev) là trách nhiệm độc quyền của hệ thống tại bước MERGING.
    - Tuyệt đối không xóa vĩnh viễn tệp tin của người dùng (nếu cần dọn dẹp, chuyển vào Recycle Bin / Trash).
 3. **QUY TẮC NGÔN NGỮ TÀI LIỆU:**
    - Mọi tài liệu tạo ra (`.md`, báo cáo, ghi chú...) BẮT BUỘC viết bằng tiếng Việt có dấu, mã hóa UTF-8.

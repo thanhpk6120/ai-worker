@@ -942,6 +942,7 @@
         // Luôn fetch lại job details khi status thay đổi để đồng bộ toàn bộ DB state
         fetchJobDetails(targetJobId, false);
         renderJobsList();
+        fetchSystemStatus();
       } catch (e) {
         console.warn('Status event error:', e);
       }
@@ -2487,6 +2488,7 @@
       showToast(data.message || 'Đã kích hoạt task thành công!', data.queued ? 'info' : 'success');
       await fetchJobDetails(state.activeJobId, false);
       await fetchJobsList();
+      fetchSystemStatus();
     } catch (err) {
       showToast('Lỗi kích hoạt task: ' + err.message, 'error');
     } finally {
@@ -2509,6 +2511,7 @@
       if (!res.ok) throw new Error('Hủy Job thất bại');
       await fetchJobDetails(state.activeJobId);
       fetchJobsList();
+      fetchSystemStatus();
     } catch (err) {
       alert('Lỗi: ' + err.message);
     }
@@ -2530,8 +2533,8 @@
       showToast(data.message || 'Đã tạm dừng task thành công!', 'info');
       await fetchJobDetails(state.activeJobId, false);
       await fetchJobsListSilently();
+      fetchSystemStatus();
     } catch (err) {
-      showToast(err.message, 'error');
     } finally {
       if (btn) {
         btn.disabled = false;
@@ -2557,8 +2560,8 @@
       showToast(data.message || 'Đã tiếp tục chạy task!', 'success');
       await fetchJobDetails(state.activeJobId, false);
       await fetchJobsListSilently();
+      fetchSystemStatus();
     } catch (err) {
-      showToast(err.message, 'error');
     } finally {
       if (btn) {
         btn.disabled = false;
@@ -2579,9 +2582,9 @@
       const data = await res.json();
       const newId = data.job?.id || data.id || state.activeJobId;
       await fetchJobsList();
+      fetchSystemStatus();
       selectJob(newId);
     } catch (err) {
-      alert('Lỗi khi rerun: ' + err.message);
     }
   }
 

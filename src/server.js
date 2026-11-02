@@ -1424,18 +1424,31 @@ function ensureTargetServicesWorktrees(jobId) {
     }
 
     if (createdWorktrees.length > 0) {
-      const primaryWt = createdWorktrees[0];
+      // Xác định primary service dựa trên task title / prompt (ví dụ [DEV-FE] -> ưu tiên service -fe)
+      const taskMeta = `${job.title || ''} ${job.prompt || ''} ${taskCode}`.toLowerCase();
+      let primaryWt = createdWorktrees[0];
+      if (/\[dev-fe\]|\bfe\b|frontend|giao diện/i.test(taskMeta)) {
+        const feWt = createdWorktrees.find(w => w.service_key.toLowerCase().includes('fe') || w.service_key.toLowerCase().includes('frontend'));
+        if (feWt) primaryWt = feWt;
+      } else if (/\[dev-be\]|\[dev-db\/be\]|\bbe\b|backend|database/i.test(taskMeta)) {
+        const beWt = createdWorktrees.find(w => w.service_key.toLowerCase().includes('be') || w.service_key.toLowerCase().includes('backend'));
+        if (beWt) primaryWt = beWt;
+      }
+
       db.updateJob(jobId, { worktree_path: primaryWt.worktree_path });
-      worktreeManager.saveTaskManifest(primaryWt.worktree_path, {
-        task_code: taskCode,
-        workspace_id: ws.id,
-        services: createdWorktrees.map(w => ({
-          service: w.service_key,
-          worktree_path: w.worktree_path,
-          dev_branch: w.base_dev_branch,
-          status: w.status
-        }))
-      });
+      for (const wtItem of createdWorktrees) {
+        worktreeManager.saveTaskManifest(wtItem.worktree_path, {
+          task_code: taskCode,
+          workspace_id: ws.id,
+          primary_service: primaryWt.service_key,
+          services: createdWorktrees.map(w => ({
+            service: w.service_key,
+            worktree_path: w.worktree_path,
+            dev_branch: w.base_dev_branch,
+            status: w.status
+          }))
+        });
+      }
       try {
         const allActiveWts = db.getDb().prepare("SELECT * FROM job_worktrees WHERE status = 'ACTIVE'").all();
         worktreeManager.exportWorktreesRegistry(allActiveWts);
