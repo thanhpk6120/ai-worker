@@ -2944,7 +2944,7 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
               let hasMethod = !!(objA && (objA.method || objA.request || objA.endpoint || objA.url || objA.httpMethod || eps.length > 0));
               let hasUrl = !!(objA && (objA.url || objA.endpoint || objA.request || objA.baseUrl || eps.some(e => e && (e.endpoint || e.url))));
               let hasStatus = !!(objA && (objA.status || objA.responseStatus || objA.statusCode || objA.httpStatus || eps.some(e => e && (e.status || e.httpStatus || e.statusCode))));
-              let hasBody = !!(objA && (objA.body || objA.data || objA.response || objA.payload || objA.result || objA.count !== undefined || objA.items || objA.rows || objA.records || objA.total !== undefined || objA.itemCount !== undefined || objA.firstItem !== undefined || eps.length > 0));
+              let hasBody = !!(objA && (objA.body || objA.data || objA.response || objA.payload || objA.result || objA.responseBody !== undefined || objA.responseData !== undefined || objA.count !== undefined || objA.items || objA.rows || objA.records || objA.total !== undefined || objA.itemCount !== undefined || objA.firstItem !== undefined || eps.length > 0));
 
               // Ho tro cau truc long test case (nested testcases: { login: { endpoint, httpStatus }, tc15_hub: { httpStatus, httpMethod }... })
               if (objA && typeof objA === 'object' && !Array.isArray(objA)) {
@@ -2953,13 +2953,13 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
                   if (!hasMethod && subValues.some(s => s.endpoint || s.url || s.method || s.httpMethod)) hasMethod = true;
                   if (!hasUrl && (objA.baseUrl || subValues.some(s => s.endpoint || s.url || s.baseUrl))) hasUrl = true;
                   if (!hasStatus && subValues.some(s => s.status || s.httpStatus || s.statusCode)) hasStatus = true;
-                  if (!hasBody && subValues.some(s => s.body || s.data || s.response || s.payload || s.result || s.itemCount !== undefined || s.items || s.keys || s.count !== undefined || s.firstItem !== undefined)) hasBody = true;
+                  if (!hasBody && subValues.some(s => s.body || s.data || s.response || s.payload || s.result || s.responseBody !== undefined || s.responseData !== undefined || s.itemCount !== undefined || s.items || s.keys || s.count !== undefined || s.firstItem !== undefined)) hasBody = true;
                 }
               } else if (Array.isArray(objA)) {
                 if (objA.some(s => s && (s.endpoint || s.url || s.method || s.httpMethod))) hasMethod = true;
                 if (objA.some(s => s && (s.endpoint || s.url || s.baseUrl))) hasUrl = true;
                 if (objA.some(s => s && (s.status || s.httpStatus || s.statusCode))) hasStatus = true;
-                if (objA.some(s => s && (s.body || s.data || s.response || s.payload || s.result || s.itemCount !== undefined || s.items || s.firstItem !== undefined))) hasBody = true;
+                if (objA.some(s => s && (s.body || s.data || s.response || s.payload || s.result || s.responseBody !== undefined || s.responseData !== undefined || s.itemCount !== undefined || s.items || s.firstItem !== undefined))) hasBody = true;
               }
 
               const buildOnlyApi = /npm install|npm run build|building|compiled|vite|webpack|tsc -b/i.test(strA) && !HTTP_RUNTIME_RE.test(strA);
@@ -2967,7 +2967,7 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
                 agentFailed = true;
                 failedEvidenceFiles.add(af);
                 jobEventBus.emitJobLog(id, {
-                  text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: ${af} không phải API runtime (thiếu method+url đầy đủ http://localhost:PORT + path nghiệp vụ, responseStatus 2xx, request/response body thật, hoặc chỉ là build log). Agent phải khởi động service thật, gọi API nghiệp vụ thật và lưu ${af} đầy đủ!\n`
+                  text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: ${af} không phải API runtime (thiếu method+url đầy đủ http://localhost:PORT + path nghiệp vụ, status HTTP, request/response body thật, hoặc chỉ là build log). Agent phải khởi động service thật, gọi API nghiệp vụ thật và lưu ${af} đầy đủ!\n`
                 });
                 break;
               }
@@ -4490,6 +4490,8 @@ const executeStep = async (id, opts) => {
       let allMergedSuccessfully = true;
       let conflictService = null;
       let conflictFiles = [];
+      let retestFailOutput = '';
+      let retestEnvError = false;
 
       const wsMergeKey = ws ? (ws.path || ws.id) : (job.repo_path || './');
       jobEventBus.emitJobLog(id, { text: `\n[MERGING] ⏳ Đang yêu cầu Khóa Độc Quyền Workspace Merge để đảm bảo an toàn repo gốc...\n` });
@@ -4501,7 +4503,7 @@ const executeStep = async (id, opts) => {
 
       try {
         for (const wt of activeWorktrees) {
-        if (wt.status === 'MERGED') continue;
+        if (wt.status === 'MERGED' || wt.status === 'CANCELLED') continue;
 
         const serviceKey = wt.service_key;
         let svcConfig = ws ? db.getWorkspaceServiceByKey(ws.id, serviceKey) : null;
@@ -4631,6 +4633,7 @@ const executeStep = async (id, opts) => {
               worktreeManager.restoreWorkingTree(repoFullPath, stashInfo);
               conflictService = serviceKey;
               conflictFiles = mRes.conflictFiles;
+              retestFailOutput = testResult.output; retestEnvError = !!testResult.envError;
               allMergedSuccessfully = false;
               break;
             }
@@ -4658,6 +4661,7 @@ const executeStep = async (id, opts) => {
               worktreeManager.restoreWorkingTree(repoFullPath, stashInfo);
               conflictService = serviceKey;
               conflictFiles = ['Re-test failed on target dev branch'];
+              retestFailOutput = testResult.output; retestEnvError = !!testResult.envError;
               allMergedSuccessfully = false;
               break;
             }
@@ -4676,8 +4680,18 @@ const executeStep = async (id, opts) => {
     }
 
       if (!allMergedSuccessfully) {
-        // Có conflict -> Chuyển về FIXING bên trong worktree để giải quyết
-        const conflictMsg = `Phát hiện conflict khi merge service '${conflictService}' (${conflictFiles.join(', ')}). Vui lòng cập nhật code và đối soát lại.`;
+        // Lỗi môi trường (Maven wrapper hỏng, thiếu JAVA_HOME, timeout...): agent FIXING không sửa được -> dừng, không đốt vòng lặp
+        if (retestEnvError) {
+          const envMsg = `RE-TEST lỗi MÔI TRƯỜNG tại service '${conflictService}' (không phải lỗi code, cần người xử lý môi trường rồi Rerun): ${String(retestFailOutput).trim().slice(0, 400)}`;
+          jobEventBus.emitJobLog(id, { text: `\n[MERGING] ⛔ ${envMsg}\n` });
+          db.updateJob(id, { status: 'FAILED', current_step: 'MERGING', error_message: envMsg });
+          jobEventBus.emitJobStatus(id, { status: 'FAILED' });
+          jobEventBus.emitJobError(id, { error: envMsg });
+          return;
+        }
+        // Có conflict -> Chuyển về FIXING bên trong worktree để giải quyết (kèm output test thật để agent biết lỗi gì)
+        const outSnippet = retestFailOutput ? ` Output re-test: ${String(retestFailOutput).trim().slice(0, 1500)}` : '';
+        const conflictMsg = `Phát hiện conflict khi merge service '${conflictService}' (${conflictFiles.join(', ')}). Vui lòng cập nhật code và đối soát lại.${outSnippet}`;
         jobEventBus.emitJobLog(id, { text: `\n[MERGING ➔ FIXING] ⚠ ${conflictMsg}\n` });
         db.updateJob(id, {
           status: 'FIXING',

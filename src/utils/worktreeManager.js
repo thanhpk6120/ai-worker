@@ -615,6 +615,58 @@ function exportWorktreesRegistry(worktreesList = [], registryDir = path.resolve(
   }
 }
 
+// Dấu hiệu lỗi môi trường (agent FIXING không sửa được bằng code)
+const ENV_ERROR_RE = /FileNotFoundException[^\n]*[\\/]\.m2[\\/]wrapper|JAVA_HOME (?:not found|is not set)|is not recognized as an internal or external command|spawnSync[^\n]*ENOENT|ETIMEDOUT/i;
+
+/**
+ * Tự động dò tìm JAVA_HOME nếu chưa được set trong biến môi trường
+ */
+function getOrDetectJavaHome() {
+  if (process.env.JAVA_HOME && fs.existsSync(process.env.JAVA_HOME)) {
+    return process.env.JAVA_HOME;
+  }
+  if (process.platform === 'win32') {
+    const javaDir = 'C:\\Program Files\\Java';
+    if (fs.existsSync(javaDir)) {
+      try {
+        const jdks = fs.readdirSync(javaDir).filter(d => /^jdk|^zulu|^temurin|^corretto/i.test(d));
+        if (jdks.length > 0) {
+          jdks.sort().reverse();
+          return path.join(javaDir, jdks[0]);
+        }
+      } catch {}
+    }
+  }
+  return null;
+}
+/**
+ * Phát hiện thư mục Maven wrapper hỏng (thiếu bin/m2.conf) và di chuyển các thư mục con
+ * bị hỏng vào Recycle Bin (KHÔNG xóa vĩnh viễn), để wrapper tự giải nén lại sạch từ file .zip sẵn có.
+ * @returns {boolean} true nếu đã dọn dẹp và nên thử lại
+ */
+function repairBrokenMavenWrapper(output) {
+  const m = /FileNotFoundException:\s*(.+?[\\/]wrapper[\\/]dists[\\/][^\\/]+[\\/][^\\/]+)[\\/]([^\\/]+)[\\/]bin[\\/]m2\.conf/i.exec(output || '');
+  if (!m) return false;
+  const hashDir = m[1].trim();
+  try {
+    if (!fs.existsSync(hashDir)) return false;
+    let cleaned = false;
+    const entries = fs.readdirSync(hashDir);
+    for (const entry of entries) {
+      const fullEntryPath = path.join(hashDir, entry);
+      try {
+        if (fs.statSync(fullEntryPath).isDirectory()) {
+          safeMoveToTrash(fullEntryPath);
+          cleaned = true;
+        }
+      } catch {}
+    }
+    return cleaned;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Chạy test suite trực tiếp trên repo gốc (dùng cho Re-test tại bước MERGING)
  * @param {string} repoFullPath Đường dẫn repo gốc
@@ -645,7 +697,7 @@ function runServiceTest(repoFullPath) {
     const isWin = process.platform === 'win32';
     const mvnwPath = path.join(repoFullPath, isWin ? 'mvnw.cmd' : 'mvnw');
     const mvnCmd = fs.existsSync(mvnwPath) ? (isWin ? '.\\mvnw.cmd' : './mvnw') : (isWin ? 'mvn.cmd' : 'mvn');
-    testCmd = `${mvnCmd} test-compile`;
+    testCmd = `${mvnCmd} test-compile -DskipTests`;
   }
 
   // Kiểm tra Gradle (build.gradle / gradlew)
@@ -670,18 +722,36 @@ function runServiceTest(repoFullPath) {
     return { passed: true, output: 'Không có test script, kiểm tra cú pháp pass' };
   }
 
-  try {
-    const stdout = execSync(testCmd, {
-      cwd: repoFullPath,
-      stdio: 'pipe',
-      encoding: 'utf-8',
-      timeout: 120000
-    });
-    return { passed: true, output: stdout || 'PASS' };
-  } catch (err) {
-    const errOut = (err.stdout || '') + '\n' + (err.stderr || err.message || '');
-    return { passed: false, output: errOut };
+  const runOnce = () => {
+    try {
+      const env = { ...process.env };
+      const detectedJh = getOrDetectJavaHome();
+      if (detectedJh && !env.JAVA_HOME) {
+        env.JAVA_HOME = detectedJh;
+      }
+      const stdout = execSync(testCmd, {
+        cwd: repoFullPath,
+        env,
+        stdio: 'pipe',
+        encoding: 'utf-8',
+        timeout: 180000
+      });
+      return { passed: true, output: stdout || 'PASS' };
+    } catch (err) {
+      const errOut = (err.stdout || '') + '\n' + (err.stderr || err.message || '');
+      return { passed: false, output: errOut, timedOut: err.code === 'ETIMEDOUT' };
+    }
+  };
+
+  let res = runOnce();
+  // Wrapper Maven giải nén dở dang (thiếu bin/m2.conf): đổi tên thư mục hỏng (không xóa) để wrapper giải nén lại từ zip rồi thử lại 1 lần
+  if (!res.passed && repairBrokenMavenWrapper(res.output)) {
+    res = runOnce();
   }
+  if (!res.passed) {
+    res.envError = !!res.timedOut || ENV_ERROR_RE.test(res.output);
+  }
+  return res;
 }
 
 /**
