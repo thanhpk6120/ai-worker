@@ -312,6 +312,13 @@ function createTaskWorktree({ repoFullPath, worktreeDestPath, taskBranch, baseDe
       }
     } catch {}
   }
+  // 1b. Nếu repo gốc đang đứng ở chính nhánh taskBranch -> chuyển về baseDevBranch để giải phóng nhánh cho worktree
+  const currentBranch = getRepoCurrentBranch(repoFullPath);
+  if (currentBranch === taskBranch) {
+    try {
+      execSync(`git checkout "${baseDevBranch}"`, { cwd: repoFullPath, stdio: 'pipe' });
+    } catch {}
+  }
 
   // 2. Kiểm tra xem taskBranch đã tồn tại trong repo chưa
   let branchExists = false;
