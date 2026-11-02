@@ -1312,6 +1312,24 @@ app.post('/api/v1/jobs/:id/worktrees/expand', (req, res) => {
   }
 });
 /**
+ * Trích xuất đoạn lỗi compile/build thực sự từ output của re-test (Maven/Gradle/npm).
+ * Ưu tiên các dòng [ERROR], ERROR, compilation failure, hoặc phần đuôi (nơi in chi tiết lỗi).
+ */
+function extractBuildErrorSnippet(output, maxLen = 1500) {
+  if (!output || typeof output !== 'string') return '';
+  const clean = output.trim();
+  if (clean.length <= maxLen) return clean;
+  const lines = clean.split('\n');
+  const errorLines = lines.filter(l => /\[ERROR\]|error:|compilation failure|cannot find symbol|syntax error|Exception/i.test(l));
+  if (errorLines.length > 0) {
+    const errorText = errorLines.join('\n');
+    if (errorText.length <= maxLen) return errorText;
+    return errorText.slice(-maxLen);
+  }
+  // Fallback: Lấy từ đuôi (nơi in stack trace và thông báo lỗi cuối cùng của build tool)
+  return clean.slice(-maxLen);
+}
+/**
  * Trích xuất danh sách service mục tiêu từ dev_plan.md
  */
 function extractTargetServicesFromDevPlan(devPlanText, wsServices = []) {
@@ -4628,7 +4646,7 @@ const executeStep = async (id, opts) => {
               worktreeManager.removeTaskWorktree(repoFullPath, wt.worktree_path);
               db.updateJobWorktreeStatus(wt.id, 'MERGED');
             } else {
-              jobEventBus.emitJobLog(id, { text: `[MERGING] ❌ RE-TEST THẤT BẠI sau khi gỡ conflict! Output:\n${testResult.output.slice(0, 400)}\n[MERGING] Hoàn tác merge trên repo gốc...\n` });
+              jobEventBus.emitJobLog(id, { text: `[MERGING] ❌ RE-TEST THẤT BẠI sau khi gỡ conflict! Output:\n${extractBuildErrorSnippet(testResult.output, 600)}\n[MERGING] Hoàn tác merge trên repo gốc...\n` });
               worktreeManager.abortMerge(repoFullPath);
               worktreeManager.restoreWorkingTree(repoFullPath, stashInfo);
               conflictService = serviceKey;
@@ -4650,7 +4668,7 @@ const executeStep = async (id, opts) => {
               worktreeManager.removeTaskWorktree(repoFullPath, wt.worktree_path);
               db.updateJobWorktreeStatus(wt.id, 'MERGED');
             } else {
-              jobEventBus.emitJobLog(id, { text: `[MERGING] ❌ RE-TEST THẤT BẠI trên repo gốc '${serviceKey}' sau khi merge! Output:\n${testResult.output.slice(0, 400)}\n[MERGING] Hoàn tác merge trên repo gốc...\n` });
+              jobEventBus.emitJobLog(id, { text: `[MERGING] ❌ RE-TEST THẤT BẠI trên repo gốc '${serviceKey}' sau khi merge! Output:\n${extractBuildErrorSnippet(testResult.output, 600)}\n[MERGING] Hoàn tác merge trên repo gốc...\n` });
               if (preMergeSha) {
                 try {
                   require('node:child_process').execSync(`git reset --hard "${preMergeSha}"`, { cwd: repoFullPath, stdio: 'ignore' });
@@ -4683,7 +4701,7 @@ const executeStep = async (id, opts) => {
       if (!allMergedSuccessfully) {
         // Lỗi môi trường (Maven wrapper hỏng, thiếu JAVA_HOME, timeout...): agent FIXING không sửa được -> dừng, không đốt vòng lặp
         if (retestEnvError) {
-          const envMsg = `RE-TEST lỗi MÔI TRƯỜNG tại service '${conflictService}' (không phải lỗi code, cần người xử lý môi trường rồi Rerun): ${String(retestFailOutput).trim().slice(0, 400)}`;
+          const envMsg = `RE-TEST lỗi MÔI TRƯỜNG tại service '${conflictService}' (không phải lỗi code, cần người xử lý môi trường rồi Rerun): ${extractBuildErrorSnippet(retestFailOutput, 600)}`;
           jobEventBus.emitJobLog(id, { text: `\n[MERGING] ⛔ ${envMsg}\n` });
           db.updateJob(id, { status: 'FAILED', current_step: 'MERGING', error_message: envMsg });
           jobEventBus.emitJobStatus(id, { status: 'FAILED' });
@@ -4691,7 +4709,7 @@ const executeStep = async (id, opts) => {
           return;
         }
         // Có conflict -> Chuyển về FIXING bên trong worktree để giải quyết (kèm output test thật để agent biết lỗi gì)
-        const outSnippet = retestFailOutput ? ` Output re-test: ${String(retestFailOutput).trim().slice(0, 1500)}` : '';
+        const outSnippet = retestFailOutput ? ` Output re-test:\n${extractBuildErrorSnippet(retestFailOutput, 1500)}` : '';
         const conflictMsg = `Phát hiện conflict khi merge service '${conflictService}' (${conflictFiles.join(', ')}). Vui lòng cập nhật code và đối soát lại.${outSnippet}`;
         jobEventBus.emitJobLog(id, { text: `\n[MERGING ➔ FIXING] ⚠ ${conflictMsg}\n` });
         db.updateJob(id, {
