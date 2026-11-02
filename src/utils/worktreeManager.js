@@ -279,7 +279,11 @@ function createTaskWorktree({ repoFullPath, worktreeDestPath, taskBranch, baseDe
 
   // 0b. Luôn pull code mới nhất của baseDevBranch về trước khi phân nhánh worktree
   pullLatestCode(repoFullPath, baseDevBranch);
-  // 1. Kiểm tra xem worktree path đã tồn tại chưa
+
+  // 0c. Tự động dọn dẹp worktree metadata cũ (stale worktrees không còn thư mục trên đĩa)
+  try {
+    execSync('git worktree prune', { cwd: repoFullPath, stdio: 'ignore' });
+  } catch {}
   if (fs.existsSync(resolvedWorktree)) {
     try {
       const wtList = execSync('git worktree list --porcelain', {
