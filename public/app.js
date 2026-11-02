@@ -2535,7 +2535,7 @@
       await fetchJobsListSilently();
       fetchSystemStatus();
     } catch (err) {
-    } finally {
+      showToast(err.message, 'error');
       if (btn) {
         btn.disabled = false;
         btn.innerHTML = oldHtml;
@@ -2562,7 +2562,7 @@
       await fetchJobsListSilently();
       fetchSystemStatus();
     } catch (err) {
-    } finally {
+      showToast(err.message, 'error');
       if (btn) {
         btn.disabled = false;
         btn.innerHTML = oldHtml;
@@ -2585,6 +2585,7 @@
       fetchSystemStatus();
       selectJob(newId);
     } catch (err) {
+      alert('Lỗi khi rerun: ' + err.message);
     }
   }
 

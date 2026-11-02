@@ -1334,12 +1334,12 @@ function extractTargetServicesFromDevPlan(devPlanText, wsServices = []) {
     }
   }
 
-  // 2. Đối chiếu với danh sách service đã đăng ký trong workspace_services
-  if (availableKeys.length > 0) {
+  // 2. Fallback: Chỉ đối chiếu toàn văn khi không tìm thấy service nào qua các tiêu đề mục tiêu
+  if (foundServices.size === 0 && availableKeys.length > 0) {
     for (const sKey of availableKeys) {
       if (sKey.toLowerCase() === 'docs') continue;
       const escapedKey = sKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const keyRegex = new RegExp(`(?:service|module|dịch vụ)?\\s*[:=]?\\s*[\`'"]?${escapedKey}[\`'"]?`, 'i');
+      const keyRegex = new RegExp(`(?:service|module|dịch vụ)\\s*[:=]\\s*[\`'"]?${escapedKey}[\`'"]?`, 'i');
       if (keyRegex.test(devPlanText)) {
         foundServices.add(sKey);
       }
@@ -1425,8 +1425,8 @@ function ensureTargetServicesWorktrees(jobId) {
     }
 
     if (createdWorktrees.length > 0) {
-      // Xác định primary service dựa trên task title / prompt (ví dụ [DEV-FE] -> ưu tiên service -fe)
-      const taskMeta = `${job.title || ''} ${job.prompt || ''} ${taskCode}`.toLowerCase();
+      // Xác định primary service dựa trên task title / prompt / devPlanText (ví dụ [DEV-FE] -> ưu tiên service -fe)
+      const taskMeta = `${job.title || ''} ${job.prompt || ''} ${taskCode} ${devPlanText}`.toLowerCase();
       let primaryWt = createdWorktrees[0];
       if (/\[dev-fe\]|\bfe\b|frontend|giao diện/i.test(taskMeta)) {
         const feWt = createdWorktrees.find(w => w.service_key.toLowerCase().includes('fe') || w.service_key.toLowerCase().includes('frontend'));
