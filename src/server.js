@@ -346,10 +346,14 @@ try {
 
 // Tích hợp lắng nghe từ taskQueue
 taskQueue.on('job:started', ({ jobId, job }) => {
-  jobEventBus.emitJobStatus(jobId, { status: job.status || 'PLANNING' });
+  jobEventBus.emitJobStatus(jobId, { status: job.status || 'PLANNING', is_queued: false });
   jobEventBus.emitJobLog(jobId, {
     text: `\n>>> [QUEUE] Job ${jobId} đã được điều phối bắt đầu thực thi.\n`
   });
+});
+
+taskQueue.on('job:dequeued', ({ jobId }) => {
+  jobEventBus.emitJobStatus(jobId, { status: 'TO DO', is_queued: false });
 });
 
 taskQueue.on('job:completed', ({ jobId, result }) => {
@@ -1861,10 +1865,12 @@ app.get('/api/v1/jobs', (req, res) => {
 
     // Badge SystemOne per-task: tra `systemone_state` da parse (object, khong phai string).
     // Dong thoi tra runtime_ms: tong thoi gian thuc su worker chay task.
+    const queuedJobIds = new Set(taskQueue.getQueuedJobs().map((q) => q.id));
     const jobsWithSo = jobs.map((j) => {
       const steps = db.getStepsByJobId(j.id) || [];
       return {
         ...j,
+        is_queued: queuedJobIds.has(j.id),
         systemone_state: parseSystemOneState(j),
         runtime_ms: computeJobRuntimeMs(j, steps)
       };
@@ -2078,8 +2084,10 @@ app.get('/api/v1/jobs/:id', (req, res) => {
     const pendingQuestion = db.getPendingQuestionByJobId(id);
     const questions = db.getQuestionsByJobId(id);
     const evidence = getTaskEvidences(job);
+    const isQueued = taskQueue.isJobQueued(canonicalId);
     const fullJobData = {
       ...job,
+      is_queued: isQueued,
       systemone_state: parseSystemOneState(job),
       steps,
       // Thoi luong worker THUC SU chay task (tong cac doan steps da/đang chay).
@@ -4905,15 +4913,29 @@ const handleJobStart = async (req, res) => {
     // 3. Đưa job vào TaskQueue để quản lý Concurrency & Workspace Queue Lock
     taskQueue.enqueue(job, (queuedJob, queueOpts) => runJobPipeline(id, queueOpts), (triage && triage.track === 'quick' ? (job.priority || 0) + 1 : job.priority || 0));
 
+    const isQueued = taskQueue.isJobQueued(id);
+    if (isQueued) {
+      if (!isLocked) {
+        jobEventBus.emitJobLog(id, {
+          text: `\n[QUEUE] ⏳ Hệ thống đang chạy tối đa ${config.CONCURRENCY} luồng song song. Task '${taskCode}' đã được xếp vào hàng đợi chờ tới lượt...\n`,
+          level: 'info'
+        });
+      }
+      jobEventBus.emitJobStatus(id, { status: job.status || 'TO DO', is_queued: true });
+    }
+
     return res.json({
       success: true,
-      message: isLocked
-        ? `Task '${taskCode}' đã được xếp vào hàng đợi do Workspace đang bận!`
+      message: isQueued
+        ? (isLocked
+            ? `Task '${taskCode}' đã được xếp vào hàng đợi do Workspace đang bận!`
+            : `Task '${taskCode}' đã được xếp vào hàng đợi do đạt giới hạn song song (${config.CONCURRENCY} luồng)!`)
         : `Task '${taskCode}' đã được kích hoạt thành công!`,
       jobId: id,
       taskCode,
-      status: isLocked ? (job.status || 'TO DO') : 'PLANNING',
-      queued: isLocked
+      status: isQueued ? (job.status || 'TO DO') : 'PLANNING',
+      queued: isQueued,
+      is_queued: isQueued
     });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
@@ -4922,6 +4944,38 @@ const handleJobStart = async (req, res) => {
 
 app.post('/api/v1/jobs/:id/start', handleJobStart);
 app.post('/api/v1/tasks/:id/start', handleJobStart);
+/**
+ * POST /api/v1/jobs/:id/dequeue và POST /api/v1/tasks/:id/dequeue
+ * Xóa task khỏi hàng đợi chờ (khi task đang chờ slot hoặc chờ workspace lock)
+ */
+app.post(['/api/v1/jobs/:id/dequeue', '/api/v1/tasks/:id/dequeue'], (req, res) => {
+  try {
+    const { id } = req.params;
+    const job = db.getJobById(id);
+    if (!job) {
+      return res.status(404).json({ success: false, error: `Task with ID '${id}' not found` });
+    }
+    const canonicalId = job.id || id;
+    const result = taskQueue.dequeue(canonicalId);
+    if (!result.dequeued) {
+      return res.status(400).json({ success: false, error: 'Task không nằm trong hàng đợi chờ' });
+    }
+    const taskCode = job.task_code || job.id;
+    jobEventBus.emitJobLog(canonicalId, {
+      text: `\n[QUEUE] ⏹️ Task '${taskCode}' đã được xóa khỏi hàng đợi chờ theo yêu cầu người dùng.\n`
+    });
+    jobEventBus.emitJobStatus(canonicalId, { status: job.status || 'TO DO', is_queued: false });
+    return res.json({
+      success: true,
+      message: `Đã xóa task '${taskCode}' khỏi hàng đợi thành công`,
+      jobId: canonicalId,
+      taskCode,
+      is_queued: false
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
 
 /**
  * POST /api/v1/jobs/:id/clone

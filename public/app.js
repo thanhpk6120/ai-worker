@@ -50,6 +50,7 @@
   // Status CSS mappings
   const STATUS_CLASSES = {
     'TO DO': 'status-todo',
+    'QUEUED': 'status-queued',
     'PLANNING': 'status-planning',
     'IMPLEMENT': 'status-implement',
     'TESTING': 'status-testing',
@@ -480,6 +481,7 @@
     document.getElementById('editTaskCode')?.addEventListener('input', updateEditFeaturePathPreview);
     document.getElementById('editTaskWorkspace')?.addEventListener('change', updateEditFeaturePathPreview);
     document.getElementById('btnStartTask')?.addEventListener('click', handleStartTask);
+    document.getElementById('btnDequeueTask')?.addEventListener('click', () => dequeueTask(state.activeJobId));
     document.getElementById('btnPauseTask')?.addEventListener('click', handlePauseTask);
     document.getElementById('btnResumeTask')?.addEventListener('click', handleResumeTask);
     document.getElementById('btnCancelTask')?.addEventListener('click', handleCancelActiveJob);
@@ -634,6 +636,8 @@
             window.aiWorker.archiveTask(jobId);
           } else if (action === 'delete') {
             window.aiWorker.deleteTask(jobId);
+          } else if (action === 'dequeue') {
+            window.aiWorker.dequeueTask(jobId);
           }
           return;
         }
@@ -1144,8 +1148,14 @@
    * Su dung data-action thay cho inline onclick de ho tro event delegation.
    */
   function buildJobCardHtml(job, isActive) {
+    const isQueued = job.is_queued === true;
     const status = (job.status || 'TO DO').toUpperCase();
-    const statusClass = STATUS_CLASSES[status] || 'status-todo';
+    let statusClass = STATUS_CLASSES[status] || 'status-todo';
+    let statusText = status === 'PENDING' ? 'Chờ giải đáp' : status;
+    if (isQueued) {
+      statusClass = 'status-queued';
+      statusText = 'TO DO (QUEUED)';
+    }
     const title = escapeHtml(job.title || job.prompt || 'Untitled Job');
     const repo = escapeHtml(job.repo_path || './');
     const timeAgo = formatTimeAgo(job.created_at);
@@ -1161,8 +1171,12 @@
           <span class="font-mono text-[11px] text-slate-400 truncate">#${job.id.substring(0, 8)}</span>
         </div>
         <div class="flex items-center gap-1 shrink-0">
-          <span class="status-badge ${statusClass}">${status === 'PENDING' ? 'Chờ giải đáp' : status}</span>
-          <!-- Nút Lưu trữ Task -->
+          <span class="status-badge ${statusClass}">${statusText}</span>
+          ${isQueued ? `
+          <!-- Nút Xóa khỏi hàng đợi -->
+          <button class="p-1 rounded hover:bg-amber-500/20 text-emerald-400 hover:text-amber-300 transition" title="Xóa task khỏi hàng đợi chờ" data-action="dequeue" data-job-id="${job.id}">
+            <i class="fa-solid fa-clock-rotate-left text-[11px]"></i>
+          </button>` : ''}
           <button class="p-1 rounded hover:bg-amber-500/20 text-slate-400 hover:text-amber-300 transition" title="${isArchived ? 'Bỏ lưu trữ' : 'Lưu trữ Task'}" data-action="archive" data-job-id="${job.id}">
             <i class="fa-solid fa-box-archive text-[11px] ${isArchived ? 'text-amber-400' : ''}"></i>
           </button>
@@ -1189,8 +1203,7 @@
     // Kiểm tra nhanh chữ ký dữ liệu để tránh phá hủy và render lại DOM vô ích
     const currentSignature = `${state.activeJobId}_${state.statusFilter}_${state.searchQuery}_` +
       // systemone_state phai vao chu ky: badge per-task doi khi chi trang thai SystemOne thay doi.
-      filtered.map(j => `${j.id}:${j.status}:${j.updated_at || ''}:${(j.systemone_state && j.systemone_state.updatedAt) || ''}`).join('|');
-
+      filtered.map(j => `${j.id}:${j.status}:${j.is_queued ? '1' : '0'}:${j.updated_at || ''}:${(j.systemone_state && j.systemone_state.updatedAt) || ''}`).join('|');
     if (!force && currentSignature === lastJobsRenderSignature) {
       return; // Dữ liệu không thay đổi -> Giữ nguyên DOM, CPU 0%
     }
@@ -1260,6 +1273,7 @@
           el,
           lastStatus: job.status,
           lastIsActive: isActive,
+          lastIsQueued: !!job.is_queued,
           lastSoState: JSON.stringify(job.systemone_state)
         };
         state.jobCardMap.set(job.id, entry);
@@ -1274,9 +1288,11 @@
         }
 
         const soStateStr = JSON.stringify(job.systemone_state);
-        if (entry.lastStatus !== job.status || entry.lastSoState !== soStateStr) {
+        const isQueued = !!job.is_queued;
+        if (entry.lastStatus !== job.status || entry.lastIsQueued !== isQueued || entry.lastSoState !== soStateStr) {
           el.innerHTML = buildJobCardHtml(job, isActive);
           entry.lastStatus = job.status;
+          entry.lastIsQueued = isQueued;
           entry.lastSoState = soStateStr;
         }
 
@@ -1320,11 +1336,17 @@
     const idBadge = document.getElementById('activeJobIdBadge');
     if (idBadge) idBadge.textContent = `#${job.id}`;
 
+    const isQueued = job.is_queued === true;
     const statusBadge = document.getElementById('activeJobStatusBadge');
     if (statusBadge) {
       const status = (job.status || 'TO DO').toUpperCase();
-      statusBadge.textContent = status === 'PENDING' ? 'Chờ giải đáp' : (status === 'PAUSED' ? 'Tạm dừng' : status);
-      statusBadge.className = `status-badge ${STATUS_CLASSES[status] || 'status-todo'}`;
+      if (isQueued) {
+        statusBadge.textContent = 'TO DO (CHỜ CHẠY)';
+        statusBadge.className = 'status-badge status-queued';
+      } else {
+        statusBadge.textContent = status === 'PENDING' ? 'Chờ giải đáp' : (status === 'PAUSED' ? 'Tạm dừng' : status);
+        statusBadge.className = `status-badge ${STATUS_CLASSES[status] || 'status-todo'}`;
+      }
       const errBox = document.getElementById('activeJobErrorBox');
       if (status === 'FAILED' && job.error_message) {
         if (errBox) {
@@ -1385,11 +1407,26 @@
     const isPipelineRunning = ['PLANNING', 'PENDING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING'].includes((job.status || '').toUpperCase());
     const isPaused = (job.status || '').toUpperCase() === 'PAUSED';
 
-    // Start Button State: Disable khi task đang chạy hoặc tạm dừng
+    // Dequeue Button State: Chỉ hiện khi task đang nằm trong hàng đợi chờ
+    const dequeueBtn = document.getElementById('btnDequeueTask');
+    if (dequeueBtn) {
+      if (isQueued) {
+        dequeueBtn.classList.remove('hidden');
+        dequeueBtn.disabled = false;
+      } else {
+        dequeueBtn.classList.add('hidden');
+      }
+    }
+
+    // Start Button State: Disable khi task đang chạy, tạm dừng hoặc đã nằm trong hàng đợi
     const startBtn = document.getElementById('btnStartTask');
     if (startBtn) {
       startBtn.classList.remove('hidden');
-      if (isPipelineRunning || isPaused) {
+      if (isQueued) {
+        startBtn.disabled = true;
+        startBtn.title = 'Task đã nằm trong hàng đợi chờ tới lượt';
+        startBtn.classList.add('opacity-40', 'cursor-not-allowed');
+      } else if (isPipelineRunning || isPaused) {
         startBtn.disabled = true;
         startBtn.title = isPaused ? 'Task đang tạm dừng, hãy nhấn Tiếp tục' : 'Task đang chạy Pipeline (đã vô hiệu hóa)';
         startBtn.classList.add('opacity-40', 'cursor-not-allowed');
@@ -1399,7 +1436,6 @@
         startBtn.classList.remove('opacity-40', 'cursor-not-allowed');
       }
     }
-
     // Pause & Resume Buttons: Dừng ngay tại bước đang làm hoặc tiếp tục
     const pauseBtn = document.getElementById('btnPauseTask');
     if (pauseBtn) {
@@ -4368,6 +4404,33 @@
   window.aiWorker.archiveTask = archiveTask;
   window.aiWorker.deleteTask = deleteTask;
   window.aiWorker.openEditModal = openEditTaskModal;
+  async function dequeueTask(jobId) {
+    if (!jobId) return;
+    try {
+      const res = await fetch(`/api/v1/jobs/${jobId}/dequeue`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        showToast(data.error || 'Không thể xóa task khỏi hàng đợi', 'error');
+        return;
+      }
+      showToast(data.message || 'Đã xóa task khỏi hàng đợi thành công', 'success');
+      const target = state.jobs.find(j => j.id === jobId);
+      if (target) {
+        target.is_queued = false;
+      }
+      if (state.activeJob && state.activeJob.id === jobId) {
+        state.activeJob.is_queued = false;
+        renderActiveJobDetail();
+      }
+      renderJobsList(true);
+      fetchSystemStatus();
+    } catch (err) {
+      showToast('Lỗi khi xóa khỏi hàng đợi: ' + err.message, 'error');
+    }
+  }
+
+  window.aiWorker = window.aiWorker || {};
+  window.aiWorker.dequeueTask = dequeueTask;
   window.aiWorker.openFolderBrowser = openFolderBrowser;
   window.aiWorker.closeFolderBrowser = closeFolderBrowser;
   window.aiWorker.selectFolderBrowser = selectFolderBrowser;

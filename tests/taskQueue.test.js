@@ -425,4 +425,37 @@ describe('TaskQueue Test Suite', () => {
       assert.strictEqual(queue.getRunningJobs().length, 0);
     });
   });
+  describe('Dequeue & isJobQueued', () => {
+    it('kiểm tra isJobQueued và dequeue gỡ bỏ task khỏi hàng đợi thành công', async () => {
+      const queue = new TaskQueue(1);
+      let resolveRunning;
+      const runningPromise = new Promise(r => { resolveRunning = r; });
+
+      // Job 1 chiếm slot duy nhất
+      queue.enqueue({ id: 'job-run-1' }, () => runningPromise);
+
+      // Job 2 và 3 bị xếp vào queue
+      queue.enqueue({ id: 'job-wait-2' }, async () => {});
+      queue.enqueue({ id: 'job-wait-3' }, async () => {});
+
+      assert.strictEqual(queue.isJobQueued('job-wait-2'), true);
+      assert.strictEqual(queue.isJobQueued('job-wait-3'), true);
+      assert.strictEqual(queue.isJobQueued('job-run-1'), false);
+
+      // Thực hiện dequeue job 2
+      const deqRes = queue.dequeue('job-wait-2');
+      assert.strictEqual(deqRes.dequeued, true);
+      assert.strictEqual(deqRes.job.id, 'job-wait-2');
+      assert.strictEqual(queue.isJobQueued('job-wait-2'), false);
+      assert.strictEqual(queue.getQueuedJobs().length, 1);
+      assert.strictEqual(queue.getQueuedJobs()[0].id, 'job-wait-3');
+
+      // Dequeue job không tồn tại trong queue
+      const deqNotFound = queue.dequeue('job-non-exist');
+      assert.strictEqual(deqNotFound.dequeued, false);
+
+      resolveRunning();
+      await delay(20);
+    });
+  });
 });

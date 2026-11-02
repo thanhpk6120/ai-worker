@@ -183,6 +183,30 @@ class TaskQueue extends EventEmitter {
   }
 
   /**
+   * Kiểm tra xem job có đang nằm trong hàng đợi chờ hay không
+   * @param {string} jobId
+   * @returns {boolean}
+   */
+  isJobQueued(jobId) {
+    return this.queue.some((item) => item.job && item.job.id === jobId);
+  }
+
+  /**
+   * Xóa một job khỏi hàng đợi chờ (chưa chạy)
+   * @param {string} jobId
+   * @returns {{ dequeued: boolean, job?: object }}
+   */
+  dequeue(jobId) {
+    const queueIndex = this.queue.findIndex((item) => item.job && item.job.id === jobId);
+    if (queueIndex !== -1) {
+      const removed = this.queue.splice(queueIndex, 1)[0];
+      this.emit('job:dequeued', { jobId, job: removed.job });
+      return { dequeued: true, job: removed.job };
+    }
+    return { dequeued: false, message: 'Job không nằm trong hàng đợi chờ' };
+  }
+
+  /**
    * Giải phóng workspace lock cho một job cụ thể (khi job hủy hoặc kết thúc sớm)
    */
   releaseWorkspaceLock(jobId) {

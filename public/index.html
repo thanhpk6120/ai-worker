@@ -261,6 +261,11 @@
                 <i class="fa-solid fa-play"></i>
                 <span>Chạy Pipeline</span>
               </button>
+              <!-- Nút Xóa Task khỏi hàng đợi (Sáng khi task đang nằm trong queue) -->
+              <button id="btnDequeueTask" class="hidden px-3.5 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 text-xs font-semibold shadow-md transition flex items-center gap-1.5 active:scale-95" title="Xóa task khỏi hàng đợi chờ">
+                <i class="fa-solid fa-clock-rotate-left"></i>
+                <span>Xóa khỏi hàng đợi</span>
+              </button>
               <!-- Nút Tạm dừng Task (Sáng khi task đang chạy) -->
               <button id="btnPauseTask" class="hidden px-3.5 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-xs font-semibold shadow-md transition flex items-center gap-1.5 active:scale-95" title="Tạm dừng ngay tại bước hiện tại">
                 <i class="fa-solid fa-pause"></i>
