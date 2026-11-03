@@ -293,6 +293,7 @@ function createTaskWorktree({ repoFullPath, worktreeDestPath, taskBranch, baseDe
     execSync('git worktree prune', { cwd: repoFullPath, stdio: 'ignore' });
   } catch {}
   if (fs.existsSync(resolvedWorktree)) {
+    let isValidWorktree = false;
     try {
       const wtList = execSync('git worktree list --porcelain', {
         cwd: repoFullPath,
@@ -300,17 +301,35 @@ function createTaskWorktree({ repoFullPath, worktreeDestPath, taskBranch, baseDe
         encoding: 'utf-8'
       });
       if (wtList.toLowerCase().includes(resolvedWorktree.toLowerCase())) {
-        linkNodeModules(repoFullPath, resolvedWorktree);
-        pullLatestCode(resolvedWorktree, taskBranch);
-        return {
-          success: true,
-          worktree_path: resolvedWorktree,
-          task_branch: taskBranch,
-          base_dev_branch: baseDevBranch,
-          reused: true
-        };
+        isValidWorktree = true;
       }
     } catch {}
+
+    if (isValidWorktree) {
+      linkNodeModules(repoFullPath, resolvedWorktree);
+      pullLatestCode(resolvedWorktree, taskBranch);
+      return {
+        success: true,
+        worktree_path: resolvedWorktree,
+        task_branch: taskBranch,
+        base_dev_branch: baseDevBranch,
+        reused: true
+      };
+    }
+
+    // Thu muc ton tai nhung khong phai worktree hop le (orphan do lan tao truoc bi hong):
+    // don vao Recycle Bin roi tao lai. Neu khong don duoc thi that bai ro rang.
+    console.warn(`[WorktreeManager] Phat hien orphan dir tai ${resolvedWorktree}, don dep va tao lai.`);
+    const cleaned = safeMoveToTrash(resolvedWorktree);
+    if (!cleaned || fs.existsSync(resolvedWorktree)) {
+      return {
+        success: false,
+        worktree_path: resolvedWorktree,
+        task_branch: taskBranch,
+        base_dev_branch: baseDevBranch,
+        error: `Thu muc dich da ton tai va khong the don: ${resolvedWorktree}`
+      };
+    }
   }
   // 1b. Nếu repo gốc đang đứng ở chính nhánh taskBranch -> chuyển về baseDevBranch để giải phóng nhánh cho worktree
   const currentBranch = getRepoCurrentBranch(repoFullPath);
@@ -378,29 +397,44 @@ function createTaskWorktree({ repoFullPath, worktreeDestPath, taskBranch, baseDe
 function removeTaskWorktree(repoFullPath, worktreeDestPath) {
   if (!worktreeDestPath) return false;
   const resolved = path.resolve(worktreeDestPath);
+  // Go junction/symlink node_modules truoc: git worktree remove --force
+  // khong xoa duoc thu muc chua junction tren Windows va Recycle Bin cung ket.
+  // KHONG dung existsSync: junction Windows tra false khi target khong truy cap duoc.
+  const nm = path.join(resolved, 'node_modules');
+  try {
+    const st = fs.lstatSync(nm);
+    if (st.isSymbolicLink() || (process.platform === 'win32' && st.isDirectory())) {
+      try { fs.rmdirSync(nm); } catch (_) {}
+    }
+  } catch (_) {}
 
   if (repoFullPath && fs.existsSync(repoFullPath)) {
     try {
       execSync(`git worktree remove --force "${resolved}"`, {
         cwd: repoFullPath,
-        stdio: 'ignore'
+        stdio: 'pipe',
+        encoding: 'utf-8'
       });
-    } catch {}
+    } catch (e) {
+      const msg = (e.stderr || e.message || '').toString();
+      if (!/is not a working tree/i.test(msg)) {
+        console.warn('[removeTaskWorktree] git remove failed:', msg.slice(0, 300));
+      }
+    }
 
     try {
-      execSync('git worktree prune', {
-        cwd: repoFullPath,
-        stdio: 'ignore'
-      });
+      execSync('git worktree prune', { cwd: repoFullPath, stdio: 'ignore' });
     } catch {}
   }
 
-  // Nếu thư mục vật lý vẫn còn (do uncommitted/junction/file lock), đưa vào thùng rác
+  // Luôn đi qua Recycle Bin (AGENTS.md: cấm xoá cứng). Nếu EBUSY do process
+  // đang giữ handle thì safeMoveToTrash fail và hàm trả về false — caller báo kẹt.
   if (fs.existsSync(resolved)) {
     safeMoveToTrash(resolved);
   }
 
-  return true;
+  // Tra ve ket qua that: con ton tai tren dia = chua don duoc
+  return !fs.existsSync(resolved);
 }
 
 /**

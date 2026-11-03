@@ -20,6 +20,7 @@ const { JOB_STATUSES, transition, canTransition } = require('./state/stateMachin
 const { runnerRegistry } = require('./runners/runnerRegistry');
 const { ensureGitWorkspace } = require('./utils/gitWorkspaceHelper');
 const worktreeManager = require('./utils/worktreeManager');
+const { extractTargetServicesFromDevPlan } = require('./utils/devPlanServiceExtract');
 const systemone = require('./systemone/client');
 const jobPolicy = require('./execution/jobPolicy');
 const fileContext = require('./systemone/fileContext');
@@ -1329,47 +1330,6 @@ function extractBuildErrorSnippet(output, maxLen = 1500) {
   // Fallback: Lấy từ đuôi (nơi in stack trace và thông báo lỗi cuối cùng của build tool)
   return clean.slice(-maxLen);
 }
-/**
- * Trích xuất danh sách service mục tiêu từ dev_plan.md
- */
-function extractTargetServicesFromDevPlan(devPlanText, wsServices = []) {
-  if (!devPlanText || typeof devPlanText !== 'string') return [];
-  const foundServices = new Set();
-  const availableKeys = wsServices.map(s => s.service_key).filter(Boolean);
-
-  // 1. Regex tìm mục "Service mục tiêu" / "Target Service"
-  // 1. Regex tìm mục "Service mục tiêu" / "Phân hệ mục tiêu" / "Target Service"
-  const targetRegexes = [
-    /(?:Service\s*mục\s*tiêu|Phân\s*hệ\s*mục\s*tiêu|Module\s*mục\s*tiêu|Target\s*Service|Service\s*chính|Dịch\s*vụ\s*mục\s*tiêu)[^`\r\n]*[`'"]([a-zA-Z0-9_\-\.\/]+)[`'"]/gi,
-    /(?:Service\s*mục\s*tiêu|Phân\s*hệ\s*mục\s*tiêu|Module\s*mục\s*tiêu|Target\s*Service|Service\s*chính|Dịch\s*vụ\s*mục\s*tiêu)\s*[:=]\s*[*_]*([a-zA-Z0-9_\-\.\/]+)/gi
-  ];
-
-  for (const reg of targetRegexes) {
-    let match;
-    while ((match = reg.exec(devPlanText)) !== null) {
-      const candidate = match[1].trim();
-      if (candidate) foundServices.add(candidate);
-    }
-  }
-
-  // 2. Fallback: Chỉ đối chiếu toàn văn khi không tìm thấy service nào qua các tiêu đề mục tiêu
-  if (foundServices.size === 0 && availableKeys.length > 0) {
-    for (const sKey of availableKeys) {
-      if (sKey.toLowerCase() === 'docs') continue;
-      const escapedKey = sKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const keyRegex = new RegExp(`(?:service|module|dịch vụ)\\s*[:=]\\s*[\`'"]?${escapedKey}[\`'"]?`, 'i');
-      if (keyRegex.test(devPlanText)) {
-        foundServices.add(sKey);
-      }
-    }
-  }
-
-  let result = Array.from(foundServices);
-  if (availableKeys.length > 0) {
-    result = result.filter(s => availableKeys.includes(s));
-  }
-  return result;
-}
 
 /**
  * Tự động tạo Git Worktree cho các service mục tiêu được xác định sau bước PLANNING.
@@ -1439,6 +1399,10 @@ function ensureTargetServicesWorktrees(jobId) {
           status: 'ACTIVE'
         });
         createdWorktrees.push(newWt);
+      } else {
+        jobEventBus.emitJobLog(jobId, {
+          text: `\n[WORKTREE-ERROR] ❌ Không tạo được worktree cho '${sKey}' tại ${destP}: ${crRes.error || 'lỗi không xác định'}\n`
+        });
       }
     }
 
@@ -3538,7 +3502,6 @@ const executeStep = async (id, opts) => {
 
   // Thư mục tài liệu (features & evidence) luôn nằm tại docBasePath của Workspace
   const { dir: featureDir, evidenceDir } = fileManager.ensureFeatureDirectory(docBasePath, taskCode, { allowExisting: true, featuresDir: wsFeaturesDir });
-
   // Thư mục thực thi của Runner: ưu tiên worktree bên trong service nếu đã được tạo
   const workspacePath = (job.worktree_path && fs.existsSync(job.worktree_path)) ? job.worktree_path : docBasePath;
 

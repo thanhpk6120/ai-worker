@@ -10,6 +10,7 @@
     "test:verify-fix": "node scripts/verify-task-pipeline-fix.js",
     "test:systemone": "node scripts/verify-systemone-live.js",
     "test:badge": "node scripts/verify-systemone-badge.js",
+    "verify:worktrees": "node scripts/verify-worktrees.js",
     "build:css": "tailwindcss -i ./src/tailwind-input.css -o ./public/tailwind.css --minify"
   },
   "repository": {
