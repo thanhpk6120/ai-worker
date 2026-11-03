@@ -25,6 +25,10 @@ worktrees/
 .trash/
 *.tmp
 
+# Repo giả do test worktree sinh ra
+tests/tmp_*/
+tests/.trash/
+
 # OS and IDE files
 .DS_Store
 Thumbs.db
