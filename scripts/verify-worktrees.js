@@ -22,6 +22,7 @@ const { execSync } = require('node:child_process');
 const ROOT = path.resolve(__dirname, '..');
 const DB_PATH = path.join(ROOT, 'ai-worker.sqlite');
 const worktreeManager = require(path.join(ROOT, 'src', 'utils', 'worktreeManager.js'));
+const { extractTargetServicesFromDevPlan } = require(path.join(ROOT, 'src', 'utils', 'devPlanServiceExtract.js'));
 
 const FIX = process.argv.includes('--fix');
 const ACTIVE_JOB_STATUSES = new Set(['IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING', 'MERGING']);
@@ -81,9 +82,11 @@ function main() {
   }
 
   // W1 / W2 — tương quan job status ↔ worktree ACTIVE
-  // W1 chỉ báo khi job LẼ RA phải có worktree: job.worktree_path có giá trị
-  // hoặc pipeline_config.target_services không rỗng (job không xác định được
-  // service mục tiêu thì chạy tiếp trong workspace là hợp lệ — xem server.js).
+  // W1 chỉ báo khi job LẼ RA phải có worktree. Ba nguồn xác định:
+  //   1. job.worktree_path có giá trị
+  //   2. pipeline_config.target_services không rỗng
+  //   3. dev_plan.md nêu service mục tiêu (dùng chung extractor với server.js)
+  // Job không xác định được service mục tiêu thì chạy tiếp trong workspace là hợp lệ.
   for (const job of jobs) {
     const list = wtsByJob.get(job.id) || [];
     const active = list.filter((w) => w.status === 'ACTIVE');
@@ -96,6 +99,21 @@ function main() {
           expectsWorktree = true;
         }
       } catch {}
+    }
+    if (!expectsWorktree && job.task_code) {
+      const ws = job.workspace_id ? wsById.get(job.workspace_id) : null;
+      const svcs = ws ? services.filter((s) => s.workspace_id === ws.id) : [];
+      if (svcs.length > 0) {
+        try {
+          const { defaultFileManager: fileManager } = require(path.join(ROOT, 'src', 'storage', 'fileManager.js'));
+          const planFiles = fileManager.readPlanFiles(job.repo_path || (ws && ws.path), job.task_code);
+          const devPlanText = (planFiles && planFiles.devPlan) || '';
+          if (devPlanText) {
+            const targets = extractTargetServicesFromDevPlan(devPlanText, svcs, `${job.title || ''} ${job.prompt || ''} ${job.task_code}`);
+            if (targets.length > 0) expectsWorktree = true;
+          }
+        } catch {}
+      }
     }
     if (ACTIVE_JOB_STATUSES.has(job.status) && active.length === 0 && expectsWorktree) {
       add('W1', `Job ${job.task_code || job.id} đang '${job.status}' nhưng không có worktree ACTIVE`, {

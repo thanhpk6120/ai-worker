@@ -1353,7 +1353,7 @@ function ensureTargetServicesWorktrees(jobId) {
     const pipeConf = jobPolicy.parsePipelineConfig(job);
     let targetServices = (pipeConf && Array.isArray(pipeConf.target_services)) ? pipeConf.target_services : [];
     if (targetServices.length === 0 && devPlanText) {
-      targetServices = extractTargetServicesFromDevPlan(devPlanText, wsServices);
+      targetServices = extractTargetServicesFromDevPlan(devPlanText, wsServices, `${job.title || ''} ${job.prompt || ''} ${taskCode}`);
     }
 
     if (targetServices.length === 0) {

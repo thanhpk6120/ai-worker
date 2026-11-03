@@ -6,9 +6,12 @@
  *
  * @param {string} devPlanText Nội dung dev_plan.md
  * @param {Array<{service_key:string}>} wsServices Danh sách service của workspace
+ * @param {string} taskMeta Chuỗi nhận diện task (title + prompt + taskCode), dùng để
+ *   lọc service theo tiền tố [DEV-FE]/[DEV-BE] — tránh tạo thừa worktree cho service
+ *   mà dev_plan chỉ nhắc tới với vai trò phụ thuộc.
  * @returns {string[]} Danh sách service_key mục tiêu (đã lọc theo availableKeys)
  */
-function extractTargetServicesFromDevPlan(devPlanText, wsServices = []) {
+function extractTargetServicesFromDevPlan(devPlanText, wsServices = [], taskMeta = '') {
   if (!devPlanText || typeof devPlanText !== 'string') return [];
   const foundServices = new Set();
   const availableKeys = wsServices.map(s => s.service_key).filter(Boolean);
@@ -43,6 +46,23 @@ function extractTargetServicesFromDevPlan(devPlanText, wsServices = []) {
   let result = Array.from(foundServices);
   if (availableKeys.length > 0) {
     result = result.filter(s => availableKeys.includes(s));
+  }
+
+  // Lọc theo tiền tố task: task [DEV-FE] không được tạo worktree BE (và ngược lại).
+  // dev_plan hay nhắc service khác với vai trò phụ thuộc -> chỉ dùng làm ngữ cảnh.
+  const meta = String(taskMeta || '').toLowerCase();
+  const isFeTask = /\[dev-fe\]|\bdev-fe\b/.test(meta);
+  const isBeTask = /\[dev-be\]|\bdev-be\b/.test(meta);
+  if (result.length > 1 && (isFeTask || isBeTask)) {
+    const keep = result.filter((k) => {
+      const key = k.toLowerCase();
+      const looksFe = /-(fe|frontend)$/.test(key) || key.includes('frontend');
+      const looksBe = /-(be|backend)$/.test(key) || key.includes('backend');
+      if (isFeTask && looksBe && !looksFe) return false;
+      if (isBeTask && looksFe && !looksBe) return false;
+      return true;
+    });
+    if (keep.length > 0) result = keep;
   }
   return result;
 }
