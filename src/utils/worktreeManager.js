@@ -293,6 +293,12 @@ function createTaskWorktree({ repoFullPath, worktreeDestPath, taskBranch, baseDe
     execSync('git worktree prune', { cwd: repoFullPath, stdio: 'ignore' });
   } catch {}
   if (fs.existsSync(resolvedWorktree)) {
+    // git worktree list in path bang FORWARD SLASH tren Windows ("D:/a/b"), con
+    // resolvedWorktree dung backslash => phai chuan hoa truoc khi so sanh.
+    // Truoc day so sanh thang => luon false => worktree HOP LE bi coi la orphan
+    // va bi dua vao Trash (mat cay lam viec cua agent dang chay).
+    const norm = (p) => path.resolve(p).replace(/\\/g, '/').toLowerCase();
+    const target = norm(resolvedWorktree);
     let isValidWorktree = false;
     try {
       const wtList = execSync('git worktree list --porcelain', {
@@ -300,9 +306,11 @@ function createTaskWorktree({ repoFullPath, worktreeDestPath, taskBranch, baseDe
         stdio: 'pipe',
         encoding: 'utf-8'
       });
-      if (wtList.toLowerCase().includes(resolvedWorktree.toLowerCase())) {
-        isValidWorktree = true;
-      }
+      isValidWorktree = wtList
+        .split('\n')
+        .filter((l) => l.startsWith('worktree '))
+        .map((l) => norm(l.slice('worktree '.length).trim()))
+        .includes(target);
     } catch {}
 
     if (isValidWorktree) {
@@ -317,9 +325,35 @@ function createTaskWorktree({ repoFullPath, worktreeDestPath, taskBranch, baseDe
       };
     }
 
-    // Thu muc ton tai nhung khong phai worktree hop le (orphan do lan tao truoc bi hong):
-    // don vao Recycle Bin roi tao lai. Neu khong don duoc thi that bai ro rang.
-    console.warn(`[WorktreeManager] Phat hien orphan dir tai ${resolvedWorktree}, don dep va tao lai.`);
+    // Thu muc ton tai nhung git khong con dang ky. CHI duoc don khi chac chan
+    // khong co du lieu cua agent: khong con file .git VA khong co thay doi
+    // chua commit. Con du lieu => bao that bai ro rang, KHONG dong vao.
+    const hasGitLink = fs.existsSync(path.join(resolvedWorktree, '.git'));
+    let dirty = true;
+    try {
+      const st = execSync('git status --porcelain', {
+        cwd: resolvedWorktree,
+        stdio: 'pipe',
+        encoding: 'utf-8'
+      });
+      dirty = !!(st && st.trim());
+    } catch {
+      dirty = true; // khong chay duoc git => coi nhu con du lieu
+    }
+
+    if (hasGitLink || dirty) {
+      const why = hasGitLink ? 'con file .git (worktree chua mat lien ket)' : 'con thay doi chua commit';
+      console.warn(`[WorktreeManager] ${resolvedWorktree} khong co trong git worktree list nhung ${why} - KHONG don.`);
+      return {
+        success: false,
+        worktree_path: resolvedWorktree,
+        task_branch: taskBranch,
+        base_dev_branch: baseDevBranch,
+        error: `Thu muc dich ton tai va ${why}; can xu ly thu cong: ${resolvedWorktree}`
+      };
+    }
+
+    console.warn(`[WorktreeManager] Thu muc rong khong dung duoc tai ${resolvedWorktree}, don dep va tao lai.`);
     const cleaned = safeMoveToTrash(resolvedWorktree);
     if (!cleaned || fs.existsSync(resolvedWorktree)) {
       return {
