@@ -325,10 +325,32 @@ function createTaskWorktree({ repoFullPath, worktreeDestPath, taskBranch, baseDe
       };
     }
 
-    // Thu muc ton tai nhung git khong con dang ky. CHI duoc don khi chac chan
-    // khong co du lieu cua agent: khong con file .git VA khong co thay doi
-    // chua commit. Con du lieu => bao that bai ro rang, KHONG dong vao.
+    // Thu muc ton tai nhung git khong con dang ky. Neu CON file .git thi day la
+    // truong hop metadata bi mat (khong phai orphan) => thu `git worktree repair`
+    // de dung lai lien ket roi dung tiep, tranh lam job khong tao duoc worktree.
     const hasGitLink = fs.existsSync(path.join(resolvedWorktree, '.git'));
+    if (hasGitLink) {
+      try {
+        execSync(`git worktree repair "${resolvedWorktree}"`, {
+          cwd: repoFullPath,
+          stdio: 'pipe',
+          encoding: 'utf-8'
+        });
+        console.warn(`[WorktreeManager] Da repair lien ket git cho ${resolvedWorktree}, dung lai worktree.`);
+        linkNodeModules(repoFullPath, resolvedWorktree);
+        return {
+          success: true,
+          worktree_path: resolvedWorktree,
+          task_branch: taskBranch,
+          base_dev_branch: baseDevBranch,
+          reused: true,
+          repaired: true
+        };
+      } catch (repairErr) {
+        console.warn(`[WorktreeManager] repair that bai cho ${resolvedWorktree}: ${repairErr.message}`);
+      }
+    }
+
     let dirty = true;
     try {
       const st = execSync('git status --porcelain', {
@@ -341,15 +363,16 @@ function createTaskWorktree({ repoFullPath, worktreeDestPath, taskBranch, baseDe
       dirty = true; // khong chay duoc git => coi nhu con du lieu
     }
 
+    // Con file .git (repair that bai) hoac con thay doi chua commit => KHONG don.
     if (hasGitLink || dirty) {
-      const why = hasGitLink ? 'con file .git (worktree chua mat lien ket)' : 'con thay doi chua commit';
-      console.warn(`[WorktreeManager] ${resolvedWorktree} khong co trong git worktree list nhung ${why} - KHONG don.`);
+      const why = hasGitLink ? 'con file .git nhung repair that bai' : 'con thay doi chua commit';
+      console.warn(`[WorktreeManager] ${resolvedWorktree} khong dung duoc: ${why} - KHONG don.`);
       return {
         success: false,
         worktree_path: resolvedWorktree,
         task_branch: taskBranch,
         base_dev_branch: baseDevBranch,
-        error: `Thu muc dich ton tai va ${why}; can xu ly thu cong: ${resolvedWorktree}`
+        error: `Thu muc dich ${why}; can xu ly thu cong: ${resolvedWorktree}`
       };
     }
 
