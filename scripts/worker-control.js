@@ -141,7 +141,7 @@ async function start() {
   const psScript = [
     `$ErrorActionPreference='Stop'`,
     `$si = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [UInt16]0 }`,
-    `$cmd = 'cmd.exe /c "set PATH=${PATH_ENTRIES} && ""${node}"" src/index.js 2>>logs\\server-bg-err.log"'`,
+    `$cmd = 'cmd.exe /c "set PATH=${PATH_ENTRIES} && ${node} src/index.js 2>>${ERR_FILE}"'`,
     `$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmd; CurrentDirectory = '${ROOT}'; ProcessStartupInformation = $si }`,
     `Write-Output $r.ProcessId`,
   ].join('; ');

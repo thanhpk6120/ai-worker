@@ -41,22 +41,47 @@ const MAX_CONCURRENT_TRIAGE = 2;
 let activeTriage = 0;
 const triageWaiters = [];
 
-function acquireTriageSlot() {
+function acquireTriageSlot(timeoutMs = 120000) {
   if (activeTriage < MAX_CONCURRENT_TRIAGE) {
     activeTriage += 1;
-    return Promise.resolve();
+    return Promise.resolve(true);
   }
-  return new Promise((resolve) => triageWaiters.push(resolve));
+  // Cho slot co timeout: neu slot bi ro (process chet truoc finally, hoac
+  // runner treo khong tra), waiter phai tu bo cuoc thay vi treo ca hang doi.
+  return new Promise((resolve) => {
+    let settled = false;
+
+    // releaseTriageSlot gọi hàm này để trao slot. Trả true = đã nhận slot.
+    const waiter = () => {
+      if (settled) return false;
+      settled = true;
+      clearTimeout(timer);
+      resolve(true);
+      return true;
+    };
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      const i = triageWaiters.indexOf(waiter);
+      if (i >= 0) triageWaiters.splice(i, 1);
+      console.warn(`[AI-TRIAGE] cho slot qua ${timeoutMs}ms - chay tiep khong gioi han (co the vuot nguong tam thoi)`);
+      resolve(false);
+    }, timeoutMs);
+    if (timer.unref) timer.unref();
+
+    triageWaiters.push(waiter);
+  });
 }
 
 function releaseTriageSlot() {
-  const next = triageWaiters.shift();
-  if (next) {
-    // Chuyen thang slot cho waiter, activeTriage khong doi.
-    next();
-  } else {
-    activeTriage = Math.max(0, activeTriage - 1);
+  // Bỏ qua waiter đã timeout (settled): nếu không counter bị leak vì shift()
+  // vẫn lấy ra một waiter đã resolve(false) và tự xoá khỏi queue.
+  while (triageWaiters.length > 0) {
+    const next = triageWaiters.shift();
+    if (next()) return; // đã trao slot, activeTriage giữ nguyên
   }
+  activeTriage = Math.max(0, activeTriage - 1);
 }
 
 /**
