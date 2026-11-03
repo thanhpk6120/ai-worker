@@ -1216,7 +1216,7 @@ app.post('/api/v1/jobs/:id/worktrees/expand', (req, res) => {
 
     // 1. Kiểm tra xem worktree cho service này đã tồn tại cho job chưa
     const existingWt = db.getJobWorktree(id, service_key);
-    if (existingWt) {
+    if (existingWt && existingWt.status === 'ACTIVE') {
       return res.json({ success: true, worktree: existingWt, already_exists: true });
     }
 
@@ -1366,7 +1366,7 @@ function ensureTargetServicesWorktrees(jobId) {
 
     for (const sKey of targetServices) {
       const existingWt = db.getJobWorktree(jobId, sKey);
-      if (existingWt) {
+      if (existingWt && existingWt.status === 'ACTIVE') {
         createdWorktrees.push(existingWt);
         continue;
       }
@@ -3516,7 +3516,7 @@ const executeStep = async (id, opts) => {
     if (targetServices.length > 0 && job.workspace_id) {
       for (const sKey of targetServices) {
         const existingWt = db.getJobWorktree(id, sKey);
-        if (!existingWt) {
+        if (!existingWt || existingWt.status !== 'ACTIVE') {
           const wsObj = db.getWorkspaceById(job.workspace_id);
           if (wsObj) {
             const svcConf = db.getWorkspaceServiceByKey(wsObj.id, sKey);
@@ -4262,7 +4262,7 @@ const executeStep = async (id, opts) => {
       jobEventBus.emitJobEvidence(id, { evidence: dbEv });
       jobEventBus.emitJobLog(id, { text: `\n[VERIFY] ✅ Đã đối soát bằng chứng thành công trong ${relEvidencePath}!\n` });
       const currentRunner = job.runner || (agentMapping.IMPLEMENT || 'claude-code');
-      const activeWorktrees = db.listJobWorktrees(id);
+      const activeWorktrees = db.listActiveJobWorktrees(id);
       if (activeWorktrees && activeWorktrees.length > 0) {
         db.updateJob(id, { status: 'MERGING', current_step: 'MERGING', runner: currentRunner });
         jobEventBus.emitJobStatus(id, { status: 'MERGING', runner: currentRunner });
@@ -4445,7 +4445,7 @@ const executeStep = async (id, opts) => {
       beginStepTimeline(id, 'MERGING', mergingAgent);
       jobEventBus.emitJobLog(id, { text: `\n================================================================================\n[6/6] >>> 🔀 [MERGING] Bắt đầu quy trình tích hợp mã nguồn vào nhánh phát triển...\n================================================================================\n` });
 
-      const activeWorktrees = db.listJobWorktrees(id);
+      const activeWorktrees = db.listActiveJobWorktrees(id);
       if (!activeWorktrees || activeWorktrees.length === 0) {
         db.updateJob(id, {
           status: 'DONE',

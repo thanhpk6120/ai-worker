@@ -968,6 +968,16 @@ function listJobWorktrees(jobId) {
   const stmt = db.prepare('SELECT * FROM job_worktrees WHERE job_id = ? ORDER BY created_at ASC');
   return stmt.all(jobId);
 }
+/**
+ * Danh sách worktree đang ACTIVE của job.
+ * Dùng cho mọi quyết định "job có worktree để merge/nghiệm thu hay không":
+ * worktree MERGED/CANCELLED không được tính là còn hiệu lực.
+ */
+function listActiveJobWorktrees(jobId) {
+  const db = getDb();
+  const stmt = db.prepare("SELECT * FROM job_worktrees WHERE job_id = ? AND status = 'ACTIVE' ORDER BY created_at ASC");
+  return stmt.all(jobId);
+}
 
 function getJobWorktree(jobId, serviceKey) {
   const db = getDb();
@@ -1045,6 +1055,7 @@ module.exports = {
   addJobWorktree,
   getJobWorktreeById,
   listJobWorktrees,
+  listActiveJobWorktrees,
   getJobWorktree,
   updateJobWorktreeStatus,
   deleteJobWorktree,
