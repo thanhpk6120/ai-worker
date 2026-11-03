@@ -3,12 +3,32 @@
  * Điểm khởi chạy chính của hệ thống AI Worker
  */
 
+// 0. Global crash handler — PHẢI đăng ký TRƯỚC mọi require: nếu module ném lỗi
+// lúc load, handler chưa tồn tại thì process chết không dấu vết.
+// Ghi stack ra stderr rồi thoát mã 1; không nuốt lỗi để người vận hành biết.
+function logFatal(kind, err) {
+  const ts = new Date().toISOString();
+  const detail = err && err.stack ? err.stack : String(err);
+  console.error(`\n>>> [FATAL] ${ts} ${kind}\n${detail}\n`);
+  if (err && err.code) console.error(`>>> [FATAL] code=${err.code}`);
+  if (err && err.errno) console.error(`>>> [FATAL] errno=${err.errno}`);
+  if (err && err.syscall) console.error(`>>> [FATAL] syscall=${err.syscall}`);
+}
+process.on('uncaughtException', (err) => {
+  logFatal('uncaughtException', err);
+  // Cho stderr kịp flush rồi thoát cứng — process ở trạng thái không xác định.
+  setTimeout(() => process.exit(1), 100);
+});
+process.on('unhandledRejection', (reason) => {
+  logFatal('unhandledRejection', reason);
+  // Không thoát: promise lỗi lẻ không nhất thiết làm hỏng server.
+});
+
 const { initDb, getDb } = require('./storage/db');
 const { runnerRegistry } = require('./runners/runnerRegistry');
 const { app } = require('./server');
 const config = require('./config');
 const { taskQueue } = require('./queue/taskQueue');
-
 // 1. Khởi tạo Database SQLite
 console.log('>>> [BOOT] Đang khởi tạo cơ sở dữ liệu SQLite...');
 try {

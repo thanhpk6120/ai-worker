@@ -33,6 +33,32 @@ const MAX_TITLE_CHARS = 200;
 const cache = new Map();
 const stats = { calls: 0, hits: 0, misses: 0, fallbacks: 0 };
 
+// Gioi han so luot triage chay dong thoi. Moi luot spawn 1 tien trinh claude
+// (~300-600MB), trong khi pipeline song song cung spawn claude cho tung task.
+// Khong gioi han => start 4 task cung luc = 6-8 tien trinh claude => can RAM,
+// worker chet dot ngot (exitCode 0xC0000409).
+const MAX_CONCURRENT_TRIAGE = 2;
+let activeTriage = 0;
+const triageWaiters = [];
+
+function acquireTriageSlot() {
+  if (activeTriage < MAX_CONCURRENT_TRIAGE) {
+    activeTriage += 1;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => triageWaiters.push(resolve));
+}
+
+function releaseTriageSlot() {
+  const next = triageWaiters.shift();
+  if (next) {
+    // Chuyen thang slot cho waiter, activeTriage khong doi.
+    next();
+  } else {
+    activeTriage = Math.max(0, activeTriage - 1);
+  }
+}
+
 /**
  * Timeout cho 1 luot goi AI headless (ms).
  * baseAdapter chuan hoa timeout theo he (>=10000 -> ms, >120 -> giay, con lai -> phut)
@@ -317,6 +343,9 @@ async function classifyTask({ prompt = '', title = '', taskCode = '', timeoutMs 
   }
 
   let res = null;
+  // Gioi han so tien trinh claude chay dong thoi: triage chay TRUOC khi vao
+  // taskQueue nen CONCURRENCY khong chan duoc no.
+  await acquireTriageSlot();
   try {
     stats.calls += 1;
     res = await runner.execute({
@@ -338,6 +367,8 @@ async function classifyTask({ prompt = '', title = '', taskCode = '', timeoutMs 
     });
   } catch (e) {
     return fallbackResult(taskLabel, 'loi khi goi CLI: ' + ((e && e.message) || String(e)));
+  } finally {
+    releaseTriageSlot();
   }
 
   if (res && res.timedOut) {
