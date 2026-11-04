@@ -80,7 +80,7 @@ class BrowserRunner extends EventEmitter {
         });
 
         const page = await browser.newPage({
-          viewport: { width: 1280, height: 800 }
+          viewport: { width: 1920, height: 1080 }
         });
 
         await page.goto(url, {

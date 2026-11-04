@@ -62,6 +62,17 @@ Nhiệm vụ của bạn là kiểm thử toàn diện giải pháp của task *
      * Thực hiện các thao tác theo kịch bản trong `test_plan.md`, chụp ảnh màn hình giao diện thật và lưu vào:
        👉 `{{FEATURE_DIR}}/evidence/01_ui_<tên_case>.png`
      * Bạn PHẢI tự VERIFY ảnh vừa chụp (xác nhận nội dung trên màn hình đúng với kết quả kỳ vọng).
+     * **QUY CHUẨN ẢNH BẰNG CHỨNG (BẮT BUỘC — để AI Vision đọc đúng chữ và verify nhẹ):**
+       - **Độ phân giải chuẩn `1920x1080`**, `deviceScaleFactor = 1`, zoom trình duyệt 100%.
+         · MCP `cloakbrowser`: viewport đã mặc định 1920x1080 — KHÔNG cần đổi, KHÔNG tự ý thu nhỏ cửa sổ.
+         · Playwright/Puppeteer: `page.setViewportSize({ width: 1920, height: 1080 })`.
+         · Chrome headless: `--window-size=1920,1080`.
+       - **Ảnh toàn màn hình** (dashboard / danh sách / route): `screenshot({ tabId, fullPage: true })` — KHÔNG resize/scale sau khi chụp.
+       - **Ảnh thành phần** (modal, bảng, biểu đồ, toast, dropdown, badge): **tự CROP đúng phần tử**, không chụp cả trang —
+         dùng `screenshot({ tabId, selector: '<css-selector>' })` (Playwright: `locator.screenshot()`;
+         CDP: `Page.captureScreenshot({ clip: {...}, scale: 1 })`), giữ nguyên 100% scale.
+       - Mỗi ảnh chỉ chứng minh **một** test case; crop sát nội dung cần thấy (bỏ sidebar/thanh thừa) để chữ rõ hơn và
+         AI Vision tốn ít token hơn. CẤM nén mờ / giảm chất lượng PNG sau khi chụp.
    - **CẢNH BÁO QUAN TRỌNG:** Nếu `test_plan.md` yêu cầu `UI_SCREENSHOT` mà bạn kết thúc bước TESTING mà KHÔNG CÓ ảnh chụp UI thật trong `evidence/`, Worker sẽ đánh giá ĐỐI SOÁT THẤT BẠI ở bước VERIFY và chuyển sang FIXING để bạn làm lại!
 3. **CHẠY KIỂM THỬ THẬT & BẰNG CHỨNG XÁC THỰC:**
    - Thực thi lệnh test chuẩn của repository theo chỉ định trong `test_plan.md` (ví dụ: `npm test`, `npx tsc`, `pytest`, `mvn test`, `go test`...).

@@ -49,6 +49,7 @@ Nhiệm vụ của bạn là tiếp nhận toàn bộ ngữ cảnh kiểm thử 
    - **CẬP NHẬT EVIDENCE & CHUYỂN TRẠNG THÁI ĐỂ VERIFY LẠI (CHỐNG DUPLICATE):**
      * **CHỈ THU THẬP/CHỤP ẢNH LẠI ĐÚNG TRƯỜNG HỢP BỊ FAILED:** Chỉ chụp lại ảnh hoặc chạy lại đúng test case được báo FAILED trong `Error Context`. Giữ nguyên các test case và bằng chứng đã đạt PASS trước đó.
      * **GHI ĐÈ ĐÚNG TÊN FILE CHUẨN:** Lưu ảnh ghi đè trực tiếp vào đúng tên file ảnh quy định trong `test_plan.md`.
+     * **QUY CHUẨN ẢNH KHI CHỤP LẠI:** độ phân giải `1920x1080` (deviceScaleFactor = 1, zoom 100%; MCP cloakbrowser đã mặc định sẵn). Ảnh toàn màn hình dùng `screenshot({ fullPage: true })`; ảnh thành phần (modal/bảng/biểu đồ/toast) **tự crop đúng phần tử** bằng `screenshot({ selector })` (hoặc `locator.screenshot()`). Không resize/scale làm mờ ảnh; crop sát nội dung cần chứng minh để AI Vision đọc rõ và verify nhẹ hơn.
      * **TUYỆT ĐỐI KHÔNG TẠO FILE ALIAS / BẢN SAO TRÙNG LẶP:** Không tạo file tạm/tiếng Việt rồi dùng lệnh `cp` nhân bản sang tên tiếng Anh (hoặc ngược lại). Nếu phát hiện file thừa, file trùng lặp cũ trong `evidence/`, hãy dọn dẹp xóa bỏ để tránh vi phạm bộ lọc MD5 duplicate.
      * **KHAI BÁO CHUẨN TRONG METADATA.JSON:** Mỗi test case chỉ liên kết với đúng 1 file ảnh chuẩn tương ứng, không khai báo nhiều file trùng nội dung cho cùng 1 test case.
      * Kết thúc lượt để hệ thống tự động chuyển trạng thái sang [VERIFY] đối soát lại!
