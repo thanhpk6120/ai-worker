@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const test = require('node:test');
+const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -21,6 +21,26 @@ process.env.DB_PATH = path.join(TMP, 'repeat-test.sqlite');
 const db = require('../src/storage/db');
 const { evaluateRepeatedCause } = require('../src/server');
 const jobPolicy = require('../src/execution/jobPolicy');
+const systemone = require('../src/systemone/client');
+
+// Quyet dinh "trung nguyen nhan" cuoi cung do MODEL tra ve => khong tat dinh
+// (may co model live tra khac voi CI khong co model). Stub de test chi kiem tra
+// phan plumbing: `failure_history` phai con nguyen giua cac vong va duoc truyen
+// xuong SystemOne.
+const originalCheckRepeatedCause = systemone.checkRepeatedCause;
+before(() => {
+  systemone.checkRepeatedCause = async () => ({
+    repeated: true,
+    will_repeat: true,
+    confidence: 0.9,
+    reason: 'trung nguyen nhan (test stub)',
+    cached: false,
+    fallback: false
+  });
+});
+after(() => {
+  systemone.checkRepeatedCause = originalCheckRepeatedCause;
+});
 
 function newJob(id) {
   db.createJob({ id, title: 'T', prompt: 'p', status: 'IMPLEMENT' });

@@ -5,11 +5,22 @@
  */
 'use strict';
 
-const test = require('node:test');
+const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 
 const client = require('../src/systemone/client');
 const policy = require('../src/systemone/policy');
+
+// Test nay mo phong "model KHONG phan hoi". Khong duoc phu thuoc may dang co model
+// that hay khong (truoc day do tren may co endpoint live, xanh tren CI khong co
+// endpoint => flaky). Nay chan fetch de luon tat dinh.
+const originalFetch = global.fetch;
+before(() => {
+  global.fetch = async () => { throw new Error('ECONNREFUSED (test stub: model offline)'); };
+});
+after(() => {
+  global.fetch = originalFetch;
+});
 
 test('heuristic fixGate duoc danh dau fallback', () => {
   const h = policy.fixGateHeuristic({ attempt: 0, maxRetries: 3 });
