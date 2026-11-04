@@ -31,6 +31,7 @@ const buildProvenance = require('./execution/buildProvenance');
 const processJanitor = require('./execution/processJanitor');
 const { EvidenceWatcher } = require('./verification/evidenceWatcher');
 const { verifyImageWithAI } = require('./verification/aiVisionVerifier');
+const evidenceCompleteness = require('./verification/evidenceCompleteness');
 const stepGate = require('./execution/stepGate');
 
 // === Evidence realtime (TASK-PIPELINE-FIX C-1..C-3) ===
@@ -3346,7 +3347,46 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
               }
             }
           } catch (e) {}
-  
+          // 2h. Luật hoàn tất: pendingItems còn mở / kế hoạch nhắc DDL mà không có
+          // bằng chứng kênh DB / test bị skipped vẫn tính là đạt.
+          // PHUB-678 DONE dù migration Oracle chưa chạy và DbAssertTest bị @Disabled
+          // => bằng chứng xanh không chứng minh được việc thật đã xong.
+          try {
+            const logEntries = [];
+            for (const lf of validFiles) {
+              const ext = path.extname(lf).toLowerCase();
+              if (ext !== '.log' && ext !== '.txt') continue;
+              try {
+                logEntries.push({ name: lf, content: fs.readFileSync(path.join(evidenceDir, lf), 'utf8') });
+              } catch (e) {}
+            }
+            const planTexts = [testPlanText];
+            for (const pf of ['test_plan.md', 'test_report.md', 'fix_report.md', 'report.md']) {
+              const p = path.join(featureDir, pf);
+              try { if (fs.existsSync(p)) planTexts.push(fs.readFileSync(p, 'utf8')); } catch (e) {}
+            }
+            const completeness = evidenceCompleteness.evaluateEvidenceCompleteness({
+              metadataObj: (!metaParseError && metadataObj && typeof metadataObj === 'object') ? metadataObj : {},
+              validEvidenceFiles: validFiles,
+              logEntries,
+              planTexts,
+              readEvidenceFile: (name) => {
+                try { return fs.readFileSync(path.join(evidenceDir, name), 'utf8'); } catch (e) { return ''; }
+              }
+            });
+            for (const v of completeness.violations) {
+              agentFailed = true;
+              jobEventBus.emitJobLog(id, {
+                text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: ${v}\n`
+              });
+            }
+            for (const w of completeness.warnings) {
+              jobEventBus.emitJobLog(id, {
+                text: `\n[TESTING-VERIFY] ⚠️ ${w}\n`
+              });
+            }
+          } catch (e) {}
+
           // 3. Nếu không có bất kỳ bằng chứng hợp lệ nào:
           if (validFiles.length === 0) {
             agentFailed = true;
@@ -4066,8 +4106,12 @@ function computeJobRuntimeMs(job, steps) {
  * va net an toan co the gioi han chuoi chuyen buoc.
  */
 const scheduleNextStep = (id, opts, delayMs = 100) => {
+  // Hoãn bước kế bằng setTimeout nên nếu test kết thúc sớm, hop 2 sẽ chạy SAU khi
+  // test đã khôi phục runner thật => gọi CLI thật ngoài ý muốn. Cho phép opts mang
+  // mảng `_pendingSteps` để test tự await cho tới khi chuỗi hop kết thúc.
+  const pendingSteps = (opts && Array.isArray(opts._pendingSteps)) ? opts._pendingSteps : null;
   const timer = setTimeout(() => {
-    executeStep(id, opts).catch((__e) => {
+    const running = executeStep(id, opts).catch((__e) => {
       console.error('[EXECUTE-STEP-NEXT-ERR]', (__e && __e.message) || __e);
       try {
         const errMsg = (__e && __e.message) || String(__e);
@@ -4076,6 +4120,7 @@ const scheduleNextStep = (id, opts, delayMs = 100) => {
         jobEventBus.emitJobError(id, { error: errMsg });
       } catch (errDb) {}
     });
+    if (pendingSteps) pendingSteps.push(running);
   }, delayMs);
   return timer;
 };

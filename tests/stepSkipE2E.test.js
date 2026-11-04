@@ -24,12 +24,44 @@ const { executeStep } = require('../src/server');
 
 // Stub runner: KHONG spawn agent CLI that (test phai chay nhanh, khong ton tai
 // tai nguyen). Runner gia luon thanh cong.
-const originalGetAvailableRunner = runnerRegistry.getAvailableRunner.bind(runnerRegistry);
+// Giữ stub suốt đời tiến trình test: callback chuyển bước chạy trễ cũng không
+// thể khôi phục runner thật hoặc khởi chạy CLI ngoài ý muốn.
+const runnerExecutions = [];
 runnerRegistry.getAvailableRunner = () => ({
   name: 'stub-runner',
-  execute: async () => ({ stdout: '', stderr: '', exitCode: 0, timedOut: false })
+  execute: async ({ jobId, step }) => {
+    runnerExecutions.push({ jobId, step });
+    return { stdout: '', stderr: '', exitCode: 0, timedOut: false };
+  }
 });
-test.after(() => { runnerRegistry.getAvailableRunner = originalGetAvailableRunner; });
+
+function assertRunnerPhases(jobId, expected) {
+  assert.deepEqual(
+    runnerExecutions.filter((call) => call.jobId === jobId).map((call) => call.step),
+    expected,
+    `Các phase runner.execute của ${jobId} phải đúng như mong đợi`
+  );
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Chờ cho chuỗi hop tự chuyển bước kết thúc thay vì bỏ mặc setTimeout chạy sau test.
+ * Truyền cùng object opts có `_pendingSteps` vào executeStep để server đẩy promise
+ * của từng hop vào mảng; hết hop thì mảng rỗng và hàm trả về => không còn timer treo.
+ */
+async function drainPendingSteps(opts, { idleMs = 400, timeoutMs = 15000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (opts._pendingSteps.length > 0) {
+      await opts._pendingSteps.shift();
+      continue;
+    }
+    await sleep(idleMs);
+    if (opts._pendingSteps.length === 0) return;
+  }
+  throw new Error('drainPendingSteps: quá thời gian chờ chuỗi hop kết thúc');
+}
 
 function makeWorkspace(taskCode, devPlan) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-worker-skip-ws-'));
@@ -49,13 +81,18 @@ test('IMPLEMENT: marker DONE => bo qua agent, sang TESTING', async () => {
     repo_path: root, task_code: taskCode
   });
 
-  await executeStep(jobId, { maxHops: 2 });
+  // maxHops 2: hop 2 chay THAT buoc ke tiep (TESTING) => bao phu luong tu chuyen
+  // buoc qua setTimeout, khong chi kiem trang thai sau 1 hop.
+  const opts = { maxHops: 2, _pendingSteps: [] };
+  await executeStep(jobId, opts);
+  await drainPendingSteps(opts);
 
   const job = db.getJobById(jobId);
-  assert.equal(job.status, 'TESTING', `phai sang TESTING, thuc te ${job.status}`);
+  assert.equal(job.status, 'VERIFY', `phai di qua TESTING roi sang VERIFY, thuc te ${job.status}`);
   const steps = db.getStepsByJobId(jobId) || [];
   const implSteps = steps.filter((s) => s.step_type === 'IMPLEMENT');
   assert.equal(implSteps.length, 0, 'KHONG duoc tao step IMPLEMENT (da bo qua agent)');
+  assertRunnerPhases(jobId, ['TESTING']);
 });
 
 test('IMPLEMENT: khong co marker => van chay agent IMPLEMENT', async () => {
@@ -67,11 +104,14 @@ test('IMPLEMENT: khong co marker => van chay agent IMPLEMENT', async () => {
     repo_path: root, task_code: taskCode
   });
 
-  await executeStep(jobId, { maxHops: 2 });
+  const opts = { maxHops: 1, _pendingSteps: [] };
+  await executeStep(jobId, opts);
+  await drainPendingSteps(opts);
 
   const steps = db.getStepsByJobId(jobId) || [];
   const implSteps = steps.filter((s) => s.step_type === 'IMPLEMENT');
   assert.equal(implSteps.length, 1, 'phai co step IMPLEMENT (agent chay that)');
+  assertRunnerPhases(jobId, ['IMPLEMENT']);
 });
 
 test('IMPLEMENT: marker NEEDED => van chay agent IMPLEMENT', async () => {
@@ -84,11 +124,14 @@ test('IMPLEMENT: marker NEEDED => van chay agent IMPLEMENT', async () => {
     repo_path: root, task_code: taskCode
   });
 
-  await executeStep(jobId, { maxHops: 2 });
+  const opts = { maxHops: 1, _pendingSteps: [] };
+  await executeStep(jobId, opts);
+  await drainPendingSteps(opts);
 
   const steps = db.getStepsByJobId(jobId) || [];
   assert.equal(steps.filter((s) => s.step_type === 'IMPLEMENT').length, 1,
     'marker NEEDED => phai chay IMPLEMENT');
+  assertRunnerPhases(jobId, ['IMPLEMENT']);
 });
 
 test('PLANNING: co marker plan_ok => bo qua agent PLANNING, sang IMPLEMENT', async () => {
@@ -101,13 +144,18 @@ test('PLANNING: co marker plan_ok => bo qua agent PLANNING, sang IMPLEMENT', asy
     repo_path: root, task_code: taskCode
   });
 
-  await executeStep(jobId, { maxHops: 2 });
+  // maxHops 2: hop 2 chay THAT buoc IMPLEMENT => chung minh buoc PLANNING bi bo qua
+  // nhung buoc ke tiep van thuc thi binh thuong.
+  const opts = { maxHops: 2, _pendingSteps: [] };
+  await executeStep(jobId, opts);
+  await drainPendingSteps(opts);
 
   const job = db.getJobById(jobId);
-  assert.equal(job.status, 'IMPLEMENT', `phai sang IMPLEMENT, thuc te ${job.status}`);
+  assert.equal(job.status, 'TESTING', `phai di qua IMPLEMENT roi sang TESTING, thuc te ${job.status}`);
   const steps = db.getStepsByJobId(jobId) || [];
   assert.equal(steps.filter((s) => s.step_type === 'PLANNING').length, 0,
     'KHONG duoc tao step PLANNING (da bo qua agent)');
+  assertRunnerPhases(jobId, ['IMPLEMENT']);
 });
 
 test('PLANNING: plan bi SUA sau khi xac nhan => marker het hieu luc, chay lai PLANNING', async () => {
@@ -123,11 +171,14 @@ test('PLANNING: plan bi SUA sau khi xac nhan => marker het hieu luc, chay lai PL
     repo_path: root, task_code: taskCode
   });
 
-  await executeStep(jobId, { maxHops: 2 });
+  const opts = { maxHops: 1, _pendingSteps: [] };
+  await executeStep(jobId, opts);
+  await drainPendingSteps(opts);
 
   const steps = db.getStepsByJobId(jobId) || [];
   assert.equal(steps.filter((s) => s.step_type === 'PLANNING').length, 1,
     'plan da doi => phai chay lai PLANNING (khong bo qua buoc dua tren ket qua cu)');
+  assertRunnerPhases(jobId, ['PLANNING']);
   // Marker CU da bi xoa; sau khi PLANNING chay lai, marker MOI duoc ghi
   // (van tay plan moi) - hop le vi plan da duoc verify lai.
   const fresh = stepGate.readPlanOkMarker(featureDir);
