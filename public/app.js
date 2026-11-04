@@ -74,6 +74,16 @@
     'ARCHIVED': 'status-archived'
   };
 
+  // Icon đi kèm badge trạng thái (badge này cũng là nút mở chi tiết thông báo).
+  const STATUS_ICONS = {
+    'DONE': '<i class="fa-solid fa-circle-check mr-1"></i>',
+    'FAILED': '<i class="fa-solid fa-triangle-exclamation mr-1"></i>',
+    'TIMED_OUT': '<i class="fa-solid fa-clock mr-1"></i>',
+    'CANCELLED': '<i class="fa-solid fa-ban mr-1"></i>',
+    'PAUSED': '<i class="fa-solid fa-circle-pause mr-1"></i>',
+    'PENDING': '<i class="fa-solid fa-circle-question mr-1"></i>'
+  };
+
   // B8: các trạng thái job đang chạy -> chặn thao tác nguy hiểm (lưu trữ / xoá / đổi status)
   const RUNNING_STATUSES = ['PLANNING', 'PENDING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING', 'MERGING'];
   // B10: một nguồn sự thật duy nhất cho danh sách trạng thái được phép xoá task.
@@ -102,13 +112,11 @@
       }
     });
 
-    // Nút màu trên thanh thông báo -> mở modal chi tiết (không đẩy bố cục).
-    const alertBar = document.getElementById('taskAlertBar');
-    if (alertBar) {
-      alertBar.addEventListener('click', (ev) => {
-        const btn = ev.target.closest('[data-alert-kind]');
-        if (btn) openTaskAlertModal();
-      });
+    // Badge trạng thái (ngay cạnh job id) đóng vai trò nút thông báo:
+    // hover => tooltip lý do, bấm => mở modal chi tiết (không chiếm thêm chỗ).
+    const statusBadgeEl = document.getElementById('activeJobStatusBadge');
+    if (statusBadgeEl) {
+      statusBadgeEl.addEventListener('click', () => openTaskAlertModal());
     }
     const btnCloseAlert = document.getElementById('btnCloseTaskAlertModal');
     if (btnCloseAlert) btnCloseAlert.addEventListener('click', closeTaskAlertModal);
@@ -1542,12 +1550,14 @@
     const statusBadge = document.getElementById('activeJobStatusBadge');
     if (statusBadge) {
       const status = (job.status || 'TO DO').toUpperCase();
+      const statusIcon = STATUS_ICONS[status] || '';
       if (isQueued) {
-        statusBadge.textContent = 'TO DO (CHỜ CHẠY)';
-        statusBadge.className = 'status-badge status-queued';
+        statusBadge.innerHTML = `${statusIcon}<span>TO DO (CHỜ CHẠY)</span>`;
+        statusBadge.className = 'status-badge status-queued status-badge-clickable';
       } else {
-        statusBadge.textContent = status === 'PENDING' ? 'Chờ giải đáp' : (status === 'PAUSED' ? 'Tạm dừng' : status);
-        statusBadge.className = `status-badge ${STATUS_CLASSES[status] || 'status-todo'}`;
+        const statusLabel = status === 'PENDING' ? 'Chờ giải đáp' : (status === 'PAUSED' ? 'Tạm dừng' : status);
+        statusBadge.innerHTML = `${statusIcon}<span>${escapeHtml(statusLabel)}</span>`;
+        statusBadge.className = `status-badge ${STATUS_CLASSES[status] || 'status-todo'} status-badge-clickable`;
       }
       // Bỏ box lỗi inline (gây xô bố cục): lý do nằm trong modal thông báo,
       // header chỉ còn nút màu đỏ để bấm xem chi tiết.
@@ -2189,11 +2199,15 @@
     syncTaskAlertBar();
   }
 
-  // ===== Thanh nút thông báo (đỏ/vàng/xanh) + modal chi tiết =====
+  // Job đang được đổ vào modal thông báo (badge trạng thái dùng lại dữ liệu này).
+  let lastAlertJob = null;
+
+  // ===== Badge trạng thái = nút thông báo + modal chi tiết =====
   // Bố cục panel luôn cố định: thông báo KHÔNG đẩy/che nội dung bên dưới,
   // người dùng bấm nút màu để mở modal xem chi tiết.
   function renderTaskAlertSections(job) {
     const j = job || {};
+    lastAlertJob = j;
     const status = (j.status || '').toUpperCase();
     const errSection = document.getElementById('taskAlertErrorSection');
     const errText = document.getElementById('taskAlertErrorText');
@@ -2256,18 +2270,31 @@
   }
 
   function syncTaskAlertBar() {
-    const bar = document.getElementById('taskAlertBar');
-    if (!bar) return;
-    const alerts = collectTaskAlerts();
-    if (alerts.length === 0) {
-      // Vẫn giữ thanh (chiều cao cố định) để bố cục bên dưới KHÔNG bị xô khi có thông báo.
-      bar.innerHTML = '';
-      return;
+    // KHÔNG còn thanh thông báo riêng (trước đây chiếm 38px làm cắt log/evidence).
+    // Trạng thái + thông báo hiển thị NGAY trên badge cạnh job id:
+    //  - hover => tooltip tóm tắt lý do
+    //  - bấm  => mở modal chi tiết
+    const badge = document.getElementById('activeJobStatusBadge');
+    if (!badge) return;
+    const job = lastAlertJob || state.activeJob || {};
+    const parts = [];
+    if (job.error_message) parts.push(String(job.error_message).trim());
+    const pendingText = document.getElementById('pendingAlertText');
+    if (isAlertSectionVisible('pendingAlertBanner') && pendingText) parts.push(pendingText.textContent.trim());
+    const portText = document.getElementById('portWaitText');
+    if (isAlertSectionVisible('portWaitBanner') && portText) parts.push(portText.textContent.trim());
+    const recText = document.getElementById('recoveryAlertText');
+    if (isAlertSectionVisible('recoveryAlertBanner') && recText) parts.push(recText.textContent.trim());
+
+    const detail = parts.filter(Boolean).join('\n\n');
+    badge.title = detail ? `${detail}\n\n(Bấm để xem chi tiết)` : 'Bấm để xem chi tiết trạng thái task';
+    // Tooltip hiện NGAY khi hover (CSS ::after đọc data-tip), không phải chờ native title.
+    if (detail) {
+      badge.dataset.tip = detail.length > 600 ? `${detail.slice(0, 600)}…` : detail;
+    } else {
+      delete badge.dataset.tip;
     }
-    bar.innerHTML = alerts.map((a) => `
-      <button type="button" class="task-alert-btn task-alert-${a.level}" data-alert-kind="${a.kind}" title="Bấm để xem chi tiết">
-        <i class="fa-solid ${a.icon}"></i><span>${escapeHtml(a.label)}</span>
-      </button>`).join('');
+    badge.classList.toggle('status-badge-has-alert', Boolean(detail));
   }
 
   function openTaskAlertModal() {
