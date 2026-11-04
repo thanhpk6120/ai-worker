@@ -568,6 +568,63 @@ function hasApiRuntimeShape(parsedData) {
   const hasStatus = parsedData.status !== undefined || parsedData.statusCode !== undefined || parsedData.status_code !== undefined || (parsedData.response && typeof parsedData.response === 'object' && parsedData.response.status !== undefined);
   return hasEndpoint && (hasMethod || hasStatus);
 }
+
+/**
+ * Bằng chứng API có chứa ÍT NHẤT MỘT bản ghi HTTP runtime đầy đủ không?
+ *
+ * Vì sao cần: gate cũ chỉ soi các key cố định ở cấp cao nhất (`endpointsChecked`,
+ * `method`, `url`, `status`...). Agent ghi đúng chuẩn nhưng theo dạng
+ * `{ baseUrl, results: [ { method, url, responseStatus, responseBody } ] }` —
+ * một mảng kết quả thật — thì bị chấm là "không phải API runtime".
+ * PHUB-682 đã lặp 3 vòng FIXING (~1 giờ) vì đúng lỗi này dù file có 9/9 lệnh gọi
+ * API thật (status 200 + response body thật).
+ *
+ * Nay: quét MỌI mảng object ở cấp cao nhất (results/cases/calls/tests/...) và
+ * chấp nhận khi có một bản ghi hội đủ method + url + status + body.
+ * @param {any} obj
+ * @returns {boolean}
+ */
+function apiEvidenceHasRuntimeRecords(obj) {
+  if (!obj || typeof obj !== 'object') return false;
+  const records = [];
+  const pushArray = (v) => {
+    if (!Array.isArray(v)) return;
+    for (const item of v) if (item && typeof item === 'object' && !Array.isArray(item)) records.push(item);
+  };
+  if (Array.isArray(obj)) {
+    pushArray(obj);
+  } else {
+    // Chính object cũng có thể là 1 bản ghi phẳng { method, url, status, response }.
+    records.push(obj);
+    pushArray(obj.endpointsChecked);
+    for (const v of Object.values(obj)) pushArray(v);
+  }
+  if (records.length === 0) return false;
+
+  const hasValue = (r, keys) => keys.some((k) => r[k] !== undefined && r[k] !== null && r[k] !== '');
+  const hasMethod = (r) => hasValue(r, ['method', 'httpMethod', 'verb'])
+    || !!(r.request && typeof r.request === 'object' && (r.request.method || r.request.httpMethod));
+  const hasUrl = (r) => hasValue(r, ['url', 'endpoint', 'path', 'uri', 'requestUrl'])
+    || !!(r.request && typeof r.request === 'object' && (r.request.url || r.request.endpoint || r.request.path));
+  const hasStatus = (r) => hasValue(r, ['responseStatus', 'status', 'statusCode', 'httpStatus', 'status_code', 'expectedStatus'])
+    || !!(r.response && typeof r.response === 'object' && r.response.status !== undefined);
+  const hasBody = (r) => ['responseBody', 'requestBody', 'body', 'data', 'response', 'payload', 'result', 'json', 'content']
+    .some((k) => r[k] !== undefined && r[k] !== null);
+
+  return records.some((r) => hasMethod(r) && hasUrl(r) && hasStatus(r) && hasBody(r));
+}
+
+/** Mô tả phần còn thiếu của bằng chứng API để log chỉ đúng việc agent phải sửa. */
+function describeApiEvidenceGaps(obj, aggregate) {
+  const gaps = [];
+  if (!aggregate) return 'không đọc được JSON';
+  if (!aggregate.hasMethod) gaps.push('method');
+  if (!aggregate.hasUrl) gaps.push('url');
+  if (!aggregate.hasStatus) gaps.push('status');
+  if (!aggregate.hasBody) gaps.push('response body');
+  return gaps.length ? `thiếu ${gaps.join(', ')}` : 'cấu trúc chưa đạt';
+}
+
 function hasDbShape(parsedData, filename) {
   const name = String(filename || '').toLowerCase();
   if (parsedData && typeof parsedData === 'object' && !Array.isArray(parsedData)) {
@@ -3135,11 +3192,15 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
               }
 
               const buildOnlyApi = /npm install|npm run build|building|compiled|vite|webpack|tsc -b/i.test(strA) && !HTTP_RUNTIME_RE.test(strA);
-              if (!objA || !hasMethod || !hasUrl || !hasStatus || !hasBody || buildOnlyApi) {
+              // Chấp nhận cả cấu trúc mảng bản ghi thật (results[]/cases[]/calls[]...),
+              // không chỉ các key cố định ở cấp cao nhất.
+              const runtimeRecordsOk = apiEvidenceHasRuntimeRecords(objA);
+              const aggregateOk = hasMethod && hasUrl && hasStatus && hasBody;
+              if (!objA || (!runtimeRecordsOk && !aggregateOk) || buildOnlyApi) {
                 agentFailed = true;
                 failedEvidenceFiles.add(af);
                 jobEventBus.emitJobLog(id, {
-                  text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: ${af} không phải API runtime (thiếu method+url đầy đủ http://localhost:PORT + path nghiệp vụ, status HTTP, request/response body thật, hoặc chỉ là build log). Agent phải khởi động service thật, gọi API nghiệp vụ thật và lưu ${af} đầy đủ!\n`
+                  text: `\n[TESTING-VERIFY] ❌ KIỂM THỬ THẤT BẠI: ${af} không phải API runtime (thiếu method+url đầy đủ http://localhost:PORT + path nghiệp vụ, status HTTP, request/response body thật, hoặc chỉ là build log). Chẩn đoán: ${describeApiEvidenceGaps(objA, { hasMethod, hasUrl, hasStatus, hasBody })}. Agent phải khởi động service thật, gọi API nghiệp vụ thật và lưu ${af} đầy đủ!\n`
                 });
                 break;
               }
@@ -7266,6 +7327,7 @@ module.exports = {
   resolveEvidenceType,
   normalizeEvidenceTypeHint,
   hasApiRuntimeShape,
+  apiEvidenceHasRuntimeRecords,
   hasDbShape,
   evidenceChannelOf,
   startEvidenceWatcher,
