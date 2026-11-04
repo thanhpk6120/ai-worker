@@ -314,15 +314,18 @@ function analyze({ procs, listeners, leases, jobs, selfPid, opts = {} }) {
     }
   }
 
-  // LUẬT C (mặc định TẮT): cây agent CLI bỏ hoang, đã idle lâu.
+  // LUẬT C: cây agent CLI bỏ hoang, đã idle lâu.
+  // An toàn: chỉ kill khi (a) đủ tuổi, (b) đã có ÍT NHẤT 2 mẫu CPU (lần quét trước đó),
+  // (c) CPU tiêu thụ giữa 2 lần quét = 0. Nhờ vậy phiên đang được dùng (kể cả chỉ
+  // thỉnh thoảng gõ) sẽ không bị kill oan.
   if (allowIdleAgentTrees) {
     for (const p of procs) {
       const cmd = String(p.cmd || '');
       if (!cmd || !AGENT_RE.test(cmd)) continue;
       if ((Number(p.ageMs) || 0) < idleAgentMs) continue;
-      // Đang tiêu CPU => đang được dùng, không phải rác.
-      if (Number(p.cpuDeltaSec || 0) > 0) continue;
-      addCandidate(p, `Cây agent CLI bỏ hoang (idle > ${Math.round(idleAgentMs / 3600000)}h)`, null);
+      if (p.cpuFirstSeen) continue; // chưa có mẫu trước => chưa kết luận idle
+      if (Number(p.cpuDeltaSec || 0) > 0) continue; // đang tiêu CPU => đang được dùng
+      addCandidate(p, `Cây agent CLI bỏ hoang (idle > ${Math.round(idleAgentMs / 3600000)}h, CPU 0 giữa 2 lần quét)`, null);
     }
   }
 
@@ -393,8 +396,32 @@ function snapshot() {
   return { procs, listeners, cpu, supported: true };
 }
 
-/** Kill cả cây tiến trình (Windows) hoặc 1 tiến trình (POSIX). */
-function killTree(pid) {
+/**
+ * So sánh CPU giữa 2 lần quét để biết tiến trình có ĐANG được dùng hay không.
+ * Đây là điều kiện an toàn của LUẬT C: chỉ kill cây agent khi CPU = 0 giữa 2 lần
+ * quét liên tiếp (và đã có ít nhất 1 mẫu trước đó).
+ * @param {Array} procs
+ */
+let lastCpuSample = new Map();
+function annotateCpuDeltas(procs) {
+  const next = new Map();
+  for (const p of procs) {
+    const pid = Number(p.pid);
+    const cpu = Number(p.cpu) || 0;
+    if (lastCpuSample.has(pid)) {
+      p.cpuDeltaSec = Math.max(0, cpu - lastCpuSample.get(pid));
+      p.cpuFirstSeen = false;
+    } else {
+      p.cpuDeltaSec = 0;
+      p.cpuFirstSeen = true; // chưa có mẫu trước => chưa được kết luận là idle
+    }
+    next.set(pid, cpu);
+  }
+  lastCpuSample = next;
+  return procs;
+}
+
+/** Kill cả cây tiến trình (Windows) hoặc 1 tiến trình (POSIX). */function killTree(pid) {
   if (!Number.isFinite(Number(pid)) || Number(pid) <= 4) {
     return { ok: false, error: 'PID không hợp lệ' };
   }
@@ -511,6 +538,8 @@ async function runJanitor(options = {}) {
   }
 
   const state = loadDbState();
+  // Tính CPU tiêu thụ so với lần quét trước (điều kiện an toàn của LUẬT C).
+  annotateCpuDeltas(before.procs);
   const verdict = analyze({
     procs: before.procs,
     listeners: before.listeners,

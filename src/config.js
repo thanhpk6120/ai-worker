@@ -153,9 +153,11 @@ const JANITOR_GRACE_MINUTES = Math.max(1, Number(process.env.JANITOR_GRACE_MINUT
 // Chi mo phong, khong kill that (dung khi can kiem chung).
 const JANITOR_DRY_RUN = process.env.JANITOR_DRY_RUN === 'true';
 // Quet cay agent CLI bo hoang (omp/claude/codex + MCP) dang idle.
-// MAC DINH TAT: cac tien trinh nay thuong thuoc phien lam viec tuong tac cua nguoi
-// dung, giet nham se lam hong phien. Bat bang JANITOR_IDLE_AGENT_TREES=true.
-const JANITOR_IDLE_AGENT_TREES = process.env.JANITOR_IDLE_AGENT_TREES === 'true';
+// MAC DINH BAT (opt-out bang JANITOR_IDLE_AGENT_TREES=false): may de bi day RAM
+// boi cac phien agent cu (da gap 4 GB tu 3 phien omp 51 gio).
+// An toan: chi kill khi cay da song > JANITOR_IDLE_AGENT_HOURS VA tieu thu CPU
+// = 0 giua 2 lan quet lien tiep (>= 2 mau) - xem processJanitor.analyze().
+const JANITOR_IDLE_AGENT_TREES = process.env.JANITOR_IDLE_AGENT_TREES !== 'false';
 const JANITOR_IDLE_AGENT_HOURS = Math.max(1, Number(process.env.JANITOR_IDLE_AGENT_HOURS) || 6);
 
 // Tự động tạo thư mục nếu chưa có

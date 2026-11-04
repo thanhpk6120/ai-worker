@@ -197,17 +197,34 @@ describe('processJanitor.analyze - phát hiện rác', () => {
     assert.deepEqual(res.candidates, []);
   });
 
-  test('LUẬT C khi bật: chỉ kill cây agent đã idle (không tiêu CPU)', () => {
-    const idle = [proc(1300, 1, 'omp.exe', 'omp.exe --extension x', 3000)];
-    const busy = [proc(1310, 1, 'omp.exe', 'omp.exe --extension y', 3000)];
+  test('LUẬT C khi bật: chỉ kill cây agent đã idle (CPU 0 giữa 2 lần quét)', () => {
+    const idle = [proc(1300, 999999, 'omp.exe', 'omp.exe --extension x', 3000)];
+    idle[0].cpuFirstSeen = false;
+    idle[0].cpuDeltaSec = 0;
+    const busy = [proc(1310, 999999, 'omp.exe', 'omp.exe --extension y', 3000)];
+    busy[0].cpuFirstSeen = false;
     busy[0].cpuDeltaSec = 1.5;
+    // Chưa có mẫu CPU trước đó => KHÔNG được kết luận idle (tránh kill phiên vừa mở).
+    const unknown = [proc(1320, 999999, 'omp.exe', 'omp.exe --extension z', 3000)];
+    unknown[0].cpuFirstSeen = true;
+    unknown[0].cpuDeltaSec = 0;
     const opts = { ...baseOpts, idleAgentTrees: true, idleAgentHours: 6 };
 
-    const resIdle = janitor.analyze({ procs: idle, listeners: [], leases: [], jobs: [], selfPid: 5000, opts });
-    assert.equal(resIdle.candidates.length, 1);
-
-    const resBusy = janitor.analyze({ procs: busy, listeners: [], leases: [], jobs: [], selfPid: 5000, opts });
-    assert.deepEqual(resBusy.candidates, []);
+    assert.equal(
+      janitor.analyze({ procs: idle, listeners: [], leases: [], jobs: [], selfPid: 5000, opts }).candidates.length,
+      1,
+      'idle thật (2 mẫu, CPU 0) phải bị dọn'
+    );
+    assert.deepEqual(
+      janitor.analyze({ procs: busy, listeners: [], leases: [], jobs: [], selfPid: 5000, opts }).candidates,
+      [],
+      'đang tiêu CPU thì không đụng'
+    );
+    assert.deepEqual(
+      janitor.analyze({ procs: unknown, listeners: [], leases: [], jobs: [], selfPid: 5000, opts }).candidates,
+      [],
+      'chưa đủ mẫu CPU thì chưa được kill'
+    );
   });
 
   test('không có tiến trình nào thì trả về rỗng, không lỗi', () => {

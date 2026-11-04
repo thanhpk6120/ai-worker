@@ -54,7 +54,7 @@ describe('Janitor API', () => {
     assert.equal(typeof body.enabled, 'boolean');
     assert.equal(body.interval_ms, 600000, 'chu kỳ mặc định phải là 10 phút');
     assert.equal(typeof body.config.grace_minutes, 'number');
-    assert.equal(body.config.idle_agent_trees, false, 'quét cây agent mặc định phải TẮT cho an toàn');
+    assert.equal(body.config.idle_agent_trees, true, 'quét cây agent mặc định BẬT (opt-out bằng JANITOR_IDLE_AGENT_TREES=false)');
     assert.equal(body.running, false);
   });
 
