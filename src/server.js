@@ -3464,6 +3464,37 @@ function resolvePortWaitMs(job) {
 }
 
 /**
+ * Mốc thời gian mới nhất của file trong thư mục evidence (0 nếu không đọc được).
+ * Dùng để biết một vòng FIXING có sinh/ghi lại bằng chứng hay không.
+ */
+function evidenceDirLatestMtime(dir) {
+  let latest = 0;
+  try {
+    for (const name of fs.readdirSync(dir)) {
+      try {
+        const st = fs.statSync(path.join(dir, name));
+        if (st.mtimeMs > latest) latest = st.mtimeMs;
+      } catch (e) {}
+    }
+  } catch (e) {}
+  return latest;
+}
+
+/**
+ * Agent CLI có chết vì provider/hạ tầng tạm thời không? (vd "Upstream temporarily unavailable")
+ * Các lỗi này exit code vẫn có thể là 0 nhưng agent KHÔNG làm gì — nếu tính là một vòng
+ * FIXING thất bại thì job sẽ đốt hết ngân sách chỉ vì outage của provider.
+ */
+const TRANSIENT_AGENT_RE = /upstream temporarily unavailable|upstream connect error|connection error|socket hang up|ECONNRESET|ETIMEDOUT|ENOTFOUND|502 bad gateway|503 service unavailable|service temporarily unavailable|overloaded/i;
+function isTransientAgentFailure(outputText) {
+  const text = String(outputText || '');
+  if (!text) return false;
+  // Chỉ coi là lỗi hạ tầng khi agent gần như không làm gì (output rất ngắn);
+  // output dài thường là vòng làm việc thật có tool call.
+  return text.length < 5000 && TRANSIENT_AGENT_RE.test(text);
+}
+
+/**
  * Xác minh service đang chạy đúng build của worktree (sau khi agent chạy xong).
  * strict: sai => coi như bước test thất bại. warn: chỉ log. off: bỏ qua.
  */
@@ -4835,6 +4866,8 @@ const executeStep = async (id, opts) => {
           const fixCheckCancelled = db.getJobById(id);
           if (fixCheckCancelled && fixCheckCancelled.status === 'CANCELLED') return;
           let fixingResult = null;
+          // Mốc evidence trước vòng sửa: dùng để biết vòng này có ghi lại ảnh/log không.
+          const evMtimeBefore = evidenceDirLatestMtime(evidenceDir);
           const fixingPromptFile = path.join(featureDir, 'prompt_fixing.md');
           try {
             fs.writeFileSync(fixingPromptFile, fixingGuard.promptToUse, 'utf8');
@@ -4871,15 +4904,31 @@ const executeStep = async (id, opts) => {
             jobEventBus.emitJobError(id, { error: msg });
             return;
           }
+          // Provider/agent chết tạm thời (không phải lỗi code) => pause chờ hồi phục,
+          // KHÔNG tính là một vòng sửa thất bại (PHUB-679 từng đốt 3 vòng vì lỗi này).
+          if (fixingResult && !fixingResult.timedOut && isTransientAgentFailure(jobPolicy.collectAgentOutput(fixingResult))) {
+            const transientText = jobPolicy.collectAgentOutput(fixingResult).slice(0, 300);
+            jobEventBus.emitJobLog(id, { text: `\n[FIXING] ⏳ Agent CLI không chạy được do provider tạm thời không sẵn sàng — coi là lỗi hạ tầng, tạm dừng job để thử lại.\n` });
+            pauseJobForTransient(id, { step: 'FIXING', reason: `Agent CLI lỗi hạ tầng/provider: ${transientText}` });
+            return;
+          }
           // Xác minh service chạy đúng build worktree (chống test trên bản cũ).
+          // Chỉ bắt buộc khi vòng sửa này THỰC SỰ ghi lại bằng chứng; fix thuần code/metadata
+          // không cần service đang chạy nên không được đánh trượt vì [NO_LISTENER].
           if (fixingResult && !fixingResult.timedOut && fixingResult.exitCode === 0) {
+            const producedEvidence = evidenceDirLatestMtime(evidenceDir) > evMtimeBefore;
             const provFix = await verifyRuntimeProvenance(id, fixingPortCtx, 'FIXING');
-            if (!provFix.ok && config.RUNTIME_PROVENANCE_MODE === 'strict') {
+            if (!provFix.ok && producedEvidence && config.RUNTIME_PROVENANCE_MODE === 'strict') {
               fixingResult = {
                 ...fixingResult,
                 exitCode: 1,
                 stderr: `${fixingResult.stderr || ''}\n[PROVENANCE] Xác minh build thất bại: ${provFix.reason || 'unknown'}`
               };
+            } else if (!provFix.ok) {
+              jobEventBus.emitJobLog(id, {
+                text: `[PROVENANCE] ⚠️ FIXING không có service đang chạy nhưng vòng này không ghi lại evidence mới — cho qua (VERIFY vẫn kiểm tra nội dung ảnh).\n`,
+                level: 'warn'
+              });
             }
           }
           if (fixingResult && !fixingResult.timedOut && fixingResult.exitCode === 0) {
