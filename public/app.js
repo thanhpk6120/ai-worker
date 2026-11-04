@@ -94,6 +94,34 @@
     loadSettings();
     loadWorkspaces();
 
+    // Routing theo task: người dùng sửa URL / bấm back-forward thì mở đúng task.
+    window.addEventListener('hashchange', () => {
+      const id = jobIdFromHash();
+      if (id && id !== state.activeJobId && state.jobs.some((j) => j.id === id)) {
+        selectJob(id);
+      }
+    });
+
+    // Nút màu trên thanh thông báo -> mở modal chi tiết (không đẩy bố cục).
+    const alertBar = document.getElementById('taskAlertBar');
+    if (alertBar) {
+      alertBar.addEventListener('click', (ev) => {
+        const btn = ev.target.closest('[data-alert-kind]');
+        if (btn) openTaskAlertModal();
+      });
+    }
+    const btnCloseAlert = document.getElementById('btnCloseTaskAlertModal');
+    if (btnCloseAlert) btnCloseAlert.addEventListener('click', closeTaskAlertModal);
+    const alertModal = document.getElementById('taskAlertModal');
+    if (alertModal) {
+      alertModal.addEventListener('click', (ev) => {
+        if (ev.target === alertModal) closeTaskAlertModal();
+      });
+    }
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape') closeTaskAlertModal();
+    });
+
     // C6: SSE đã realtime -> poll chậm lại (15s) và bỏ qua khi tab đang ẩn
     setInterval(() => {
       if (document.hidden) return;
@@ -1461,9 +1489,11 @@
       }
     });
 
-    // Tự động chọn task đầu tiên nếu chưa có task nào được chọn
+    // Tự động chọn task: ưu tiên task trên URL (#/task/<id>) để reload vẫn đứng đúng task
     if (!state.activeJobId && filtered.length > 0) {
-      selectJob(filtered[0].id);
+      const hashId = jobIdFromHash();
+      const hashedJob = hashId ? filtered.find((j) => j.id === hashId) : null;
+      selectJob(hashedJob ? hashedJob.id : filtered[0].id);
     }
 
     // B3: đồng bộ nút "Chạy lại" theo job đang xem
@@ -1475,6 +1505,8 @@
 
   function selectJob(jobId) {
     state.activeJobId = jobId;
+    // Routing: giữ URL dạng #/task/<id> để F5 / copy link vẫn đứng đúng task.
+    writeJobHash(jobId);
     // B1: đổi job -> đóng modal câu hỏi và xoá câu hỏi của job cũ
     closeQuestionModal();
     state.currentQuestion = null;
@@ -1517,15 +1549,9 @@
         statusBadge.textContent = status === 'PENDING' ? 'Chờ giải đáp' : (status === 'PAUSED' ? 'Tạm dừng' : status);
         statusBadge.className = `status-badge ${STATUS_CLASSES[status] || 'status-todo'}`;
       }
-      const errBox = document.getElementById('activeJobErrorBox');
-      if (status === 'FAILED' && job.error_message) {
-        if (errBox) {
-          errBox.style.display = 'block';
-          errBox.innerHTML = `<i class="fa-solid fa-triangle-exclamation mr-1.5"></i><strong>Lý do thất bại:</strong> ${escapeHtml(job.error_message)}`;
-        }
-      } else if (errBox) {
-        errBox.style.display = 'none';
-      }
+      // Bỏ box lỗi inline (gây xô bố cục): lý do nằm trong modal thông báo,
+      // header chỉ còn nút màu đỏ để bấm xem chi tiết.
+      renderTaskAlertSections(job);
     }
 
 
@@ -1723,6 +1749,7 @@
       } else {
         pendingBanner.classList.add('hidden');
       }
+      syncTaskAlertBar();
     }
 
     // B3: banner chờ hồi phục khi job PAUSED do lỗi tạm thời (TRANSIENT)
@@ -1735,6 +1762,14 @@
         : '';
       const isWaitingRecovery = (job.status || '').toUpperCase() === 'PAUSED' && lastErrorKind === 'TRANSIENT';
       recoveryBanner.classList.toggle('hidden', !isWaitingRecovery);
+      if (!isWaitingRecovery) {
+        const recText = document.getElementById('recoveryAlertText');
+        if (recText) recText.textContent = 'Task đang tạm dừng (PAUSED) do lỗi tạm thời. Bạn có thể thử lại ngay hoặc chờ hệ thống tự phục hồi.';
+      } else if (job.error_message) {
+        const recText = document.getElementById('recoveryAlertText');
+        if (recText) recText.textContent = String(job.error_message);
+      }
+      syncTaskAlertBar();
     }
 
     // Populate Task Status Select & Setup Delete Task Button
@@ -2144,12 +2179,120 @@
     }
     if (text) text.textContent = msg;
     banner.classList.remove('hidden');
+    syncTaskAlertBar();
   }
 
   function hidePortWaitBanner() {
     state.portWaiting = false;
     const banner = document.getElementById('portWaitBanner');
     if (banner) banner.classList.add('hidden');
+    syncTaskAlertBar();
+  }
+
+  // ===== Thanh nút thông báo (đỏ/vàng/xanh) + modal chi tiết =====
+  // Bố cục panel luôn cố định: thông báo KHÔNG đẩy/che nội dung bên dưới,
+  // người dùng bấm nút màu để mở modal xem chi tiết.
+  function renderTaskAlertSections(job) {
+    const j = job || {};
+    const status = (j.status || '').toUpperCase();
+    const errSection = document.getElementById('taskAlertErrorSection');
+    const errText = document.getElementById('taskAlertErrorText');
+    const hasError = Boolean(j.error_message && String(j.error_message).trim());
+    if (errSection && errText) {
+      if (hasError) {
+        let gateErr = '';
+        try {
+          const gate = j.gate_result
+            ? (typeof j.gate_result === 'string' ? JSON.parse(j.gate_result) : j.gate_result)
+            : null;
+          if (gate && gate.error && gate.error !== j.error_message) gateErr = `\n\n[Đối soát] ${gate.error}`;
+        } catch (e) {}
+        errSection.classList.remove('hidden');
+        errText.textContent = `${j.error_message}${gateErr}`;
+      } else {
+        errSection.classList.add('hidden');
+        errText.textContent = '';
+      }
+    }
+    const sumSection = document.getElementById('taskAlertSummarySection');
+    const sumText = document.getElementById('taskAlertSummaryText');
+    if (sumSection && sumText) {
+      const summary = (j.summary && String(j.summary).trim())
+        || (status === 'DONE' ? 'Task đã hoàn tất (DONE).' : '');
+      if (status === 'DONE') {
+        sumSection.classList.remove('hidden');
+        sumText.textContent = summary;
+      } else {
+        sumSection.classList.add('hidden');
+        sumText.textContent = '';
+      }
+    }
+    syncTaskAlertBar();
+  }
+
+  function isAlertSectionVisible(id) {
+    const el = document.getElementById(id);
+    return Boolean(el && !el.classList.contains('hidden'));
+  }
+
+  function collectTaskAlerts() {
+    const alerts = [];
+    if (isAlertSectionVisible('taskAlertErrorSection')) {
+      alerts.push({ kind: 'error', level: 'danger', icon: 'fa-triangle-exclamation', label: 'Lỗi' });
+    }
+    if (isAlertSectionVisible('pendingAlertBanner')) {
+      alerts.push({ kind: 'pending', level: 'warn', icon: 'fa-circle-question', label: 'Chờ trả lời' });
+    }
+    if (isAlertSectionVisible('recoveryAlertBanner')) {
+      alerts.push({ kind: 'recovery', level: 'warn', icon: 'fa-arrows-rotate', label: 'Chờ hồi phục' });
+    }
+    if (isAlertSectionVisible('portWaitBanner')) {
+      alerts.push({ kind: 'portWait', level: 'warn', icon: 'fa-plug-circle-bolt', label: 'Chờ port' });
+    }
+    if (isAlertSectionVisible('taskAlertSummarySection')) {
+      alerts.push({ kind: 'summary', level: 'ok', icon: 'fa-circle-check', label: 'Hoàn tất' });
+    }
+    return alerts;
+  }
+
+  function syncTaskAlertBar() {
+    const bar = document.getElementById('taskAlertBar');
+    if (!bar) return;
+    const alerts = collectTaskAlerts();
+    if (alerts.length === 0) {
+      // Vẫn giữ thanh (chiều cao cố định) để bố cục bên dưới KHÔNG bị xô khi có thông báo.
+      bar.innerHTML = '';
+      return;
+    }
+    bar.innerHTML = alerts.map((a) => `
+      <button type="button" class="task-alert-btn task-alert-${a.level}" data-alert-kind="${a.kind}" title="Bấm để xem chi tiết">
+        <i class="fa-solid ${a.icon}"></i><span>${escapeHtml(a.label)}</span>
+      </button>`).join('');
+  }
+
+  function openTaskAlertModal() {
+    const modal = document.getElementById('taskAlertModal');
+    if (!modal) return;
+    modal.classList.remove('hidden');
+  }
+
+  function closeTaskAlertModal() {
+    const modal = document.getElementById('taskAlertModal');
+    if (modal) modal.classList.add('hidden');
+  }
+
+  // ===== Routing theo task: #/task/<jobId> để F5 vẫn đứng đúng task =====
+  function jobIdFromHash() {
+    const matched = String(location.hash || '').match(/^#\/?task\/([^/?#]+)/i);
+    return matched ? decodeURIComponent(matched[1]) : '';
+  }
+
+  function writeJobHash(jobId) {
+    const next = jobId ? `#/task/${encodeURIComponent(jobId)}` : '';
+    if (next === (location.hash || '')) return;
+    try {
+      history.replaceState(null, '', next || (location.pathname + location.search));
+    } catch (e) {}
   }
 
   async function retryPortWaitNow() {
@@ -6013,5 +6156,11 @@
   window.aiWorker.closeWorkerLogsModal = closeWorkerLogsModal;
   window.aiWorker.openCloneTaskModal = openCloneTaskModal;
   window.aiWorker.closeCloneTaskModal = closeCloneTaskModal;
+  // Cho phép kiểm thử/giám sát nhanh thanh thông báo từ console.
+  window.aiWorker.renderTaskAlertSections = renderTaskAlertSections;
+  window.aiWorker.syncTaskAlertBar = syncTaskAlertBar;
+  window.aiWorker.openTaskAlertModal = openTaskAlertModal;
+  window.aiWorker.closeTaskAlertModal = closeTaskAlertModal;
+  window.aiWorker.jobIdFromHash = jobIdFromHash;
 })();
 

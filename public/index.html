@@ -194,7 +194,6 @@
                 <span id="activeJobFixingBadge" class="hidden text-xs px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 font-mono animate-pulse">Fixing: 1/3</span>
               </div>
               <h2 id="activeJobTitle" class="text-base sm:text-lg font-bold text-white truncate">Job Title Here</h2>
-              <div id="activeJobErrorBox" style="display: none;" class="w-full mt-2 p-2 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs"></div>
               
               <!-- Meta Row -->
               <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-400 pt-1">
@@ -305,61 +304,9 @@
           </div>
         </section>
 
-        <!-- PENDING ALERT BANNER (HUMAN-IN-THE-LOOP & DUAL PLAN APPROVAL) -->
-        <div id="pendingAlertBanner" class="hidden p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg animate-in fade-in duration-200">
-          <div class="flex items-start gap-3">
-            <div class="w-8 h-8 rounded-lg bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0 border border-amber-500/40">
-              <i class="fa-solid fa-circle-question text-base"></i>
-            </div>
-            <div>
-              <div class="font-bold text-xs sm:text-sm text-amber-300">Task đang ở trạng thái PENDING (Chờ duyệt kế hoạch / Trả lời câu hỏi)</div>
-              <p id="pendingAlertText" class="text-xs text-amber-200/80 mt-0.5">Agent đã hoàn thành bước lập kế hoạch và đang chờ bạn xem xét duyệt kế hoạch để chuyển sang IMPLEMENT hoặc trả lời câu hỏi làm rõ.</p>
-            </div>
-          </div>
-          <div class="flex items-center gap-2 shrink-0">
-            <button id="btnOpenPendingQuestion" class="px-3.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-semibold text-xs shadow transition flex items-center gap-1.5">
-              <i class="fa-solid fa-comment-dots"></i>
-              <span>Trả lời câu hỏi</span>
-            </button>
-            <button id="btnApproveDualPlan" class="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-lg shadow-emerald-500/20 transition flex items-center gap-1.5 active:scale-95">
-              <i class="fa-solid fa-check-double"></i>
-              <span>Duyệt kế hoạch & Chạy IMPLEMENT</span>
-            </button>
-          </div>
-        </div>
-        <!-- B3: BANNER CHỜ HỒI PHỤC (PAUSED + lỗi TRANSIENT) -->
-        <div id="recoveryAlertBanner" class="hidden p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg">
-          <div class="flex items-start gap-3">
-            <div class="w-8 h-8 rounded-lg bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0 border border-amber-500/40">
-              <i class="fa-solid fa-arrows-rotate text-base"></i>
-            </div>
-            <div>
-              <div class="font-bold text-xs sm:text-sm text-amber-300">Provider/môi trường tạm lỗi — đang chờ hồi phục</div>
-              <p class="text-xs text-amber-200/80 mt-0.5">Task đang tạm dừng (PAUSED) do lỗi tạm thời. Bạn có thể thử lại ngay hoặc chờ hệ thống tự phục hồi.</p>
-            </div>
-          </div>
-          <button id="btnRetryRecovery" class="px-3.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-semibold text-xs shadow transition flex items-center gap-1.5 shrink-0 active:scale-95">
-            <i class="fa-solid fa-rotate-right"></i>
-            <span>Thử lại ngay</span>
-          </button>
-        </div>
-
-        <!-- PORT WAIT BANNER: đang chờ port hoặc đã tạm dừng vì hết thời gian chờ -->
-        <div id="portWaitBanner" class="hidden p-3.5 rounded-xl bg-sky-500/10 border border-sky-500/30 text-sky-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg">
-          <div class="flex items-start gap-3">
-            <div class="w-8 h-8 rounded-lg bg-sky-500/20 text-sky-400 flex items-center justify-center shrink-0 border border-sky-500/40">
-              <i class="fa-solid fa-plug-circle-bolt text-base"></i>
-            </div>
-            <div>
-              <div class="font-bold text-xs sm:text-sm text-sky-300">Task đang chờ PORT để kiểm thử</div>
-              <p id="portWaitText" class="text-xs text-sky-200/80 mt-0.5">Service của workspace đang được task khác sử dụng. Task sẽ tự chạy lại khi port được nhả.</p>
-            </div>
-          </div>
-          <button id="btnRetryPortWait" class="px-3.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold text-xs shadow transition flex items-center gap-1.5 shrink-0 active:scale-95">
-            <i class="fa-solid fa-rotate-right"></i>
-            <span>Thử lại ngay</span>
-          </button>
-        </div>
+        <!-- ALERT STRIP: bố cục cố định, chỉ hiện nút màu (đỏ/vàng/xanh) có icon.
+             Bấm nút để mở modal xem chi tiết — KHÔNG đẩy/che nội dung bên dưới. -->
+        <div id="taskAlertBar" class="task-alert-bar"></div>
         <!-- 2. PIPELINE STEPPER BAR COMPONENT -->
         <section class="bg-surface-900 border border-slate-800 rounded-xl p-4 shadow-md">
           <div class="flex items-center justify-between mb-3">
@@ -1455,6 +1402,107 @@
   </div>
 
   <!-- Main JavaScript -->
-  <script src="/app.js?v=2"></script>
+  <!-- ===================== TASK ALERT MODAL (chi tiết thông báo của Task) ===================== -->
+<div id="taskAlertModal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm hidden">
+  <div class="bg-surface-900 border border-slate-700 rounded-2xl w-full max-w-2xl max-h-[82vh] flex flex-col shadow-2xl overflow-hidden">
+    <div class="flex items-center justify-between px-4 py-3 border-b border-slate-800 shrink-0">
+      <h3 class="text-sm font-bold text-white flex items-center gap-2">
+        <i class="fa-solid fa-bell text-amber-400"></i>
+        <span>Chi tiết thông báo của Task</span>
+      </h3>
+      <button id="btnCloseTaskAlertModal" class="text-slate-400 hover:text-white p-1.5 rounded-lg hover:bg-slate-800 transition" title="Đóng">
+        <i class="fa-solid fa-xmark"></i>
+      </button>
+    </div>
+    <div id="taskAlertModalBody" class="p-4 overflow-y-auto custom-scrollbar space-y-3">
+
+      <!-- Lỗi / lý do thất bại -->
+      <div id="taskAlertErrorSection" class="hidden p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-200">
+        <div class="flex items-start gap-3">
+          <div class="w-8 h-8 rounded-lg bg-rose-500/20 text-rose-400 flex items-center justify-center shrink-0 border border-rose-500/40">
+            <i class="fa-solid fa-triangle-exclamation text-base"></i>
+          </div>
+          <div class="min-w-0">
+            <div class="font-bold text-xs sm:text-sm text-rose-300">Lỗi / Lý do thất bại</div>
+            <pre id="taskAlertErrorText" class="text-xs text-rose-200/90 mt-1 whitespace-pre-wrap break-words font-mono"></pre>
+          </div>
+        </div>
+      </div>
+
+      <!-- Kết quả hoàn tất -->
+      <div id="taskAlertSummarySection" class="hidden p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-200">
+        <div class="flex items-start gap-3">
+          <div class="w-8 h-8 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0 border border-emerald-500/40">
+            <i class="fa-solid fa-circle-check text-base"></i>
+          </div>
+          <div class="min-w-0">
+            <div class="font-bold text-xs sm:text-sm text-emerald-300">Task đã hoàn tất</div>
+            <pre id="taskAlertSummaryText" class="text-xs text-emerald-200/90 mt-1 whitespace-pre-wrap break-words font-mono"></pre>
+          </div>
+        </div>
+      </div>
+
+      <!-- PENDING ALERT (HUMAN-IN-THE-LOOP & DUAL PLAN APPROVAL) -->
+      <div id="pendingAlertBanner" class="hidden p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 flex flex-col gap-3 shadow-lg">
+        <div class="flex items-start gap-3">
+          <div class="w-8 h-8 rounded-lg bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0 border border-amber-500/40">
+            <i class="fa-solid fa-circle-question text-base"></i>
+          </div>
+          <div>
+            <div class="font-bold text-xs sm:text-sm text-amber-300">Task đang ở trạng thái PENDING (Chờ duyệt kế hoạch / Trả lời câu hỏi)</div>
+            <p id="pendingAlertText" class="text-xs text-amber-200/80 mt-0.5">Agent đã hoàn thành bước lập kế hoạch và đang chờ bạn xem xét duyệt kế hoạch để chuyển sang IMPLEMENT hoặc trả lời câu hỏi làm rõ.</p>
+          </div>
+        </div>
+        <div class="flex items-center gap-2 flex-wrap">
+          <button id="btnOpenPendingQuestion" class="px-3.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-semibold text-xs shadow transition flex items-center gap-1.5">
+            <i class="fa-solid fa-comment-dots"></i>
+            <span>Trả lời câu hỏi</span>
+          </button>
+          <button id="btnApproveDualPlan" class="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-lg shadow-emerald-500/20 transition flex items-center gap-1.5 active:scale-95">
+            <i class="fa-solid fa-check-double"></i>
+            <span>Duyệt kế hoạch & Chạy IMPLEMENT</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- B3: CHỜ HỒI PHỤC (PAUSED + lỗi TRANSIENT) -->
+      <div id="recoveryAlertBanner" class="hidden p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 flex flex-col gap-3 shadow-lg">
+        <div class="flex items-start gap-3">
+          <div class="w-8 h-8 rounded-lg bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0 border border-amber-500/40">
+            <i class="fa-solid fa-arrows-rotate text-base"></i>
+          </div>
+          <div>
+            <div class="font-bold text-xs sm:text-sm text-amber-300">Provider/môi trường tạm lỗi — đang chờ hồi phục</div>
+            <p id="recoveryAlertText" class="text-xs text-amber-200/80 mt-0.5">Task đang tạm dừng (PAUSED) do lỗi tạm thời. Bạn có thể thử lại ngay hoặc chờ hệ thống tự phục hồi.</p>
+          </div>
+        </div>
+        <button id="btnRetryRecovery" class="self-start px-3.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-semibold text-xs shadow transition flex items-center gap-1.5 active:scale-95">
+          <i class="fa-solid fa-rotate-right"></i>
+          <span>Thử lại ngay</span>
+        </button>
+      </div>
+
+      <!-- PORT WAIT -->
+      <div id="portWaitBanner" class="hidden p-3.5 rounded-xl bg-sky-500/10 border border-sky-500/30 text-sky-200 flex flex-col gap-3 shadow-lg">
+        <div class="flex items-start gap-3">
+          <div class="w-8 h-8 rounded-lg bg-sky-500/20 text-sky-400 flex items-center justify-center shrink-0 border border-sky-500/40">
+            <i class="fa-solid fa-plug-circle-bolt text-base"></i>
+          </div>
+          <div>
+            <div class="font-bold text-xs sm:text-sm text-sky-300">Task đang chờ PORT để kiểm thử</div>
+            <p id="portWaitText" class="text-xs text-sky-200/80 mt-0.5">Service của workspace đang được task khác sử dụng. Task sẽ tự chạy lại khi port được nhả.</p>
+          </div>
+        </div>
+        <button id="btnRetryPortWait" class="self-start px-3.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold text-xs shadow transition flex items-center gap-1.5 active:scale-95">
+          <i class="fa-solid fa-rotate-right"></i>
+          <span>Thử lại ngay</span>
+        </button>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script src="/app.js?v=3"></script>
 </body>
 </html>
