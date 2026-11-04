@@ -74,15 +74,36 @@ function computeWorktreeHash(job) {
   return { hash, commit, dirty: Boolean(status), lockfiles: lockHashes.map((l) => l.split(':')[0]) };
 }
 
-/** Thư mục static có thể phục vụ marker trong worktree (FE hoặc BE). */
+/**
+ * Thư mục static có thể phục vụ marker trong worktree.
+ *
+ * Danh sách TỔNG QUÁT theo quy ước phổ biến của các stack (không gắn với 1 dự án):
+ * Vite/Angular/React (`public`), Next/Nuxt (`public`), Spring Boot
+ * (`src/main/resources/static|public|META-INF/resources`), ASP.NET (`wwwroot`),
+ * Django (`static`/`staticfiles`), Laravel/PHP (`public`), Rails (`public`),
+ * monorepo FE (`client|frontend|web|admin/public`).
+ */
 function detectStaticDirs(job) {
   const wt = job && (job.worktree_path || job.repo_path);
   if (!wt || !fs.existsSync(wt)) return [];
   const candidates = [
+    // Node/FE phổ biến (Vite, React, Angular, Next, Nuxt, Vue, Svelte...)
     path.join(wt, 'public'),
     path.join(wt, 'static'),
+    path.join(wt, 'app', 'static'),
+    path.join(wt, 'staticfiles'),           // Django collectstatic
+    // Monorepo: FE nằm trong thư mục con
+    path.join(wt, 'client', 'public'),
+    path.join(wt, 'frontend', 'public'),
+    path.join(wt, 'web', 'public'),
+    path.join(wt, 'admin', 'public'),
+    path.join(wt, 'ClientApp', 'public'),
+    // Java / Spring Boot
     path.join(wt, 'src', 'main', 'resources', 'static'),
-    path.join(wt, 'src', 'main', 'resources', 'public')
+    path.join(wt, 'src', 'main', 'resources', 'public'),
+    path.join(wt, 'src', 'main', 'resources', 'META-INF', 'resources'),
+    // .NET
+    path.join(wt, 'wwwroot')
   ];
   return candidates.filter((dir) => {
     try { return fs.existsSync(dir) && fs.statSync(dir).isDirectory(); } catch (e) { return false; }

@@ -78,6 +78,20 @@ function portsForKind(kind) {
   return list;
 }
 
+/**
+ * Toàn bộ port thuộc pool của worker (FE/BE/MOCK/OTHER).
+ * Dùng cho Process Janitor: port nằm trong pool mà không có lease => có kẻ chiếm chỗ.
+ * @returns {number[]}
+ */
+function getAllPoolPorts() {
+  const pools = readPools();
+  const out = new Set();
+  for (const kind of Object.keys(pools)) {
+    for (const p of portsForKind(kind)) out.add(p);
+  }
+  return Array.from(out).sort((a, b) => a - b);
+}
+
 /** Port có đang trống ở OS hay không (bind thử). */
 function isPortFree(port, host = '127.0.0.1') {
   return new Promise((resolve) => {
@@ -350,11 +364,31 @@ function resolveServicesForJob(job) {
   return Array.from(new Set(services)).slice(0, 3);
 }
 
-/** Sinh block prompt ràng buộc port (chèn đầu prompt TESTING/FIXING). */
-function buildPortContract(ports) {
+/**
+ * Sinh block prompt ràng buộc port (chèn đầu prompt TESTING/FIXING).
+ *
+ * QUAN TRỌNG: chỉ được nói tới `__aiworker_build.json` khi marker THẬT SỰ được
+ * ghi (`markerWritten`). Repo không có thư mục static (vd `bankhub-admin-fe`
+ * không có `public/`, BE không có `src/main/resources/static`) thì marker không
+ * bao giờ tồn tại — trước đây prompt vẫn khẳng định có, khiến agent đi tìm file
+ * ma hơn 20 phút mỗi vòng (PHUB-679/681) rồi cạn token và bị provider 429.
+ * @param {object} ports Map service_key -> port
+ * @param {{markerWritten?: boolean}} [options]
+ */
+function buildPortContract(ports, options = {}) {
   const entries = Object.entries(ports || {});
   if (!entries.length) return '';
   const lines = entries.map(([service, port]) => `- ${service}: **${port}**`).join('\n');
+  const markerWritten = Boolean(options && options.markerWritten);
+  const markerRule = markerWritten
+    ? `- Worker đã ghi file \`__aiworker_build.json\` vào thư mục static của worktree
+  (chứa build hash của mã nguồn hiện tại). Sau khi build, service PHẢI phục vụ
+  được \`GET /__aiworker_build.json\` với đúng hash đó — nếu không, worker coi
+  như bạn chưa build lại và bước test sẽ thất bại.`
+    : `- App này KHÔNG có thư mục static (public/, static/, wwwroot/, src/main/resources/static/…)
+  nên worker **KHÔNG ghi** file \`__aiworker_build.json\`. TUYỆT ĐỐI KHÔNG tìm,
+  KHÔNG tạo file này — nó không tồn tại và không phải nguyên nhân lỗi.
+  Worker xác minh build mới bằng **thời điểm khởi động tiến trình** của service.`;
   return `## PORT CONTRACT (BẮT BUỘC — worker đã cấp port)
 Chỉ được khởi động service trên ĐÚNG các port dưới đây. KHÔNG được tự chọn port khác,
 KHÔNG được đổi port khi bị lỗi bind (phải báo lỗi ra log để worker xử lý):
@@ -364,13 +398,10 @@ ${lines}
 - Worker đã dừng các service cũ trong worktree này. Bạn phải **build lại** và
   **khởi động service mới** trên các port ở trên; TUYỆT ĐỐI không dùng lại
   instance/tiến trình đang chạy (có thể là code cũ).
-- Worker đã ghi file \`__aiworker_build.json\` vào thư mục static của worktree
-  (chứa build hash của mã nguồn hiện tại). Sau khi build, service PHẢI phục vụ
-  được \`GET /__aiworker_build.json\` với đúng hash đó — nếu không, worker coi
-  như bạn chưa build lại và bước test sẽ thất bại.
-- Giữ service chạy cho tới khi bước kết thúc để worker xác minh; kiểm tra
-  \`GET /\` trả 200 trước khi chụp ảnh/gọi API.
-- Khi kết thúc kiểm thử, dừng service do bạn khởi động để nhả port.
+${markerRule}
+- Giữ service chạy TRONG LÚC chụp ảnh/gọi API; kiểm tra \`GET /\` trả 200 trước khi dùng.
+- Khi đã xong việc, **phải dừng service do bạn khởi động để nhả port**. Dừng service
+  sau khi chụp xong KHÔNG làm hỏng bằng chứng và KHÔNG bị coi là lỗi.
 
 Biến môi trường tương ứng đã được bơm sẵn: \`AIWORKER_PORT_MAP=${JSON.stringify(ports)}\`.
 
@@ -533,6 +564,7 @@ module.exports = {
   listLeases,
   isPortFree,
   buildPortContract,
+  getAllPoolPorts,
   resolveServicesForJob,
   classifyServiceKey,
   ensureSchema,

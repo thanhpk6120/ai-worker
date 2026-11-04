@@ -788,6 +788,7 @@ function handleHealthCheck(req, res) {
 app.get('/api/v1/health', handleHealthCheck);
 app.get('/api/v1/status', handleHealthCheck);
 
+
 /**
  * GET /api/v1/systemone/status
  * Trang thai model SystemOne: live (goi model that) hay fallback (heuristic offline).
@@ -2748,6 +2749,45 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
           if (fs.existsSync(metaPath)) {
             try { metadataObj = JSON.parse(fs.readFileSync(metaPath, 'utf8').replace(/^\uFEFF/, '')); } catch (e) {}
           }
+
+          // CÁCH LY FILE LẠ TRƯỚC KHI CHẤM: agent hay thả log runtime / ảnh debug vào
+          // evidence/ (be_8082_fix7.log, debug_*.png...). Chúng không chứng minh cho
+          // test case nào nên bị chuyển sang evidence_quarantine/ thay vì đánh trượt
+          // job. Phải làm ở đây để danh sách ảnh đem chấm AI Vision không còn file lạ.
+          //
+          // CHỈ cách ly khi MỌI test case đã có evidence khai báo (mapping đầy đủ):
+          // lúc đó file lạ chắc chắn là rác vệ sinh. Nếu mapping còn thiếu (tests[] rỗng
+          // hoặc có test không khai evidence) thì giữ nguyên luật cũ: FAIL, vì đó là
+          // dấu hiệu bằng chứng không được ánh xạ chứ không phải rác.
+          const testsArrEarly = (metadataObj && Array.isArray(metadataObj.tests)) ? metadataObj.tests : [];
+          const testHasEvidence = (t) => {
+            if (!t || typeof t !== 'object') return false;
+            for (const field of ['evidence', 'evidences', 'files']) {
+              const v = t[field];
+              if (Array.isArray(v) && v.length > 0) return true;
+              if (typeof v === 'string' && v.trim()) return true;
+              if (v && typeof v === 'object' && Object.keys(v).length > 0) return true;
+            }
+            return false;
+          };
+          const mappingComplete = testsArrEarly.length > 0 && testsArrEarly.every(testHasEvidence);
+          const declaredEarly = collectDeclaredEvidenceNames(metadataObj);
+          if (declaredEarly.size > 0 && mappingComplete) {
+            const undeclaredEarly = validFiles.filter(
+              (f) => f !== 'metadata.json' && ![...declaredEarly].some((d) => d.includes(f) || f.includes(d))
+            );
+            if (undeclaredEarly.length > 0) {
+              const movedEarly = quarantineUndeclaredEvidence(evidenceDir, undeclaredEarly);
+              if (movedEarly.ok > 0) {
+                const movedSet = new Set(undeclaredEarly);
+                validFiles = validFiles.filter((f) => !movedSet.has(f));
+              }
+              jobEventBus.emitJobLog(id, {
+                text: `\n[TESTING-VERIFY] ⚠️ Cách ly ${movedEarly.ok}/${undeclaredEarly.length} file không khai trong metadata.json khỏi evidence/ (→ ${movedEarly.dir || 'evidence_quarantine'}): ${undeclaredEarly.join(', ')}. Đây không phải bằng chứng nên KHÔNG tính là lỗi.\n`,
+                level: 'warn'
+              });
+            }
+          }
   
           // Kiểm tra xem có file ảnh UI thật không
           const uiImageFiles = validFiles.filter(f => {
@@ -2882,6 +2922,8 @@ const verifyTaskEvidence = ({ jobId, evidenceDir, featureDir, taskCode, emit }) 
                 }
                 const undeclared = validFiles.filter(f => f !== 'metadata.json' && ![...declared].some(d => d.includes(f) || f.includes(d)));
                 if (undeclared.length > 0) {
+                  // File lạ còn lại = chưa cách ly được (mapping chưa đầy đủ, file đang bị
+                  // giữ, hoặc khác ổ đĩa) => vẫn là lỗi: bằng chứng không được ánh xạ.
                   agentFailed = true;
                   undeclared.forEach((f) => failedEvidenceFiles.add(f));
                   jobEventBus.emitJobLog(id, {
@@ -3527,7 +3569,17 @@ async function verifyRuntimeProvenance(jobId, portCtx, phase) {
       level: 'warn'
     });
   }
-  return res;
+  // Phân loại nguyên nhân: "không có listener" KHÁC với "đang chạy build cũ".
+  // - noListenerAll: mọi service đều KHÔNG listen. Agent thường dừng service khi
+  //   xong việc (đúng yêu cầu "dừng service để nhả port") => không có bản build cũ
+  //   nào đang chạy, nên đây KHÔNG phải gian lận và không được đánh trượt vòng.
+  //   (Trước đây chính điều này làm PHUB-679 lặp vô hạn: agent chụp ảnh xong, dừng
+  //   service, rồi bị tính là "vòng sửa thất bại" -> 3 vòng liên tiếp bị huỷ.)
+  // - wrongBuild: có listener nhưng phục vụ hash cũ/chưa restart => đúng là test
+  //   trên bản cũ, phải chặn.
+  const problems = (res.services || []).flatMap((s) => s.problems || []).map((p) => String(p).toUpperCase());
+  const noListener = !res.ok && problems.length > 0 && problems.every((p) => p === 'NO_LISTENER');
+  return { ...res, noListener, wrongBuild: !res.ok && !noListener };
 }
 
 /**
@@ -3651,9 +3703,10 @@ async function acquireJobPortsForStep(jobId, phase) {
     return pauseJobForPortWait(job, phase, reason);
   }
 
-  const contract = portLeaseManager.buildPortContract(res.ports);
   // Ghi marker build vào static dir của worktree: marker nằm trong đầu vào build,
   // nên chỉ khi agent build lại thì service mới phục vụ được hash hiện tại.
+  // PHAI ghi TRUOC khi sinh port contract: contract phụ thuộc `markerWritten`
+  // (repo không có static dir thì không được hứa với agent là có marker).
   let buildHash = '';
   let markerWritten = false;
   try {
@@ -3667,6 +3720,8 @@ async function acquireJobPortsForStep(jobId, phase) {
   } catch (e) {
     console.warn('[PROVENANCE] Không tạo được marker build:', e.message);
   }
+
+  const contract = portLeaseManager.buildPortContract(res.ports, { markerWritten });
 
   const entry = { phase, ports: res.ports, leases: res.leases, contract, buildHash, markerWritten, stepStartedAt: Date.now() };
   // Gia hạn lease định kỳ: bước TESTING/FIXING có thể 20-60 phút, nếu không
@@ -3771,14 +3826,28 @@ function endStepTimeline(jobId, { exitCode, status } = {}) {
   const key = resolveCanonicalJobId(jobId);
   const cur = stepTimeline.get(key);
   if (!cur || !cur.stepId) return;
+  const finalStatus = status || 'COMPLETED';
   try {
     db.updateStep(cur.stepId, {
-      status: status || 'COMPLETED',
+      status: finalStatus,
       finished_at: new Date().toISOString(),
       exit_code: exitCode === undefined ? null : exitCode
     });
   } catch (e) {
     console.warn('[STEP-TIMELINE] Khong cap nhat duoc step:', e.message);
+  }
+  // Buoc hoan tat = job da thuc su tien trien => xoa bo dem cho hoi phuc ha tang,
+  // de su co 429/5xx sau do lai duoc huong ngan sach moi thay vi cong don
+  // suot doi job roi FAILED oan.
+  if (finalStatus === 'COMPLETED') {
+    try {
+      const curJob = db.getJobById(key);
+      const pipe = curJob ? jobPolicy.parsePipelineConfig(curJob) : null;
+      if (pipe && pipe.transient_retry !== undefined) {
+        delete pipe.transient_retry;
+        db.updateJob(key, { pipeline_config: pipe });
+      }
+    } catch (e) {}
   }
   // Nha port cua job khi doan chay ket thuc (service agent da start phai tra slot).
   releaseJobPorts(key, 'step-end');
@@ -4622,8 +4691,12 @@ const executeStep = async (id, opts) => {
 
         // Chặn "test trên bản build cũ": chỉ chấp nhận evidence khi service
         // đang chạy đúng hash worktree và vừa được restart trong bước này.
+        // NGOẠI LỆ: agent dừng service khi xong việc (prompt yêu cầu nhả port)
+        // => không có listener KHÔNG phải là chạy build cũ, không được đánh trượt.
         const provTesting = await verifyRuntimeProvenance(id, portCtx, 'TESTING');
-        if (!provTesting.ok && config.RUNTIME_PROVENANCE_MODE === 'strict') {
+        if (!provTesting.ok && provTesting.noListener) {
+          jobEventBus.emitJobLog(id, { text: '[PROVENANCE] ℹ️ TESTING: không còn service nào listen (agent đã dừng để nhả port) — bỏ qua kiểm tra build lúc này, VERIFY vẫn chấm nội dung evidence.\n', level: 'warn' });
+        } else if (!provTesting.ok && config.RUNTIME_PROVENANCE_MODE === 'strict') {
           const provReason = `Xác minh build thất bại: ${provTesting.reason || 'unknown'}`;
           testingResult = {
             ...(testingResult || {}),
@@ -4893,15 +4966,14 @@ const executeStep = async (id, opts) => {
             jobEventBus.emitJobLog(id, { text: `[FIXING] Lỗi thực thi Agent: ${fixExecErr.message}\n` });
             fixingResult = { output: fixExecErr.message, exitCode: 1 };
           }
-          // Rate-limit cua provider: retry-after co the hang gio/ngay => moi vong retry deu vo nghia.
+          // Rate-limit cua provider: retry vong FIXING ngay la vo nghia, nhung
+          // KHONG duoc coi la loi code => tam dung cho hoi phuc (giong TESTING).
           const rl = jobPolicy.detectRateLimit(jobPolicy.collectAgentOutput(fixingResult));
           if (rl.limited) {
             const retryAfter = rl.retryAfterMs ? ` (retry-after ${Math.round(rl.retryAfterMs / 1000)}s)` : '';
-            const msg = `Provider rate-limit${retryAfter}. Dừng pipeline, không retry lại.`;
-            jobEventBus.emitJobLog(id, { text: `\n[RATE-LIMIT] ${msg}\n` });
-            db.updateJob(id, { status: 'FAILED', current_step: 'FIXING', error_message: msg });
-            jobEventBus.emitJobStatus(id, { status: 'FAILED' });
-            jobEventBus.emitJobError(id, { error: msg });
+            const msg = `Provider rate-limit${retryAfter}`;
+            jobEventBus.emitJobLog(id, { text: `\n[RATE-LIMIT] ${msg} — tạm dừng chờ hồi phục, không retry mù.\n` });
+            pauseJobForTransient(id, { step: 'FIXING', reason: msg, retryAfterMs: rl.retryAfterMs });
             return;
           }
           // Provider/agent chết tạm thời (không phải lỗi code) => pause chờ hồi phục,
@@ -4913,12 +4985,14 @@ const executeStep = async (id, opts) => {
             return;
           }
           // Xác minh service chạy đúng build worktree (chống test trên bản cũ).
-          // Chỉ bắt buộc khi vòng sửa này THỰC SỰ ghi lại bằng chứng; fix thuần code/metadata
-          // không cần service đang chạy nên không được đánh trượt vì [NO_LISTENER].
+          // - Có listener nhưng hash cũ/chưa restart + vòng này CÓ ghi evidence
+          //   => đúng là chụp ảnh từ build cũ: đánh trượt.
+          // - KHÔNG còn listener => agent đã dừng service để nhả port như prompt
+          //   yêu cầu; không có build cũ nào đang chạy nên KHÔNG được đánh trượt.
           if (fixingResult && !fixingResult.timedOut && fixingResult.exitCode === 0) {
             const producedEvidence = evidenceDirLatestMtime(evidenceDir) > evMtimeBefore;
             const provFix = await verifyRuntimeProvenance(id, fixingPortCtx, 'FIXING');
-            if (!provFix.ok && producedEvidence && config.RUNTIME_PROVENANCE_MODE === 'strict') {
+            if (!provFix.ok && provFix.wrongBuild && producedEvidence && config.RUNTIME_PROVENANCE_MODE === 'strict') {
               fixingResult = {
                 ...fixingResult,
                 exitCode: 1,
@@ -4926,7 +5000,9 @@ const executeStep = async (id, opts) => {
               };
             } else if (!provFix.ok) {
               jobEventBus.emitJobLog(id, {
-                text: `[PROVENANCE] ⚠️ FIXING không có service đang chạy nhưng vòng này không ghi lại evidence mới — cho qua (VERIFY vẫn kiểm tra nội dung ảnh).\n`,
+                text: provFix.noListener
+                  ? '[PROVENANCE] ℹ️ FIXING: agent đã dừng service để nhả port (không còn listener) — chấp nhận vòng sửa, VERIFY vẫn chấm nội dung evidence.\n'
+                  : '[PROVENANCE] ⚠️ FIXING: chưa xác minh được build mới nhưng vòng này không ghi lại evidence mới — cho qua (VERIFY vẫn kiểm tra nội dung ảnh).\n',
                 level: 'warn'
               });
             }
@@ -5798,6 +5874,75 @@ const RESUMABLE_JOB_STATUSES = new Set(['FAILED', 'TIMED_OUT', 'CANCELLED', 'PAU
 const PHASE_STEP_NAMES = new Set(['PLANNING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING', 'MERGING']);
 
 /**
+ * Cách ly các file nằm trong `evidence/` nhưng KHÔNG được khai trong metadata.json
+ * (log runtime, ảnh debug, file tạm do agent thả vào).
+ *
+ * Vì sao không đánh trượt job: những file này không chứng minh cho test case nào,
+ * nên chúng chỉ làm bẩn thư mục evidence. Trước đây mỗi lần như vậy tốn một vòng
+ * FIXING (~20-40 phút) — PHUB-679 đã lặp nhiều vòng dù 28/28 ảnh đều PASS.
+ *
+ * @param {string} evidenceDir thư mục evidence của feature
+ * @param {string[]} files tên file (tương đối trong evidenceDir)
+ * @returns {{ok:number, dir:string|null}}
+ */
+function quarantineUndeclaredEvidence(evidenceDir, files) {
+  if (!evidenceDir || !Array.isArray(files) || files.length === 0) return { ok: 0, dir: null };
+  const day = new Date().toISOString().slice(0, 10);
+  const targetDir = path.join(path.dirname(evidenceDir), 'evidence_quarantine', day);
+  let ok = 0;
+  try {
+    fs.mkdirSync(targetDir, { recursive: true });
+  } catch (e) {
+    return { ok: 0, dir: null };
+  }
+  for (const rel of files) {
+    const src = path.join(evidenceDir, rel);
+    // Chặn thoát khỏi evidenceDir (đường dẫn ..)
+    if (!path.resolve(src).startsWith(path.resolve(evidenceDir))) continue;
+    if (!fs.existsSync(src)) continue;
+    if (fs.statSync(src).isDirectory()) continue;
+    let dest = path.join(targetDir, path.basename(rel));
+    if (fs.existsSync(dest)) {
+      dest = path.join(targetDir, `${Date.now()}-${path.basename(rel)}`);
+    }
+    try {
+      fs.renameSync(src, dest);
+      ok += 1;
+    } catch (e) {
+      // Khác ổ đĩa hoặc file đang bị giữ: copy rồi xoá.
+      try { fs.copyFileSync(src, dest); fs.unlinkSync(src); ok += 1; } catch (e2) {}
+    }
+  }
+  return { ok, dir: path.relative(path.dirname(evidenceDir), targetDir) };
+}
+
+/**
+ * Gom tên các file evidence được KHAI trong metadata.json (tests[].evidence|evidences|files).
+ * Chấp nhận cả array, string và object (agent có thể ghi kiểu gì cũng được).
+ * @param {object} metadataObj
+ * @returns {Set<string>}
+ */
+function collectDeclaredEvidenceNames(metadataObj) {
+  const declared = new Set();
+  const testsArr = (metadataObj && Array.isArray(metadataObj.tests)) ? metadataObj.tests : [];
+  for (const t of testsArr) {
+    if (!t || typeof t !== 'object') continue;
+    for (const field of ['evidence', 'evidences', 'files']) {
+      const v = t[field];
+      if (Array.isArray(v)) for (const f of v) declared.add(String(f));
+      else if (typeof v === 'string' && v) declared.add(v);
+      else if (v && typeof v === 'object') {
+        for (const [k, val] of Object.entries(v)) {
+          if (typeof k === 'string' && k) declared.add(k);
+          if (val && typeof val === 'object' && val.fileName) declared.add(String(val.fileName));
+        }
+      }
+    }
+  }
+  return declared;
+}
+
+/**
  * Job bi loi HA TANG (model/CLI/rate-limit) => PAUSED de CHO HOI PHUC thay vi
  * FAILED/FIXING. Khong tang `fix_attempt`, nho vay khong dot ngan sach retry
  * va khong day agent vao vong FIXING vo nghia.
@@ -5910,7 +6055,11 @@ async function resumeJobInternal(jobId, { mode = 'resume', auto = false } = {}) 
     delete pipe.last_error_kind;
     delete pipe.last_error_reason;
     delete pipe.retry_at;
-    delete pipe.transient_retry;
+    // `auto` = vong cho hoi phuc tu chay lai: GIU `transient_retry` de backoff
+    // leo thang (30s -> 30m) va cham nguong MAX_TRANSIENT_RETRIES. Neu xoa o
+    // day, job bi 429 se lap vo han moi 30s (vua dot token, vua day provider
+    // vao rate-limit nang hon). Nguoi dung bam Chay lai => reset nhu cu.
+    if (!auto) delete pipe.transient_retry;
   }
   // Moi lan chay lai duoc cap ngan sach thoi gian moi (deadline cu da het).
   delete pipe.deadline_at;
@@ -7035,5 +7184,7 @@ module.exports = {
   startTransientRecoveryLoop,
   startPortWaitRecoveryLoop,
   resumeJobInternal,
-  pauseJobForTransient
+  pauseJobForTransient,
+  // Cho test: phan loai ket qua xac minh build (NO_LISTENER vs build cu).
+  verifyRuntimeProvenance
 };

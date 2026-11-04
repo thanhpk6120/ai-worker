@@ -51,9 +51,9 @@ test('verifyTaskEvidence ghi PASS cho file hop le', () => {
   assert.equal(after.evidenceStatus['a.png'].verdict, 'PASS');
 });
 
-test('verifyTaskEvidence ghi FAILED cho file loi (undeclared - khong khai trong tests[])', () => {
+test('file lạ (undeclared) bị CÁCH LY khi mapping đầy đủ, không đánh trượt job', () => {
   const { featureDir, evidenceDir } = makeFeature();
-  fs.writeFileSync(path.join(evidenceDir, 'orphan.png'), Buffer.alloc(6000, 1));
+  fs.writeFileSync(path.join(evidenceDir, 'orphan.log'), 'log rac cua agent\n');
   fs.writeFileSync(path.join(evidenceDir, 'declared.png'), Buffer.alloc(6000, 1));
   fs.writeFileSync(path.join(evidenceDir, 'metadata.json'), JSON.stringify({
     taskCode: 'T-2',
@@ -68,13 +68,43 @@ test('verifyTaskEvidence ghi FAILED cho file loi (undeclared - khong khai trong 
     emit: () => {}
   });
 
-  assert.equal(res.failed, true, 'file undeclared phai lam verify fail');
+  // Mọi test case đã có evidence khai báo => file lạ chỉ là rác vệ sinh:
+  // chuyển sang evidence_quarantine/ thay vì đốt thêm một vòng FIXING.
+  assert.equal(fs.existsSync(path.join(evidenceDir, 'orphan.log')), false, 'file lạ phải bị chuyển khỏi evidence/');
+  assert.equal(res.failed, false, 'không được đánh trượt job chỉ vì log rác trong evidence/');
+  const quarantineRoot = path.join(path.dirname(evidenceDir), 'evidence_quarantine');
+  assert.equal(fs.existsSync(quarantineRoot), true, 'phải tạo thư mục cách ly để audit');
+  const after = JSON.parse(fs.readFileSync(path.join(evidenceDir, 'metadata.json'), 'utf8'));
+  assert.equal(after.evidenceStatus['declared.png'].status, 'PASS');
+  assert.equal(after.evidenceStatus['orphan.log'], undefined, 'file đã cách ly không còn là evidence');
+  assert.equal(Array.isArray(after.tests), true, 'tests[] phai con nguyen');
+});
+
+test('mapping THIẾU (test không khai evidence) + file lạ => vẫn FAIL như cũ', () => {
+  const { featureDir, evidenceDir } = makeFeature();
+  fs.writeFileSync(path.join(evidenceDir, 'orphan.png'), Buffer.alloc(6000, 1));
+  fs.writeFileSync(path.join(evidenceDir, 'declared.png'), Buffer.alloc(6000, 1));
+  fs.writeFileSync(path.join(evidenceDir, 'metadata.json'), JSON.stringify({
+    taskCode: 'T-3',
+    tests: [
+      { id: 'TC-01', name: 'TC-01', status: 'PASSED', evidence: ['declared.png'] },
+      { id: 'TC-02', name: 'TC-02', status: 'PASSED' } // không khai evidence
+    ]
+  }, null, 2), 'utf8');
+
+  const res = verifyTaskEvidence({
+    jobId: 'job-test-3',
+    evidenceDir,
+    featureDir,
+    taskCode: 'T-3',
+    emit: () => {}
+  });
+
+  assert.equal(res.failed, true, 'mapping chưa đầy đủ thì file lạ vẫn là lỗi ánh xạ');
+  assert.equal(fs.existsSync(path.join(evidenceDir, 'orphan.png')), true, 'không cách ly khi mapping còn thiếu');
   const after = JSON.parse(fs.readFileSync(path.join(evidenceDir, 'metadata.json'), 'utf8'));
   assert.equal(after.evidenceStatus['orphan.png'].status, 'FAILED');
-  assert.equal(after.evidenceStatus['orphan.png'].verdict, 'FAIL');
   assert.equal(after.evidenceStatus['declared.png'].status, 'PASS');
-  assert.equal(Array.isArray(after.tests), true, 'tests[] phai con nguyen');
-  assert.equal(after.tests.length, 1);
 });
 
 test('verifyTaskEvidence giu NOT VERIFY cho file chua duoc verify', () => {
