@@ -6189,5 +6189,526 @@
   window.aiWorker.openTaskAlertModal = openTaskAlertModal;
   window.aiWorker.closeTaskAlertModal = closeTaskAlertModal;
   window.aiWorker.jobIdFromHash = jobIdFromHash;
+
+  // =========================================================================
+  // PROCESS JANITOR (Dọn tiến trình rác)
+  // =========================================================================
+  let janitorAutoRefreshTimer = null;
+  let janitorRunsCache = [];
+  let janitorSelectedRunId = null;
+  let janitorIsRunning = false;
+
+  // Định dạng mốc thời gian ISO -> chuỗi đọc được. Chỉ dùng cho textContent.
+  function formatJanitorDateTime(value) {
+    if (!value) return '—';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return date.toLocaleString('vi-VN', { hour12: false });
+  }
+
+  // Định dạng thời lượng (ms) ngắn gọn cho danh sách và thẻ tóm tắt.
+  function formatJanitorDuration(ms) {
+    const value = Number(ms);
+    if (!Number.isFinite(value) || value < 0) return '—';
+    if (value < 1000) return `${Math.round(value)}ms`;
+    if (value < 60000) return `${(value / 1000).toFixed(1)}s`;
+    const totalSeconds = Math.floor(value / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}m ${seconds}s`;
+  }
+
+  function janitorTriggerLabel(trigger) {
+    const raw = (trigger === undefined || trigger === null) ? '' : String(trigger).trim();
+    const key = raw.toLowerCase();
+    if (key === 'manual') return 'Thủ công';
+    if (key === 'auto' || key === 'schedule' || key === 'interval') return 'Tự động';
+    if (key === 'startup' || key === 'boot') return 'Khởi động';
+    return raw || 'Không rõ';
+  }
+
+  function showJanitorError(message) {
+    const banner = document.getElementById('janitorErrorBanner');
+    const text = document.getElementById('janitorErrorText');
+    if (text) text.textContent = message || 'Đã xảy ra lỗi không xác định.';
+    if (banner) banner.classList.remove('hidden');
+  }
+
+  function clearJanitorError() {
+    const banner = document.getElementById('janitorErrorBanner');
+    if (banner) banner.classList.add('hidden');
+  }
+
+  function updateJanitorStatusUI(status) {
+    const chip = document.getElementById('janitorStatusChip');
+    const info = document.getElementById('janitorScheduleInfo');
+    const enabled = Boolean(status && status.enabled);
+
+    if (chip) {
+      chip.textContent = enabled ? 'BẬT' : 'TẮT';
+      chip.className = enabled ? 'janitor-chip is-on' : 'janitor-chip is-off';
+    }
+
+    if (info) {
+      if (!status) {
+        info.textContent = 'Không đọc được trạng thái Janitor.';
+      } else {
+        const parts = [];
+        const intervalMs = Number(status.interval_ms) || 0;
+        parts.push(intervalMs >= 60000
+          ? `Quét mỗi ${Math.round(intervalMs / 60000)} phút`
+          : (intervalMs > 0 ? `Quét mỗi ${Math.round(intervalMs / 1000)} giây` : 'Chưa rõ chu kỳ quét'));
+        if (status.enabled) {
+          parts.push(status.next_run_at
+            ? `lần chạy tới ${formatJanitorDateTime(status.next_run_at)}`
+            : 'chưa có lịch chạy tới');
+        } else {
+          parts.push('tự động tắt, chỉ chạy thủ công');
+        }
+        if (status.running) parts.push('đang chạy...');
+        if (status.dry_run) parts.push('chế độ mô phỏng (dry-run)');
+        const cfg = status.config || {};
+        if (cfg.grace_minutes !== undefined && cfg.grace_minutes !== null) {
+          parts.push(`ân hạn ${cfg.grace_minutes} phút`);
+        }
+        info.textContent = parts.join(' · ');
+      }
+      // Giữ nguyên chuỗi đầy đủ khi bị truncate trên màn hình hẹp.
+      info.title = info.textContent;
+    }
+
+    const runBtn = document.getElementById('btnJanitorRunNow');
+    if (runBtn) runBtn.disabled = Boolean(janitorIsRunning || (status && status.running));
+  }
+
+  function startJanitorAutoRefresh() {
+    stopJanitorAutoRefresh();
+    janitorAutoRefreshTimer = setInterval(() => {
+      const modal = document.getElementById('janitorModal');
+      if (!modal || modal.classList.contains('hidden')) {
+        stopJanitorAutoRefresh();
+        return;
+      }
+      loadJanitorStatus();
+    }, 15000);
+  }
+
+  function stopJanitorAutoRefresh() {
+    if (janitorAutoRefreshTimer) {
+      clearInterval(janitorAutoRefreshTimer);
+      janitorAutoRefreshTimer = null;
+    }
+  }
+
+  async function loadJanitorStatus() {
+    try {
+      const res = await fetchWithTimeout('/api/v1/janitor/status', {}, 8000);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      updateJanitorStatusUI(data || {});
+      // Tự xoá banner lỗi cũ nếu đây là lỗi trạng thái và lần này đã tải được.
+      const banner = document.getElementById('janitorErrorBanner');
+      const errorText = document.getElementById('janitorErrorText');
+      if (banner && !banner.classList.contains('hidden')
+        && errorText && errorText.textContent.indexOf('trạng thái Janitor') !== -1) {
+        clearJanitorError();
+      }
+      return data;
+    } catch (err) {
+      updateJanitorStatusUI(null);
+      showJanitorError('Không tải được trạng thái Janitor: ' + (err.message || 'lỗi kết nối'));
+      return null;
+    }
+  }
+
+  function renderJanitorRunsList() {
+    const list = document.getElementById('janitorRunsList');
+    const countEl = document.getElementById('janitorRunsCount');
+    if (countEl) countEl.textContent = String(janitorRunsCache.length);
+    if (!list) return;
+
+    if (!janitorRunsCache.length) {
+      list.innerHTML = `
+        <div class="text-[11px] text-slate-500 italic py-8 px-3 text-center leading-relaxed">
+          <i class="fa-solid fa-broom block text-xl mb-1.5 text-slate-600"></i>
+          Chưa có lần dọn tiến trình nào.<br>Bấm "Chạy ngay" hoặc chờ lịch quét tự động.
+        </div>`;
+      return;
+    }
+
+    list.innerHTML = janitorRunsCache.map((run) => {
+      const runId = (run && run.id) ? String(run.id) : '';
+      const active = Boolean(runId) && runId === String(janitorSelectedRunId || '');
+      const killed = Number(run && run.killed) || 0;
+      const ports = (run && Array.isArray(run.freed_ports)) ? run.freed_ports : [];
+      const isRunning = Boolean(run) && !run.finished_at;
+      const triggerCls = String((run && run.trigger) || '').toLowerCase() === 'manual'
+        ? 'janitor-tag is-manual'
+        : 'janitor-tag';
+      const itemCls = active ? 'janitor-run-item active' : 'janitor-run-item';
+      return `
+        <button type="button" data-janitor-run-id="${escapeHtml(runId)}" class="w-full text-left px-2.5 py-2 rounded-lg border transition ${itemCls}">
+          <div class="flex items-center justify-between gap-2">
+            <span class="text-[11px] font-semibold ${active ? 'janitor-accent' : 'text-slate-200'} truncate">${escapeHtml(formatJanitorDateTime(run && run.started_at))}</span>
+            <span class="${triggerCls} shrink-0">${escapeHtml(janitorTriggerLabel(run && run.trigger))}</span>
+          </div>
+          <div class="mt-1 flex items-center gap-2 text-[10px] flex-wrap">
+            <span class="${killed > 0 ? 'text-rose-300' : 'text-slate-500'}"><i class="fa-solid fa-broom mr-1"></i>Đã dọn ${killed}</span>
+            <span class="text-slate-500"><i class="fa-solid fa-network-wired mr-1"></i>${ports.length ? 'Port ' + escapeHtml(ports.join(', ')) : 'Không port'}</span>
+            <span class="text-slate-500 font-mono">${escapeHtml(formatJanitorDuration(run && run.duration_ms))}</span>
+            ${isRunning ? '<span class="text-amber-300"><i class="fa-solid fa-spinner fa-spin"></i> đang chạy</span>' : ''}
+          </div>
+        </button>`;
+    }).join('');
+  }
+
+  // Trả về mảng runs khi thành công, null khi lỗi (để không xoá trạng thái lỗi đang hiển thị).
+  async function loadJanitorRuns() {
+    try {
+      const res = await fetchWithTimeout('/api/v1/janitor/runs?limit=30', {}, 8000);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const runs = Array.isArray(data) ? data : ((data && Array.isArray(data.runs)) ? data.runs : []);
+      janitorRunsCache = runs;
+      renderJanitorRunsList();
+      return runs;
+    } catch (err) {
+      janitorRunsCache = [];
+      renderJanitorRunsList();
+      setJanitorDetailState('error', 'Không tải được lịch sử dọn tiến trình: ' + (err.message || 'lỗi kết nối'));
+      showJanitorError('Không tải được lịch sử dọn tiến trình: ' + (err.message || 'lỗi kết nối'));
+      return null;
+    }
+  }
+
+  // kind: 'ready' | 'empty' | 'loading' | 'error'
+  function setJanitorDetailState(kind, message) {
+    const emptyEl = document.getElementById('janitorDetailEmpty');
+    const contentEl = document.getElementById('janitorDetailContent');
+
+    if (kind === 'ready') {
+      if (emptyEl) emptyEl.classList.add('hidden');
+      if (contentEl) contentEl.classList.remove('hidden');
+      return;
+    }
+
+    if (contentEl) contentEl.classList.add('hidden');
+    if (emptyEl) {
+      const icon = kind === 'error'
+        ? 'fa-triangle-exclamation text-rose-400'
+        : (kind === 'loading' ? 'fa-spinner fa-spin text-slate-500' : 'fa-broom text-slate-600');
+      emptyEl.classList.remove('hidden');
+      emptyEl.innerHTML = `<i class="fa-solid ${icon} block text-xl mb-1.5"></i>${escapeHtml(message || '')}`;
+    }
+  }
+
+  function renderJanitorRunDetail(run) {
+    const report = (run && run.report) || {};
+    const killedList = Array.isArray(run && run.killed_list)
+      ? run.killed_list
+      : (Array.isArray(report.killed_list) ? report.killed_list : []);
+    const protectedList = Array.isArray(run && run.protected_list)
+      ? run.protected_list
+      : (Array.isArray(report.protected_list) ? report.protected_list : []);
+    const errors = Array.isArray(run && run.errors)
+      ? run.errors
+      : (Array.isArray(report.errors) ? report.errors : []);
+    // Log có thể là mảng dòng (đúng hợp đồng API) hoặc chuỗi thô (fallback phòng thủ).
+    const rawLog = (run && run.log !== undefined && run.log !== null) ? run.log : report.log;
+    let logLines = [];
+    if (Array.isArray(rawLog)) {
+      logLines = rawLog;
+    } else if (typeof rawLog === 'string') {
+      logLines = rawLog.split(/\r?\n/);
+    }
+    const ports = Array.isArray(run && run.freed_ports) ? run.freed_ports : [];
+    const scanned = Number(run && run.scanned) || 0;
+    const killed = Number(run && run.killed) || 0;
+    const protectedCount = (run && run.protected_count !== undefined && run.protected_count !== null)
+      ? Number(run.protected_count) || 0
+      : protectedList.length;
+    const isRunning = Boolean(run) && !run.finished_at;
+
+    const titleEl = document.getElementById('janitorRunDetailTitle');
+    if (titleEl) {
+      const runId = (run && run.id) ? String(run.id) : '';
+      titleEl.textContent = runId ? `${formatJanitorDateTime(run.started_at)} · ${runId.slice(0, 8)}` : '';
+    }
+
+    // Thẻ tóm tắt
+    const summary = document.getElementById('janitorRunSummary');
+    if (summary) {
+      const cards = [
+        { label: 'Quét', value: String(scanned), icon: 'fa-magnifying-glass', cls: 'text-slate-200' },
+        { label: 'Đã dọn', value: String(killed), icon: 'fa-broom', cls: killed > 0 ? 'text-rose-300' : 'text-slate-300' },
+        { label: 'Bảo vệ', value: String(protectedCount), icon: 'fa-shield-halved', cls: 'text-emerald-300' },
+        { label: 'Thời lượng', value: formatJanitorDuration(run && run.duration_ms), icon: 'fa-stopwatch', cls: 'text-slate-300' }
+      ];
+      summary.innerHTML = cards.map((card) => `
+        <div class="janitor-stat">
+          <div class="text-[9px] uppercase tracking-wider text-slate-500 flex items-center gap-1"><i class="fa-solid ${card.icon} text-[9px]"></i>${escapeHtml(card.label)}</div>
+          <div class="text-sm font-mono font-semibold ${card.cls} mt-0.5">${escapeHtml(card.value)}</div>
+        </div>`).join('');
+    }
+
+    // Dòng meta: trigger, port giải phóng, trạng thái
+    const meta = document.getElementById('janitorRunMeta');
+    if (meta) {
+      const dryRun = Boolean(run && run.dry_run) || Boolean(report.dry_run);
+      meta.innerHTML = `
+        <span class="px-1.5 py-0.5 rounded bg-surface-800 border border-slate-700">Trigger: ${escapeHtml(janitorTriggerLabel(run && run.trigger))}</span>
+        <span>Port giải phóng: ${ports.length ? escapeHtml(ports.join(', ')) : '—'}</span>
+        ${dryRun ? '<span class="janitor-accent"><i class="fa-solid fa-flask mr-1"></i>Dry-run: chỉ mô phỏng, không kill</span>' : ''}
+        ${isRunning ? '<span class="text-amber-300"><i class="fa-solid fa-spinner fa-spin mr-1"></i>Đang chạy...</span>' : ''}`;
+    }
+
+    // Bảng tiến trình đã dọn
+    const killedWrap = document.getElementById('janitorRunKilledWrap');
+    if (killedWrap) {
+      if (!killedList.length) {
+        killedWrap.innerHTML = `
+          <div class="janitor-stat text-center text-[11px] text-slate-500 italic">
+            <i class="fa-solid fa-circle-check text-emerald-400 mr-1"></i>Không có tiến trình nào bị dọn trong lần chạy này.
+          </div>`;
+      } else {
+        const rows = killedList.map((proc) => {
+          const item = proc || {};
+          const pid = (item.rootPid !== undefined && item.rootPid !== null) ? item.rootPid : item.pid;
+          const killedOk = item.killed === true;
+          const dryRunItem = Boolean(item.dry_run);
+          const statusCls = killedOk ? 'text-emerald-400' : (dryRunItem ? 'janitor-accent' : 'text-rose-400');
+          const statusText = killedOk ? 'Đã kill' : (dryRunItem ? 'Mô phỏng' : 'Thất bại');
+          const portText = Array.isArray(item.port) ? item.port.join(', ') : item.port;
+          const ageText = (item.ageMinutes !== undefined && item.ageMinutes !== null) ? item.ageMinutes : null;
+          const cmdTitle = item.cmd || item.name || '';
+          return `
+            <tr>
+              <td class="font-mono text-slate-400">${escapeHtml(pid !== undefined && pid !== null ? pid : '—')}</td>
+              <td class="janitor-cell-name text-slate-200 truncate" title="${escapeHtml(cmdTitle)}">${escapeHtml(item.name || '—')}</td>
+              <td class="janitor-cell-reason text-slate-400 truncate" title="${escapeHtml(item.reason || '')}">${escapeHtml(item.reason || '—')}</td>
+              <td class="font-mono text-slate-400">${(portText !== undefined && portText !== null && portText !== '') ? escapeHtml(portText) : '—'}</td>
+              <td class="font-mono text-slate-400">${ageText !== null ? escapeHtml(ageText) : '—'}</td>
+              <td class="font-semibold ${statusCls}">${statusText}${item.error ? `<span class="text-slate-500 font-normal ml-1" title="${escapeHtml(item.error)}">(chi tiết)</span>` : ''}</td>
+            </tr>`;
+        }).join('');
+        killedWrap.innerHTML = `
+          <div class="overflow-x-auto custom-scrollbar rounded-lg border border-slate-800">
+            <table class="janitor-table">
+              <thead>
+                <tr>
+                  <th>PID</th>
+                  <th>Tiến trình</th>
+                  <th>Lý do</th>
+                  <th>Port</th>
+                  <th>Tuổi (phút)</th>
+                  <th>Kết quả</th>
+                </tr>
+              </thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>`;
+      }
+    }
+
+    // Danh sách tiến trình được bảo vệ (rút gọn)
+    const protectedWrap = document.getElementById('janitorRunProtectedWrap');
+    if (protectedWrap) {
+      if (!protectedList.length) {
+        protectedWrap.innerHTML = '';
+      } else {
+        const shown = protectedList.slice(0, 30);
+        const more = protectedList.length - shown.length;
+        protectedWrap.innerHTML = `
+          <div class="janitor-stat">
+            <div class="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mb-1"><i class="fa-solid fa-shield-halved text-emerald-400 mr-1"></i>Được bảo vệ (${protectedList.length})</div>
+            <div class="flex flex-wrap gap-1">
+              ${shown.map((proc) => {
+                const item = proc || {};
+                return `<span class="px-1.5 py-0.5 rounded bg-surface-800 border border-slate-700 text-[10px] text-slate-400 font-mono" title="${escapeHtml(item.reason || '')}">${escapeHtml(item.pid)} · ${escapeHtml(item.name || '?')}</span>`;
+              }).join('')}
+              ${more > 0 ? `<span class="px-1.5 py-0.5 text-[10px] text-slate-500">+${more} nữa</span>` : ''}
+            </div>
+          </div>`;
+      }
+    }
+
+    // Lỗi khi kill
+    const errorsWrap = document.getElementById('janitorRunErrorsWrap');
+    if (errorsWrap) {
+      if (!errors.length) {
+        errorsWrap.innerHTML = '';
+      } else {
+        errorsWrap.innerHTML = `
+          <div class="rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-amber-200">
+            <div class="text-[10px] uppercase tracking-wider text-amber-300 font-semibold mb-1"><i class="fa-solid fa-triangle-exclamation mr-1"></i>Lỗi khi dọn (${errors.length})</div>
+            <ul class="list-disc janitor-error-list space-y-1 text-[11px] font-mono">
+              ${errors.slice(0, 20).map((msg) => `<li>${escapeHtml(msg)}</li>`).join('')}
+            </ul>
+          </div>`;
+      }
+    }
+
+    // Khối log (dùng textContent: an toàn, không cần escape HTML)
+    const logEl = document.getElementById('janitorRunLog');
+    const logCountEl = document.getElementById('janitorLogLines');
+    if (logCountEl) logCountEl.textContent = `${logLines.length} dòng`;
+    if (logEl) {
+      logEl.textContent = logLines.length
+        ? logLines.map((line) => String(line)).join('\n')
+        : '[EMPTY] Không có dòng log nào cho lần chạy này.';
+      logEl.scrollTop = 0;
+    }
+
+    setJanitorDetailState('ready');
+  }
+
+  async function selectJanitorRun(id) {
+    const runId = (id === undefined || id === null) ? '' : String(id);
+    if (!runId) return;
+    janitorSelectedRunId = runId;
+    renderJanitorRunsList();
+    setJanitorDetailState('loading', 'Đang tải chi tiết lần chạy...');
+
+    try {
+      const res = await fetchWithTimeout(`/api/v1/janitor/runs/${encodeURIComponent(runId)}`, {}, 10000);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (String(janitorSelectedRunId) !== runId) return; // Người dùng đã chọn lần chạy khác
+      const run = (data && (data.run || data)) || null;
+      if (!run || typeof run !== 'object') throw new Error('Phản hồi rỗng');
+      renderJanitorRunDetail(run);
+    } catch (err) {
+      if (String(janitorSelectedRunId) !== runId) return;
+      setJanitorDetailState('error', 'Không tải được chi tiết lần chạy: ' + (err.message || 'lỗi kết nối'));
+    }
+  }
+
+  // Tải song song status + danh sách, giữ (hoặc chọn mới) lần chạy đang xem.
+  async function refreshJanitorModal() {
+    clearJanitorError();
+    const [runs] = await Promise.all([loadJanitorRuns(), loadJanitorStatus()]);
+    if (!Array.isArray(runs)) return false;
+
+    const selectedStillExists = Boolean(janitorSelectedRunId)
+      && runs.some((run) => run && String(run.id) === String(janitorSelectedRunId));
+    const targetId = selectedStillExists
+      ? janitorSelectedRunId
+      : (runs[0] && runs[0].id ? runs[0].id : '');
+    if (targetId) {
+      await selectJanitorRun(targetId);
+    } else {
+      setJanitorDetailState('empty', 'Chưa có lần dọn tiến trình nào. Bấm "Chạy ngay" để dọn ngay.');
+    }
+    return true;
+  }
+
+  async function openJanitorModal() {
+    const modal = document.getElementById('janitorModal');
+    if (!modal) return;
+    modal.classList.remove('hidden');
+    clearJanitorError();
+    janitorSelectedRunId = null;
+    setJanitorDetailState('loading', 'Đang tải dữ liệu...');
+    await refreshJanitorModal();
+    // Nếu người dùng đã đóng modal trong lúc tải thì không tạo timer rò rỉ.
+    const modalAfterLoad = document.getElementById('janitorModal');
+    if (modalAfterLoad && !modalAfterLoad.classList.contains('hidden')) {
+      startJanitorAutoRefresh();
+    }
+  }
+
+  function closeJanitorModal() {
+    const modal = document.getElementById('janitorModal');
+    if (modal) modal.classList.add('hidden');
+    stopJanitorAutoRefresh();
+    janitorSelectedRunId = null;
+  }
+
+  async function runJanitorNow() {
+    if (janitorIsRunning) return;
+    const btn = document.getElementById('btnJanitorRunNow');
+    const icon = document.getElementById('janitorRunNowIcon');
+    const label = document.getElementById('janitorRunNowLabel');
+
+    janitorIsRunning = true;
+    if (btn) btn.disabled = true;
+    if (icon) icon.className = 'fa-solid fa-spinner fa-spin text-[11px]';
+    if (label) label.textContent = 'Đang dọn...';
+    clearJanitorError();
+
+    try {
+      const res = await fetchWithTimeout('/api/v1/janitor/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      }, 60000);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data || data.ok === false) {
+        const reason = (data && (data.error || data.reason)) || `HTTP ${res.status}`;
+        throw new Error(reason);
+      }
+
+      const killed = Number(data.report && data.report.killed) || 0;
+      showToast(
+        killed > 0 ? `Đã dọn ${killed} tiến trình rác.` : 'Đã chạy dọn tiến trình: không có tiến trình rác.',
+        killed > 0 ? 'success' : 'info'
+      );
+
+      await Promise.all([loadJanitorStatus(), loadJanitorRuns()]);
+      const newId = (data.record && data.record.id)
+        || (data.report && data.report.id)
+        || (janitorRunsCache[0] && janitorRunsCache[0].id);
+      if (newId) {
+        await selectJanitorRun(newId);
+      } else {
+        setJanitorDetailState('empty', 'Chưa có lần dọn tiến trình nào.');
+      }
+    } catch (err) {
+      const message = err && err.message ? err.message : 'lỗi kết nối';
+      showJanitorError('Chạy dọn tiến trình thất bại: ' + message);
+      showToast('Không chạy được dọn tiến trình: ' + message, 'error');
+    } finally {
+      janitorIsRunning = false;
+      if (icon) icon.className = 'fa-solid fa-play text-[11px]';
+      if (label) label.textContent = 'Chạy ngay';
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  // Khởi tạo event listeners cho Process Janitor
+  document.getElementById('btnOpenJanitorModal')?.addEventListener('click', openJanitorModal);
+  document.getElementById('btnCloseJanitorModal')?.addEventListener('click', closeJanitorModal);
+  document.getElementById('janitorModal')?.addEventListener('click', (e) => {
+    if (e.target.id === 'janitorModal') closeJanitorModal();
+  });
+  document.getElementById('btnJanitorRunNow')?.addEventListener('click', runJanitorNow);
+  document.getElementById('btnJanitorRefresh')?.addEventListener('click', async () => {
+    const ok = await refreshJanitorModal();
+    showToast(
+      ok ? 'Đã làm mới dữ liệu Dọn tiến trình.' : 'Không tải được dữ liệu Dọn tiến trình.',
+      ok ? 'info' : 'error'
+    );
+  });
+  // Ủy quyền sự kiện cho danh sách lần chạy (tránh nhúng id vào inline onclick).
+  document.getElementById('janitorRunsList')?.addEventListener('click', (e) => {
+    const item = e.target.closest('[data-janitor-run-id]');
+    if (!item) return;
+    const runId = item.getAttribute('data-janitor-run-id');
+    if (runId) selectJanitorRun(runId);
+  });
+
+  // Hỗ trợ phím ESC để đóng modal Dọn tiến trình
+  window.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const modal = document.getElementById('janitorModal');
+    if (modal && !modal.classList.contains('hidden')) closeJanitorModal();
+  });
+
+  window.aiWorker.openJanitorModal = openJanitorModal;
+  window.aiWorker.closeJanitorModal = closeJanitorModal;
+  window.aiWorker.loadJanitorStatus = loadJanitorStatus;
+  window.aiWorker.loadJanitorRuns = loadJanitorRuns;
+  window.aiWorker.selectJanitorRun = selectJanitorRun;
+  window.aiWorker.runJanitorNow = runJanitorNow;
 })();
 
