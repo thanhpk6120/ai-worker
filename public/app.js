@@ -16,6 +16,8 @@
     evidences: [],
     dualPlan: null,
     currentQuestion: null,
+    // true khi job đang chờ port (SSE waiting), dùng để không ẩn banner oan.
+    portWaiting: false,
     autoScroll: true,
     statusFilter: 'ALL',
     searchQuery: '',
@@ -41,7 +43,13 @@
     planCache: new Map(),
     searchDebounceTimer: null,
     fetchJobsAbortController: null,
-    fetchStatusAbortController: null
+    fetchStatusAbortController: null,
+    jobsFetchSeq: 0,           // B5: đếm request để bỏ qua response cũ
+    lastDetailFetchAt: {},     // C2: dedupe fetchJobDetails theo jobId
+    activeJobRenderRaf: null,  // C2: cờ gộp render trong 1 frame
+    stepperGeom: null,         // C4: cache toạ độ node stepper
+    stepperPathMap: null,      // C4: cache các path SVG để cập nhật thay vì xoá
+    rerunInFlight: false       // B3: đang gửi yêu cầu chạy lại
   };
 
   // Pipeline standard steps
@@ -59,10 +67,21 @@
     'PENDING': 'status-pending bg-amber-500/20 text-amber-300 border border-amber-500/40',
     'PAUSED': 'status-pending bg-amber-500/20 text-amber-300 border border-amber-500/40',
     'DONE': 'status-done',
+    // B6: bổ sung FAILED (trước đây rơi về màu xám status-todo)
+    'FAILED': 'status-failed',
     'CANCELLED': 'status-cancelled',
     'TIMED_OUT': 'status-failed',
     'ARCHIVED': 'status-archived'
   };
+
+  // B8: các trạng thái job đang chạy -> chặn thao tác nguy hiểm (lưu trữ / xoá / đổi status)
+  const RUNNING_STATUSES = ['PLANNING', 'PENDING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING', 'MERGING'];
+  // B10: một nguồn sự thật duy nhất cho danh sách trạng thái được phép xoá task.
+  // Giữ 'DONE'/'TODO' như hành vi cũ (trước đây task DONE vẫn xoá được ở cả card
+  // và chi tiết); bổ sung TIMED_OUT/ARCHIVED để 2 nơi không còn lệch nhau.
+  const DELETABLE_STATUSES = ['TO DO', 'TODO', 'DONE', 'FAILED', 'CANCELLED', 'TIMED_OUT', 'ARCHIVED'];
+  // B3: các trạng thái được phép hiện nút "Chạy lại"
+  const RERUNNABLE_STATUSES = ['FAILED', 'TIMED_OUT', 'CANCELLED', 'PAUSED'];
 
   // =========================================================================
   // INITIALIZATION ON DOM READY
@@ -75,14 +94,16 @@
     loadSettings();
     loadWorkspaces();
 
-    // Polling background: Xoá check document.hidden cho status để trạng thái luôn chạy ngầm
+    // C6: SSE đã realtime -> poll chậm lại (15s) và bỏ qua khi tab đang ẩn
     setInterval(() => {
+      if (document.hidden) return;
       fetchJobsListSilently();
-    }, 8000);
+    }, 15000);
 
+    // C6: trạng thái hệ thống không cần cập nhật mỗi 15s
     setInterval(() => {
       fetchSystemStatus();
-    }, 15000);
+    }, 30000);
 
     setInterval(() => {
       if (document.hidden) return; // Chỉ tạm dừng thay đổi UI tick giây
@@ -137,40 +158,50 @@
     const wrapped = [];
 
     for (const line of lines) {
-      const clean = line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\r/g, '');
-      if (clean.length <= maxCols) {
+      // Nhánh nhanh: dòng thuần ASCII không ANSI, ngắn hơn giới hạn -> giữ nguyên
+      if (line.indexOf('\x1b') === -1 && line.indexOf('\r') === -1 && line.length <= maxCols) {
         wrapped.push(line);
         continue;
       }
 
-      let remaining = line;
-      while (remaining.length > 0) {
-        const cleanRem = remaining.replace(/\x1b\[[0-9;]*m/g, '').replace(/\r/g, '');
-        if (cleanRem.length <= maxCols) {
-          wrapped.push(remaining);
+      // C1: quét MỘT lần để lấy độ dài visible + vị trí thật của từng ký tự visible
+      const visReal = [];    // visReal[k] = index thật trong line của ký tự visible thứ k
+      const visIsSpace = []; // visIsSpace[k] = ký tự visible thứ k có phải khoảng trắng
+      let inAnsi = false;
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (ch === '\x1b') { inAnsi = true; continue; }
+        if (inAnsi) { if (ch === 'm') inAnsi = false; continue; }
+        if (ch === '\r') continue;
+        visReal.push(i);
+        visIsSpace.push(ch === ' ');
+      }
+
+      const totalVisible = visReal.length;
+      if (totalVisible <= maxCols) {
+        wrapped.push(line);
+        continue;
+      }
+
+      // C1: cắt theo chỉ số đã quét sẵn, mỗi vòng chỉ quét ngược tối đa maxCols -> O(L)
+      let vs = 0;
+      while (vs < totalVisible) {
+        if (totalVisible - vs <= maxCols) {
+          wrapped.push(line.substring(visReal[vs]));
           break;
         }
-
-        let breakIdx = -1;
-        let visibleCount = 0;
-        let inAnsi = false;
-
-        for (let j = 0; j < remaining.length; j++) {
-          if (remaining[j] === '\x1b') inAnsi = true;
-          if (!inAnsi) {
-            if (remaining[j] === ' ') breakIdx = j;
-            visibleCount++;
-            if (visibleCount >= maxCols) break;
-          }
-          if (inAnsi && remaining[j] === 'm') inAnsi = false;
+        const windowEnd = vs + maxCols; // index visible kết thúc (exclusive)
+        let breakVis = -1;
+        for (let k = windowEnd - 1; k > vs; k--) {
+          if (visIsSpace[k]) { breakVis = k; break; }
         }
-
-        if (breakIdx > 0) {
-          wrapped.push(remaining.substring(0, breakIdx));
-          remaining = remaining.substring(breakIdx + 1);
+        if (breakVis > vs) {
+          wrapped.push(line.substring(visReal[vs], visReal[breakVis]));
+          vs = breakVis + 1; // bỏ khoảng trắng dùng để ngắt dòng
         } else {
-          wrapped.push(remaining.substring(0, maxCols));
-          remaining = remaining.substring(maxCols);
+          const endReal = windowEnd < totalVisible ? visReal[windowEnd] : line.length;
+          wrapped.push(line.substring(visReal[vs], endReal));
+          vs = windowEnd;
         }
       }
     }
@@ -220,26 +251,34 @@
 
   function scheduleTerminalWrite(chunk, isWriteln = false, timestamp = null) {
     if (!state.term || !chunk) return;
-    const targetCols = (state.term && state.term.cols) ? state.term.cols : 120;
-    const reflowed = reflowCliText(chunk);
-    const wrapped = wordWrapToCols(reflowed, targetCols);
-    const formatted = formatLogWithTimestamp(isWriteln ? wrapped + '\r\n' : wrapped, timestamp);
-    terminalBuffer.push(formatted);
+    // C1: chỉ đẩy RAW text vào buffer; reflow + wrap + format chạy MỘT lần cho cả khối trong rAF
+    terminalBuffer.push({ text: chunk, isWriteln, timestamp });
 
     if (!terminalFlushRaf) {
       terminalFlushRaf = requestAnimationFrame(() => {
-        if (state.term && terminalBuffer.length > 0) {
-          const combined = terminalBuffer.join('');
-          terminalBuffer = [];
-          state.term.write(combined);
-          if (state.autoScroll) {
-            state.term.scrollToBottom();
-          }
-        }
         terminalFlushRaf = null;
+        const pending = terminalBuffer;
+        terminalBuffer = [];
+        if (!state.term || pending.length === 0) return;
+
+        const targetCols = state.term.cols || 120;
+        const rawCombined = pending
+          .map((item) => (item.isWriteln ? item.text + '\n' : item.text))
+          .join('');
+        const reflowed = reflowCliText(rawCombined);
+        const wrapped = wordWrapToCols(reflowed, targetCols);
+        const formatted = formatLogWithTimestamp(wrapped, pending[0].timestamp);
+        state.term.write(formatted);
+        if (state.autoScroll) {
+          state.term.scrollToBottom();
+        }
       });
     }
   }
+
+  // C7: debounce fit terminal + chỉ resize khi số cột thực sự đổi
+  let fitTerminalTimer = null;
+  let lastFitCols = 0;
 
   // Hàm đảm bảo xterm luôn nở full 100% khung hiển thị
   function fitTerminal() {
@@ -257,11 +296,22 @@
 
     const availableWidth = width - 24;
     const calculatedCols = Math.max(80, Math.floor(availableWidth / 7.55));
-    if (calculatedCols > state.term.cols) {
+    // C7: chỉ resize khi cols thực sự thay đổi (tránh reflow terminal mỗi lần gọi)
+    if (calculatedCols !== lastFitCols && calculatedCols !== state.term.cols) {
+      lastFitCols = calculatedCols;
       try {
         state.term.resize(calculatedCols, state.term.rows || 25);
       } catch (e) {}
     }
+  }
+
+  // C7: gộp các lần cần fit vào 1 lần debounce 150ms
+  function scheduleFitTerminal() {
+    if (fitTerminalTimer) clearTimeout(fitTerminalTimer);
+    fitTerminalTimer = setTimeout(() => {
+      fitTerminalTimer = null;
+      fitTerminal();
+    }, 150);
   }
 
   function clearTerminalScreen(options = {}) {
@@ -336,24 +386,22 @@
 
     // Gọi fitTerminal nhiều lần để đảm bảo bắt đúng kích thước container sau khi CSS và fonts đã load
     requestAnimationFrame(fitTerminal);
-    setTimeout(fitTerminal, 50);
-    setTimeout(fitTerminal, 150);
-    setTimeout(fitTerminal, 350);
+    scheduleFitTerminal();
     if (document.fonts && document.fonts.ready) {
-      document.fonts.ready.then(fitTerminal);
+      document.fonts.ready.then(() => scheduleFitTerminal());
     }
 
     // Dùng ResizeObserver để tự động tính toán lại số cột (cols) tràn full chiều rộng khung log
     if (window.ResizeObserver) {
       const ro = new ResizeObserver(() => {
-        fitTerminal();
+        scheduleFitTerminal();
       });
       ro.observe(container);
     }
 
     window.addEventListener('resize', () => {
       if (state.activeTab === 'terminal') {
-        fitTerminal();
+        scheduleFitTerminal();
       }
     });
     writeTerminalBanner('AI Worker Live Terminal Sẵn Sàng.\nChọn một Job để xem streaming logs.');
@@ -567,7 +615,7 @@
     // Window Resize for Terminal
     window.addEventListener('resize', () => {
       if (state.fitAddon && state.activeTab === 'terminal') {
-        try { state.fitAddon.fit(); } catch (e) {}
+        scheduleFitTerminal();
       }
     });
 
@@ -589,6 +637,33 @@
     // Active Job Actions
     document.getElementById('btnCancelJob')?.addEventListener('click', handleCancelActiveJob);
     document.getElementById('btnRerunJob')?.addEventListener('click', handleRerunActiveJob);
+    // B3: "Thử lại ngay" trên banner chờ hồi phục (PAUSED + lỗi TRANSIENT)
+    document.getElementById('btnRetryRecovery')?.addEventListener('click', retryRecoveryNow);
+    document.getElementById('btnRetryPortWait')?.addEventListener('click', retryPortWaitNow);
+    // B15: làm mới nhanh job đang xem + danh sách job
+    document.getElementById('btnRefreshActiveJob')?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      if (btn && btn.disabled) return;
+      if (btn) btn.disabled = true;
+      try {
+        let detailOk = true;
+        if (state.activeJobId) {
+          // Bỏ qua dedupe C2 cho thao tác làm mới chủ động của người dùng
+          state.lastDetailFetchAt[state.activeJobId] = 0;
+          detailOk = await fetchJobDetails(state.activeJobId, false);
+        }
+        await fetchJobsListSilently();
+        // B18: chỉ báo thành công khi thật sự lấy được dữ liệu
+        showToast(
+          detailOk ? 'Đã làm mới trạng thái task.' : 'Không thể làm mới trạng thái task (kiểm tra kết nối).',
+          detailOk ? 'success' : 'error'
+        );
+      } catch (err) {
+        showToast('Không thể làm mới trạng thái task: ' + (err.message || 'lỗi kết nối'), 'error');
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    });
     document.getElementById('btnViewRawJson')?.addEventListener('click', openRawJsonModal);
     document.getElementById('btnCloseRawJson')?.addEventListener('click', closeRawJsonModal);
     document.getElementById('btnCopyRawJson')?.addEventListener('click', copyRawJsonContent);
@@ -633,11 +708,11 @@
           const action = actionBtn.getAttribute('data-action');
           const jobId = actionBtn.getAttribute('data-job-id');
           if (action === 'archive') {
-            window.aiWorker.archiveTask(jobId);
+            window.aiWorker.archiveTask(jobId, actionBtn);
           } else if (action === 'delete') {
-            window.aiWorker.deleteTask(jobId);
+            window.aiWorker.deleteTask(jobId, actionBtn);
           } else if (action === 'dequeue') {
-            window.aiWorker.dequeueTask(jobId);
+            window.aiWorker.dequeueTask(jobId, actionBtn);
           }
           return;
         }
@@ -695,13 +770,39 @@
   // =========================================================================
   // 3. API FETCH & DATA HANDLING
   // =========================================================================
+  // B5: giữ bản job mới hơn khi response chứa updated_at cũ hơn state đang có
+  function mergeJobsPreferNewer(incomingJobs) {
+    if (!Array.isArray(incomingJobs)) return [];
+    const existingById = new Map(state.jobs.map((j) => [j.id, j]));
+    return incomingJobs.map((job) => {
+      const old = existingById.get(job.id);
+      if (!old) return job;
+      const oldTime = Date.parse(old.updated_at || '') || 0;
+      const newTime = Date.parse(job.updated_at || '') || 0;
+      return newTime < oldTime ? old : job;
+    });
+  }
+
+  // B18: fetch có timeout để spinner không quay mãi khi server treo
+  async function fetchWithTimeout(url, options = {}, ms = 10000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ms);
+    try {
+      return await fetch(url, { ...options, signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async function fetchJobsList() {
     const listContainer = document.getElementById('jobsListContainer');
+    const seq = ++state.jobsFetchSeq; // B5
     try {
       const res = await fetch('/api/v1/jobs');
       if (!res.ok) throw new Error('Failed to fetch jobs list: ' + res.statusText);
       const data = await res.json();
-      state.jobs = Array.isArray(data) ? data : (data.jobs || []);
+      if (seq !== state.jobsFetchSeq) return; // B5: response của request cũ -> bỏ qua
+      state.jobs = mergeJobsPreferNewer(Array.isArray(data) ? data : (data.jobs || []));
       renderJobsList();
       updateJobsCountBadge();
     } catch (err) {
@@ -719,11 +820,13 @@
   }
 
   async function fetchJobsListSilently() {
+    const seq = ++state.jobsFetchSeq; // B5
     try {
       const res = await fetch('/api/v1/jobs');
       if (!res.ok) return;
       const data = await res.json();
-      const newJobs = Array.isArray(data) ? data : (data.jobs || []);
+      if (seq !== state.jobsFetchSeq) return; // B5: response của request cũ -> bỏ qua
+      const newJobs = mergeJobsPreferNewer(Array.isArray(data) ? data : (data.jobs || []));
       state.jobs = newJobs;
       renderJobsList();
       updateJobsCountBadge();
@@ -741,10 +844,16 @@
   }
 
   async function fetchJobDetails(jobId, clearTerm = true) {
+    // C2: dedupe - cùng jobId mà lần gọi trước chưa quá 500ms thì bỏ qua
+    const now = Date.now();
+    if (now - (state.lastDetailFetchAt[jobId] || 0) < 500) return false;
+    state.lastDetailFetchAt[jobId] = now;
     try {
       const res = await fetch(`/api/v1/jobs/${jobId}`);
       if (!res.ok) throw new Error('Failed to load job details');
       const data = await res.json();
+      // B2: response về muộn của job cũ không được ghi đè job đang xem
+      if (jobId !== state.activeJobId) return false;
       const job = data.job || data;
 
       state.activeJob = job;
@@ -764,8 +873,10 @@
         state.connectedJobId = jobId;
         connectLogStream(jobId, clearTerm);
       }
+      return true;
     } catch (err) {
       console.error('Error fetching job details:', err);
+      return false;
     }
   }
 
@@ -899,8 +1010,8 @@
         if (state.activeJob && (state.activeJob.id === targetJobId || !payload.jobId)) {
           if (newStep) state.activeJob.current_step = newStep;
           if (payload.runner) state.activeJob.runner = payload.runner;
-          renderActiveJobDetail();
-          updateStepper(state.activeJob);
+          // C2: gộp render detail + stepper vào 1 frame
+          scheduleActiveJobRender();
           loadPlanFiles(targetJobId);
           fetchJobDetails(targetJobId, false);
         }
@@ -916,6 +1027,24 @@
         const payload = JSON.parse(event.data);
         const newStatus = payload.status;
         const targetJobId = payload.jobId || jobId;
+
+        // Trạng thái phụ "đang chờ port": chỉ cập nhật banner, KHÔNG fetch lại
+        // chi tiết job (tránh tải payload lớn mỗi 15s trong lúc chờ).
+        if (payload.waiting === true) {
+          if (targetJobId === state.activeJobId || !state.activeJobId) {
+            showPortWaitBanner({
+              waiting: true,
+              waitedMs: Number(payload.waiting_ms) || 0,
+              holders: payload.waiting_holders || null,
+              phase: newStatus
+            });
+          }
+          return;
+        }
+        if (payload.waiting === false) {
+          hidePortWaitBanner();
+          return;
+        }
 
         const targetJob = state.jobs.find((j) => j.id === targetJobId);
         if (targetJob) {
@@ -936,11 +1065,14 @@
           if (payload.is_queued !== undefined) state.activeJob.is_queued = !!payload.is_queued;
           if (newStatus === 'PENDING') state.activeJob.had_pending = 1;
           if (newStatus === 'FIXING') state.activeJob.fix_attempt = 1;
-          renderActiveJobDetail();
+          // C2: gộp render detail + stepper vào 1 frame
+          scheduleActiveJobRender();
           loadPlanFiles(targetJobId);
         }
-        // Luôn fetch lại job details khi status thay đổi để đồng bộ toàn bộ DB state
-        fetchJobDetails(targetJobId, false);
+        // B2: chỉ đồng bộ chi tiết khi status thuộc job đang xem
+        if (targetJobId === state.activeJobId) {
+          fetchJobDetails(targetJobId, false);
+        }
         renderJobsList();
         fetchSystemStatus();
       } catch (e) {
@@ -997,6 +1129,10 @@
     state.eventSource.addEventListener('question', (event) => {
       try {
         const questionData = JSON.parse(event.data);
+        // B1: câu hỏi của job khác đang xem thì bỏ qua (tránh mở modal sai job)
+        if (questionData.jobId && state.activeJobId && questionData.jobId !== state.activeJobId) return;
+        // Lưu jobId ngay trên câu hỏi để lúc submit trả lời đúng job
+        questionData.jobId = questionData.jobId || jobId || state.activeJobId || null;
         state.currentQuestion = questionData;
         if (state.activeJob) {
           state.activeJob.status = 'PENDING';
@@ -1168,7 +1304,13 @@
       ? `<span class="px-1.5 py-0.5 rounded bg-slate-800 text-brand-300 border border-brand-500/25 text-[10px] font-mono font-medium tracking-tight truncate max-w-[110px] inline-block mr-1 align-middle" title="${escapeHtml(job.task_code)}">${escapeHtml(job.task_code)}</span>`
       : '';
     const isArchived = status === 'ARCHIVED';
-    const canDelete = ['TO DO', 'DONE', 'CANCELLED', 'FAILED', 'ARCHIVED'].includes(status);
+    // B10: dùng chung DELETABLE_STATUSES; B8: chặn thao tác khi job đang chạy
+    const isRunning = RUNNING_STATUSES.includes(status);
+    const canDelete = DELETABLE_STATUSES.includes(status) && !isRunning;
+    const archiveDisabledClass = isRunning ? 'opacity-30 cursor-not-allowed pointer-events-none' : '';
+    const archiveTitle = isRunning
+      ? 'Không thể lưu trữ khi Task đang chạy'
+      : (isArchived ? 'Bỏ lưu trữ' : 'Lưu trữ Task');
     return `
       <div class="flex items-center justify-between gap-1.5 mb-1.5">
         <div class="flex items-center gap-1 min-w-0">
@@ -1182,11 +1324,11 @@
           <button class="p-1 rounded hover:bg-amber-500/20 text-emerald-400 hover:text-amber-300 transition" title="Xóa task khỏi hàng đợi chờ" data-action="dequeue" data-job-id="${job.id}">
             <i class="fa-solid fa-clock-rotate-left text-[11px]"></i>
           </button>` : ''}
-          <button class="p-1 rounded hover:bg-amber-500/20 text-slate-400 hover:text-amber-300 transition" title="${isArchived ? 'Bỏ lưu trữ' : 'Lưu trữ Task'}" data-action="archive" data-job-id="${job.id}">
+          <button class="p-1 rounded hover:bg-amber-500/20 text-slate-400 hover:text-amber-300 transition ${archiveDisabledClass}" title="${archiveTitle}" data-action="archive" data-job-id="${job.id}" ${isRunning ? 'disabled' : ''}>
             <i class="fa-solid fa-box-archive text-[11px] ${isArchived ? 'text-amber-400' : ''}"></i>
           </button>
-          <!-- Nút Xóa Task -->
-          <button class="p-1 rounded hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 transition ${canDelete ? '' : 'hidden'}" title="Xóa Task" data-action="delete" data-job-id="${job.id}">
+          <!-- Nút Xóa Task (B8: ẩn khi job đang chạy) -->
+          <button class="p-1 rounded hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 transition ${canDelete ? '' : 'hidden'}" title="Xóa Task" data-action="delete" data-job-id="${job.id}" ${canDelete ? '' : 'disabled'}>
             <i class="fa-solid fa-trash-can text-[11px]"></i>
           </button>
         </div>
@@ -1263,59 +1405,81 @@
       }
     }
 
-    // 2. Render hoặc cập nhật từng card theo filtered (T2.1 incremental render)
+    // 2a. Tạo trước các card còn thiếu để có đủ node cho việc sắp xếp thứ tự
     for (const job of filtered) {
+      if (state.jobCardMap.has(job.id)) continue;
       const isActive = job.id === state.activeJobId;
-      let entry = state.jobCardMap.get(job.id);
-
-      if (!entry) {
-        // Tạo node mới
-        const el = document.createElement('div');
-        el.className = `job-card ${isActive ? 'active' : ''} p-2.5 rounded-lg border transition cursor-pointer relative group`;
-        el.setAttribute('data-job-id', job.id);
-        el.innerHTML = buildJobCardHtml(job, isActive);
-        entry = {
-          el,
-          lastStatus: job.status,
-          lastIsActive: isActive,
-          lastIsQueued: !!job.is_queued,
-          lastSoState: JSON.stringify(job.systemone_state)
-        };
-        state.jobCardMap.set(job.id, entry);
-        container.appendChild(el);
-      } else {
-        // Cập nhật node đã có
-        const el = entry.el;
-        if (entry.lastIsActive !== isActive) {
-          if (isActive) el.classList.add('active');
-          else el.classList.remove('active');
-          entry.lastIsActive = isActive;
-        }
-
-        const soStateStr = JSON.stringify(job.systemone_state);
-        const isQueued = !!job.is_queued;
-        if (entry.lastStatus !== job.status || entry.lastIsQueued !== isQueued || entry.lastSoState !== soStateStr) {
-          el.innerHTML = buildJobCardHtml(job, isActive);
-          entry.lastStatus = job.status;
-          entry.lastIsQueued = isQueued;
-          entry.lastSoState = soStateStr;
-        }
-
-        // Re-append giữ đúng thứ tự DOM theo filtered (appendChild di chuyển node có sẵn - O(1))
-        container.appendChild(el);
-      }
+      const el = document.createElement('div');
+      el.className = `job-card ${isActive ? 'active' : ''} p-2.5 rounded-lg border transition cursor-pointer relative group`;
+      el.setAttribute('data-job-id', job.id);
+      el.innerHTML = buildJobCardHtml(job, isActive);
+      state.jobCardMap.set(job.id, {
+        el,
+        lastStatus: job.status,
+        lastIsActive: isActive,
+        lastIsQueued: !!job.is_queued,
+        lastSoState: JSON.stringify(job.systemone_state)
+      });
+      container.appendChild(el);
     }
+
+    // 2b. Tính trước card kế tiếp (C8) để chỉ can thiệp DOM khi vị trí đã sai
+    const expectedNextEls = new Array(filtered.length).fill(null);
+    let upcomingEl = null;
+    for (let idx = filtered.length - 1; idx >= 0; idx--) {
+      expectedNextEls[idx] = upcomingEl;
+      const entry = state.jobCardMap.get(filtered[idx].id);
+      if (entry && entry.el.parentNode === container) upcomingEl = entry.el;
+    }
+
+    // 2c. Cập nhật nội dung từng card + giữ đúng thứ tự DOM (T2.1 incremental render)
+    filtered.forEach((job, idx) => {
+      const entry = state.jobCardMap.get(job.id);
+      if (!entry) return;
+      const el = entry.el;
+      const isActive = job.id === state.activeJobId;
+
+      if (entry.lastIsActive !== isActive) {
+        if (isActive) el.classList.add('active');
+        else el.classList.remove('active');
+        entry.lastIsActive = isActive;
+      }
+
+      const soStateStr = JSON.stringify(job.systemone_state);
+      const isQueued = !!job.is_queued;
+      if (entry.lastStatus !== job.status || entry.lastIsQueued !== isQueued || entry.lastSoState !== soStateStr) {
+        el.innerHTML = buildJobCardHtml(job, isActive);
+        entry.lastStatus = job.status;
+        entry.lastIsQueued = isQueued;
+        entry.lastSoState = soStateStr;
+      }
+
+      // C8: chỉ move node khi nextElementSibling hiện tại khác vị trí mong đợi
+      const expectedNext = expectedNextEls[idx];
+      if (el.nextElementSibling !== expectedNext) {
+        container.insertBefore(el, expectedNext);
+      }
+    });
 
     // Tự động chọn task đầu tiên nếu chưa có task nào được chọn
     if (!state.activeJobId && filtered.length > 0) {
       selectJob(filtered[0].id);
     }
 
+    // B3: đồng bộ nút "Chạy lại" theo job đang xem
+    const activeInList = filtered.find((j) => j.id === state.activeJobId);
+    if (activeInList) updateRerunButton(activeInList);
+
     updateJobsCountBadge(filtered.length);
   }
 
   function selectJob(jobId) {
     state.activeJobId = jobId;
+    // B1: đổi job -> đóng modal câu hỏi và xoá câu hỏi của job cũ
+    closeQuestionModal();
+    state.currentQuestion = null;
+    // Đổi job -> banner chờ port của job cũ không còn đúng.
+    hidePortWaitBanner();
     renderJobsList();
 
     const emptyState = document.getElementById('emptyJobState');
@@ -1323,10 +1487,11 @@
     if (emptyState) emptyState.classList.add('hidden');
     if (activeContainer) activeContainer.classList.remove('hidden');
 
+    // Bỏ qua dedupe C2: đổi job thì luôn nạp chi tiết mới
+    state.lastDetailFetchAt[jobId] = 0;
     fetchJobDetails(jobId, true);
-    fitTerminal();
-    setTimeout(fitTerminal, 60);
-    setTimeout(fitTerminal, 200);
+    // C7: gộp mọi lần fit vào 1 debounce thay vì chuỗi setTimeout
+    scheduleFitTerminal();
   }
 
   // --- Render Active Job Detail Dashboard ---
@@ -1517,41 +1682,92 @@
     // Update Pipeline Stepper
     updateStepper(job);
 
+    // Banner chờ port: đang chờ (SSE) hoặc đã PAUSED vì hết thời gian chờ.
+    try {
+      let portPipe = job.pipeline_config;
+      if (typeof portPipe === 'string') { try { portPipe = JSON.parse(portPipe); } catch (e) { portPipe = {}; } }
+      if (job.status === 'PAUSED' && portPipe && portPipe.pause_kind === 'PORT_WAIT') {
+        showPortWaitBanner({
+          waiting: false,
+          reason: portPipe.waiting_reason || job.error_message || '',
+          nextAt: Number(portPipe.next_auto_resume_at) || 0
+        });
+      } else if (!state.portWaiting) {
+        hidePortWaitBanner();
+      }
+    } catch (e) {}
+
     // Pending Alert Banner
     const pendingBanner = document.getElementById('pendingAlertBanner');
     const pendingText = document.getElementById('pendingAlertText');
     if (pendingBanner) {
       if (job.status === 'PENDING') {
         pendingBanner.classList.remove('hidden');
-        if (state.currentQuestion) {
-          let qText = state.currentQuestion.question;
-          try {
-            if (typeof qText === 'string' && qText.trim().startsWith('[')) {
-              const parsed = JSON.parse(qText);
-              if (Array.isArray(parsed) && parsed.length > 0) {
-                qText = parsed.map((item, i) => `${i + 1}. ${item.question || item.title}`).join(' | ');
+        if (pendingText) {
+          if (state.currentQuestion) {
+            let qText = state.currentQuestion.question;
+            try {
+              if (typeof qText === 'string' && qText.trim().startsWith('[')) {
+                const parsed = JSON.parse(qText);
+                if (Array.isArray(parsed) && parsed.length > 0) {
+                  qText = parsed.map((item, i) => `${i + 1}. ${item.question || item.title}`).join(' | ');
+                }
               }
-            }
-          } catch (e) {}
-          pendingText.textContent = qText || 'Agent đang yêu cầu bạn làm rõ một số quyết định.';
+            } catch (e) {}
+            pendingText.textContent = qText || 'Agent đang yêu cầu bạn làm rõ một số quyết định.';
+          } else {
+            // B16: không giữ lại text của job trước khi chưa có câu hỏi mới
+            pendingText.textContent = 'Task đang chờ bạn phản hồi...';
+          }
         }
       } else {
         pendingBanner.classList.add('hidden');
       }
     }
 
+    // B3: banner chờ hồi phục khi job PAUSED do lỗi tạm thời (TRANSIENT)
+    const recoveryBanner = document.getElementById('recoveryAlertBanner');
+    if (recoveryBanner) {
+      let recoveryCfg = job.pipeline_config;
+      if (typeof recoveryCfg === 'string') { try { recoveryCfg = JSON.parse(recoveryCfg); } catch (e) { recoveryCfg = null; } }
+      const lastErrorKind = (recoveryCfg && typeof recoveryCfg === 'object')
+        ? String(recoveryCfg.last_error_kind || '').toUpperCase()
+        : '';
+      const isWaitingRecovery = (job.status || '').toUpperCase() === 'PAUSED' && lastErrorKind === 'TRANSIENT';
+      recoveryBanner.classList.toggle('hidden', !isWaitingRecovery);
+    }
+
     // Populate Task Status Select & Setup Delete Task Button
     const statusSelect = document.getElementById('taskStatusSelect');
+    const statusLocked = RUNNING_STATUSES.includes((job.status || '').toUpperCase());
     if (statusSelect) {
       const curStatus = (job.status || 'TO DO').toUpperCase();
-      statusSelect.value = curStatus;
+      // B7: trạng thái chưa có trong danh sách tĩnh -> thêm option động, không để value rỗng
+      let hasOption = Array.from(statusSelect.options).some((o) => o.value === curStatus);
+      if (!hasOption && curStatus) {
+        const opt = document.createElement('option');
+        opt.value = curStatus;
+        opt.textContent = curStatus;
+        statusSelect.appendChild(opt);
+        hasOption = true;
+      }
+      statusSelect.value = hasOption ? curStatus : 'TO DO';
+      // B8: khoá đổi trạng thái khi job đang chạy
+      statusSelect.disabled = statusLocked;
+      statusSelect.title = statusLocked ? 'Không thể đổi trạng thái khi Task đang chạy Pipeline' : '';
+    }
+
+    const updateStatusBtn = document.getElementById('btnUpdateStatus');
+    if (updateStatusBtn) {
+      updateStatusBtn.disabled = statusLocked;
+      updateStatusBtn.title = statusLocked ? 'Không thể đổi trạng thái khi Task đang chạy Pipeline' : 'Lưu Status';
     }
 
     const deleteBtn = document.getElementById('btnDeleteTask');
     if (deleteBtn) {
-      const allowedDelete = ['TODO', 'TO DO', 'DONE', 'CANCELLED', 'FAILED'];
+      // B10: dùng chung DELETABLE_STATUSES; B8: job đang chạy không được xoá
       const curStatus = (job.status || '').toUpperCase().trim();
-      if (allowedDelete.includes(curStatus)) {
+      if (DELETABLE_STATUSES.includes(curStatus) && !statusLocked) {
         deleteBtn.classList.remove('hidden');
         deleteBtn.disabled = false;
       } else {
@@ -1559,6 +1775,9 @@
         deleteBtn.disabled = true;
       }
     }
+
+    // B3: cập nhật nút "Chạy lại" theo trạng thái job
+    updateRerunButton(job);
 
     // Dual Plans & Evidence Hub
     renderDualPlan();
@@ -1586,8 +1805,6 @@
     const container = document.getElementById('stepperNodesContainer');
     if (!svg || !container) return;
 
-    svg.innerHTML = ''; // Xóa các đường vẽ cũ
-
     const status = (job.status || 'TO DO').toUpperCase();
     const currentStep = (job.current_step || status).toUpperCase();
 
@@ -1599,42 +1816,71 @@
     const hasReachedPlanning = ALL_AFTER_PLANNING.includes(status) || ALL_AFTER_PLANNING.includes(currentStep);
     const hasReachedImplement = ALL_AFTER_IMPLEMENT.includes(status) || ALL_AFTER_IMPLEMENT.includes(currentStep);
     const hasReachedTesting = ALL_AFTER_TESTING.includes(status) || ALL_AFTER_TESTING.includes(currentStep);
-    const hasReachedVerify = ALL_AFTER_VERIFY.includes(status) || ALL_AFTER_VERIFY.includes(currentStep);
     const hasReachedMerging = status === 'MERGING' || currentStep === 'MERGING' || status === 'DONE' || currentStep === 'DONE';
     const isDone = status === 'DONE' || currentStep === 'DONE';
 
     const hasTouchedPending = status === 'PENDING' || currentStep === 'PENDING' || Boolean(Number(job.had_pending)) || Boolean(job.had_pending) || (Array.isArray(job.questions) && job.questions.length > 0);
     const hasTouchedFixing = status === 'FIXING' || currentStep === 'FIXING' || Boolean(Number(job.had_fixing)) || Boolean(job.had_fixing) || getFixAttemptFromJob(job) > 0;
-    // Lấy toạ độ tâm các node (y luôn là 17px - tâm của vòng tròn 34px)
-    const getNodeCenter = (id) => {
-      const el = document.getElementById(id);
-      if (!el) return { x: 0, y: 17 };
-      const circle = el.querySelector('.stepper-circle') || el;
-      return {
-        x: el.offsetLeft + (circle.offsetLeft || 0) + (circle.offsetWidth / 2 || 17),
-        y: 17
-      };
-    };
+    // B12: đã chạm FIXING thì cũng coi như đã qua VERIFY (đồng bộ với updateStepper)
+    const hasReachedVerify = ALL_AFTER_VERIFY.includes(status) || ALL_AFTER_VERIFY.includes(currentStep) || hasTouchedFixing;
 
-    const pTodo = getNodeCenter('stepNode_TODO');
-    const pPlan = getNodeCenter('stepNode_PLANNING');
-    const pPend = getNodeCenter('stepNode_PENDING');
-    const pImp = getNodeCenter('stepNode_IMPLEMENT');
-    const pTest = getNodeCenter('stepNode_TESTING');
-    const pVerify = getNodeCenter('stepNode_VERIFY');
-    const pFix = getNodeCenter('stepNode_FIXING');
-    const pMerge = getNodeCenter('stepNode_MERGING');
-    const pDone = getNodeCenter('stepNode_DONE');
-    const createPath = (d, className) => {
-      const pathEl = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-      pathEl.setAttribute('d', d);
-      pathEl.setAttribute('class', className);
-      svg.appendChild(pathEl);
-      return pathEl;
+    // C4: cache toạ độ node theo kích thước container, chỉ đo lại khi kích thước đổi
+    const geomKey = `${container.clientWidth}x${container.clientHeight}`;
+    let points = (state.stepperGeom && state.stepperGeom.key === geomKey) ? state.stepperGeom.points : null;
+    if (!points) {
+      // Lấy toạ độ tâm các node (y luôn là 17px - tâm của vòng tròn 34px)
+      const getNodeCenter = (id) => {
+        const el = document.getElementById(id);
+        if (!el) return { x: 0, y: 17 };
+        const circle = el.querySelector('.stepper-circle') || el;
+        return {
+          x: el.offsetLeft + (circle.offsetLeft || 0) + (circle.offsetWidth / 2 || 17),
+          y: 17
+        };
+      };
+      points = {
+        todo: getNodeCenter('stepNode_TODO'),
+        plan: getNodeCenter('stepNode_PLANNING'),
+        pend: getNodeCenter('stepNode_PENDING'),
+        imp: getNodeCenter('stepNode_IMPLEMENT'),
+        test: getNodeCenter('stepNode_TESTING'),
+        verify: getNodeCenter('stepNode_VERIFY'),
+        fix: getNodeCenter('stepNode_FIXING'),
+        merge: getNodeCenter('stepNode_MERGING'),
+        done: getNodeCenter('stepNode_DONE')
+      };
+      state.stepperGeom = { key: geomKey, points };
+    }
+
+    const pTodo = points.todo;
+    const pPlan = points.plan;
+    const pPend = points.pend;
+    const pImp = points.imp;
+    const pTest = points.test;
+    const pVerify = points.verify;
+    const pFix = points.fix;
+    const pMerge = points.merge;
+    const pDone = points.done;
+
+    // C4: không xoá svg.innerHTML mỗi lần vẽ; cập nhật path đã có theo id
+    if (!state.stepperPathMap) state.stepperPathMap = new Map();
+    const pathMap = state.stepperPathMap;
+    const usedIds = new Set();
+    const setPath = (id, d, className) => {
+      usedIds.add(id);
+      let pathEl = pathMap.get(id);
+      if (!pathEl) {
+        pathEl = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        svg.appendChild(pathEl);
+        pathMap.set(id, pathEl);
+      }
+      if (pathEl.getAttribute('d') !== d) pathEl.setAttribute('d', d);
+      if (pathEl.getAttribute('class') !== className) pathEl.setAttribute('class', className);
     };
 
     // 1. Đường nối TO DO -> PLANNING (chỉ chạm mép ngoài hình tròn, không chạy xuyên qua)
-    createPath(
+    setPath(
+      'todo-plan',
       `M ${pTodo.x + 17} 17 L ${pPlan.x - 17} 17`,
       hasReachedPlanning ? 'stepper-svg-path active' : 'stepper-svg-path'
     );
@@ -1649,54 +1895,63 @@
         ? 'stepper-svg-path active stroke-emerald-400'
         : 'stepper-svg-path';
       // Đường chính đi xuyên qua node PENDING
-      createPath(
-        `M ${pPlan.x + 17} 17 L ${pPend.x - 17} 17`,
-        pendingInClass
-      );
-      createPath(
-        `M ${pPend.x + 17} 17 L ${pImp.x - 17} 17`,
-        pendingOutClass
-      );
+      setPath('plan-pending', `M ${pPlan.x + 17} 17 L ${pPend.x - 17} 17`, pendingInClass);
+      setPath('pending-implement', `M ${pPend.x + 17} 17 L ${pImp.x - 17} 17`, pendingOutClass);
     } else {
       // KHÔNG chạm PENDING: ĐƯỜNG NỐI VÒNG LÊN TRÊN ĐẦU PENDING RỒI VÒNG XUỐNG IMPLEMENT!
-      createPath(
+      setPath(
+        'plan-implement-bridge',
         `M ${pPlan.x + 15} 9 Q ${pPend.x} -14 ${pImp.x - 15} 9`,
         hasReachedImplement ? 'stepper-svg-path stepper-svg-bridge' : 'stepper-svg-path'
       );
     }
     // 3. Đường nối IMPLEMENT -> TESTING (chỉ chạm mép ngoài hình tròn)
-    createPath(
+    setPath(
+      'implement-testing',
       `M ${pImp.x + 17} 17 L ${pTest.x - 17} 17`,
       hasReachedTesting ? 'stepper-svg-path active' : 'stepper-svg-path'
     );
     // 4. Đường chính TESTING -> VERIFY -> FIXING -> DONE (xuyên tâm FIXING, không bypass)
-    createPath(
+    setPath(
+      'testing-verify',
       `M ${pTest.x + 17} 17 L ${pVerify.x - 17} 17`,
       hasReachedVerify ? 'stepper-svg-path active' : 'stepper-svg-path'
     );
     if (hasTouchedFixing) {
       // Đường chính đi xuyên qua node FIXING: vàng khi active, xanh khi xong
-      createPath(
+      setPath(
+        'verify-fixing',
         `M ${pVerify.x + 17} 17 L ${pFix.x - 17} 17`,
         status === 'FIXING' ? 'stepper-svg-path pending stroke-amber-400' : 'stepper-svg-path active'
       );
-      createPath(
+      setPath(
+        'fixing-merging',
         `M ${pFix.x + 17} 17 L ${pMerge.x - 17} 17`,
         hasReachedMerging ? (status === 'MERGING' ? 'stepper-svg-path pending stroke-amber-400' : 'stepper-svg-path active') : 'stepper-svg-path'
       );
     } else {
       // KHÔNG chạm FIXING: ĐƯỜNG NỐI VÒNG LÊN TRÊN ĐẦU FIXING RỒI VÒNG XUỐNG MERGING!
-      createPath(
+      setPath(
+        'verify-merging-bridge',
         `M ${pVerify.x + 15} 9 Q ${pFix.x} -14 ${pMerge.x - 15} 9`,
         hasReachedMerging ? 'stepper-svg-path stepper-svg-bridge' : 'stepper-svg-path'
       );
     }
 
     // 5. Đường nối MERGING -> DONE
-    createPath(
+    setPath(
+      'merging-done',
       `M ${pMerge.x + 17} 17 L ${pDone.x - 17} 17`,
       isDone ? 'stepper-svg-path active' : 'stepper-svg-path'
     );
+
+    // C4: dọn các path không còn dùng (khi đổi nhánh PENDING/FIXING)
+    for (const [id, pathEl] of pathMap.entries()) {
+      if (!usedIds.has(id)) {
+        pathEl.remove();
+        pathMap.delete(id);
+      }
+    }
   }
 
 
@@ -1706,7 +1961,9 @@
     const currentStep = (job.current_step || status).toUpperCase();
 
     if (currentStepNameEl) {
-      currentStepNameEl.textContent = status === 'PENDING' ? 'PENDING (Chờ làm rõ Q&A)' : currentStep;
+      // B12: khi DONE phải hiển thị 'DONE' (backend có thể trả current_step = 'COMPLETED')
+      const displayStep = (status === 'DONE' || currentStep === 'COMPLETED') ? 'DONE' : currentStep;
+      currentStepNameEl.textContent = status === 'PENDING' ? 'PENDING (Chờ làm rõ Q&A)' : displayStep;
     }
 
     const nodeTodo = document.getElementById('stepNode_TODO');
@@ -1734,9 +1991,10 @@
     const hasReachedPlanning = maxIdx >= 1 || ['PENDING', 'FIXING'].includes(status) || ['PENDING', 'FIXING'].includes(currentStep);
     const hasReachedImplement = maxIdx >= 2 || ['FIXING'].includes(status) || ['FIXING'].includes(currentStep);
     const hasReachedTesting = maxIdx >= 3 || ['FIXING'].includes(status) || ['FIXING'].includes(currentStep);
-    const hasReachedVerify = maxIdx >= 4;
     const hasTouchedPending = status === 'PENDING' || Boolean(Number(job.had_pending)) || Boolean(job.had_pending) || (Array.isArray(job.questions) && job.questions.length > 0);
     const hasTouchedFixing = status === 'FIXING' || currentStep === 'FIXING' || Boolean(Number(job.had_fixing)) || Boolean(job.had_fixing) || getFixAttemptFromJob(job) > 0;
+    // B12: đã chạm FIXING cũng coi như đã qua VERIFY
+    const hasReachedVerify = maxIdx >= 4 || hasTouchedFixing;
     const isDone = status === 'DONE' || currentStep === 'DONE';
 
     if (nodeTodo) {
@@ -1811,6 +2069,117 @@
     });
   }
 
+  // C2: gộp render detail + stepper vào 1 frame, chống gọi trùng
+  // (renderActiveJobDetail đã gọi updateStepper bên trong nên không gọi lặp)
+  function scheduleActiveJobRender() {
+    if (state.activeJobRenderRaf) return;
+    state.activeJobRenderRaf = requestAnimationFrame(() => {
+      state.activeJobRenderRaf = null;
+      if (!state.activeJob) return;
+      renderActiveJobDetail();
+    });
+  }
+
+  // B3: chỉ hiện nút "Chạy lại" với job đã dừng/lỗi; disable khi đang gửi
+  function updateRerunButton(job) {
+    const btn = document.getElementById('btnRerunJob');
+    if (!btn) return;
+    const status = ((job && job.status) || '').toUpperCase();
+    if (!job || !RERUNNABLE_STATUSES.includes(status)) {
+      btn.classList.add('hidden');
+      btn.disabled = state.rerunInFlight;
+      return;
+    }
+    btn.classList.remove('hidden');
+    btn.disabled = state.rerunInFlight;
+  }
+
+  // B3: "Thử lại ngay" cho banner chờ hồi phục (mode resume, không hỏi lại)
+  async function retryRecoveryNow() {
+    const jobId = state.activeJobId || (state.activeJob && state.activeJob.id);
+    if (!jobId) return;
+    const btn = document.getElementById('btnRetryRecovery');
+    if (btn && btn.disabled) return;
+    if (btn) btn.disabled = true;
+    try {
+      const res = await fetch(`/api/v1/jobs/${jobId}/rerun`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'resume' })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showToast(data.error || 'Thử lại thất bại', 'error');
+        return;
+      }
+      showToast(data.message || 'Đã gửi yêu cầu thử lại task.', 'success');
+      state.lastDetailFetchAt[jobId] = 0;
+      fetchJobsListSilently();
+      fetchJobDetails(jobId, false);
+    } catch (err) {
+      showToast('Thử lại thất bại: ' + (err.message || 'lỗi kết nối'), 'error');
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  // --- Banner "đang chờ port" (TESTING/FIXING cần service của workspace) ---
+  function showPortWaitBanner(info = {}) {
+    const banner = document.getElementById('portWaitBanner');
+    const text = document.getElementById('portWaitText');
+    if (!banner) return;
+    state.portWaiting = Boolean(info.waiting);
+    let msg;
+    if (info.waiting) {
+      const secs = Math.round((Number(info.waitedMs) || 0) / 1000);
+      msg = `Đang chờ port cho bước ${info.phase || 'TESTING'} — đã chờ ${secs}s.`
+        + (info.holders ? ` Port đang bị giữ: ${info.holders}.` : '')
+        + ' Task sẽ tự chạy tiếp ngay khi port được nhả.';
+    } else {
+      msg = `Đã tạm dừng vì hết thời gian chờ port. ${info.reason || ''}`.trim();
+      if (info.nextAt) {
+        const mins = Math.max(0, Math.round((Number(info.nextAt) - Date.now()) / 60000));
+        msg += ` Hệ thống sẽ tự thử lại sau ~${mins} phút.`;
+      }
+    }
+    if (text) text.textContent = msg;
+    banner.classList.remove('hidden');
+  }
+
+  function hidePortWaitBanner() {
+    state.portWaiting = false;
+    const banner = document.getElementById('portWaitBanner');
+    if (banner) banner.classList.add('hidden');
+  }
+
+  async function retryPortWaitNow() {
+    const jobId = state.activeJobId || (state.activeJob && state.activeJob.id);
+    if (!jobId) return;
+    const btn = document.getElementById('btnRetryPortWait');
+    if (btn && btn.disabled) return;
+    if (btn) btn.disabled = true;
+    try {
+      const res = await fetch(`/api/v1/jobs/${jobId}/rerun`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'resume' })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showToast(data.error || 'Thử lại thất bại', 'error');
+        return;
+      }
+      showToast(data.message || 'Đã gửi yêu cầu thử lại.', 'success');
+      state.lastDetailFetchAt[jobId] = 0;
+      fetchJobsListSilently();
+      fetchJobDetails(jobId, false);
+    } catch (err) {
+      showToast('Thử lại thất bại: ' + (err.message || 'lỗi kết nối'), 'error');
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
   // --- Render Dual Plan (Dev Plan & Test Plan) ---
   function renderDualPlan() {
     const devContainer = document.getElementById('devPlanContent');
@@ -1867,6 +2236,14 @@
     return 'badge-method bg-surface-800 text-slate-300 border border-slate-700';
   }
 
+  // C3: gán nội dung pane qua DocumentFragment (một lần chèn DOM, không nối innerHTML nhiều lần)
+  function setPaneHtml(pane, html) {
+    if (!pane) return;
+    const tpl = document.createElement('template');
+    tpl.innerHTML = html;
+    pane.replaceChildren(tpl.content);
+  }
+
   // --- Render Multi-Verification Evidence Hub ---
   function renderEvidenceHub() {
     const countBadge = document.getElementById('evidenceCountBadge');
@@ -1874,10 +2251,12 @@
       countBadge.textContent = `${state.evidences.length} mục`;
     }
 
-    const uiGallery = document.getElementById('uiEvidenceGallery');
-    const apiList = document.getElementById('apiEvidenceList');
-    const logsList = document.getElementById('logsEvidenceList');
-    const dbList = document.getElementById('dbEvidenceList');
+    // C3: chỉ lấy pane đang hiển thị -> các pane khác không bị dựng lại (lazy khi switch tab)
+    const activeSubTab = state.activeEvidenceSubTab || 'ui';
+    const uiGallery = activeSubTab === 'ui' ? document.getElementById('uiEvidenceGallery') : null;
+    const apiList = activeSubTab === 'api' ? document.getElementById('apiEvidenceList') : null;
+    const logsList = activeSubTab === 'logs' ? document.getElementById('logsEvidenceList') : null;
+    const dbList = activeSubTab === 'db' ? document.getElementById('dbEvidenceList') : null;
 
     const evFilename = (e) => String(e.filename || e.fileName || (e.file_path ? e.file_path.split('/').pop().split('?')[0] : '') || '').toLowerCase();
     const evExplicitChannel = (e) => {
@@ -1920,15 +2299,15 @@
     // 1. UI Screenshots
     if (uiGallery) {
       if (uiEvidences.length === 0) {
-        uiGallery.innerHTML = `
+        setPaneHtml(uiGallery, `
           <div class="col-span-2 text-center py-12 text-slate-500 text-xs">
             <i class="fa-regular fa-images text-2xl mb-2 text-slate-600 block"></i>
             <p>Chưa có ảnh chụp màn hình kiểm thử UI.</p>
             <p class="text-[11px] text-slate-600 mt-1">Ảnh chụp CloakBrowser sẽ xuất hiện tại bước TESTING.</p>
           </div>
-        `;
+        `);
       } else {
-        uiGallery.innerHTML = uiEvidences
+        setPaneHtml(uiGallery, uiEvidences
           .map((item, idx) => {
             const imgSrc = item.url || item.file_path || '';
             const status = evidenceStatus(item);
@@ -1980,22 +2359,22 @@
               </div>
             `;
           })
-          .join('');
+          .join(''));
       }
     }
 
     // 2. API Test Results
     if (apiList) {
       if (apiEvidences.length === 0) {
-        apiList.innerHTML = `
+        setPaneHtml(apiList, `
           <div class="text-center py-12 text-slate-500 text-xs">
             <i class="fa-solid fa-server text-2xl mb-2 text-slate-600 block"></i>
             <p>Chưa có kết quả API Test.</p>
             <p class="text-[11px] text-slate-600 mt-1">Các kiểm thử HTTP assertions sẽ hiển thị tại đây.</p>
           </div>
-        `;
+        `);
       } else {
-        apiList.innerHTML = apiEvidences
+        setPaneHtml(apiList, apiEvidences
           .map((api, idx) => {
             const method = ((api.method || (api.request && api.request.method)) || 'GET').toUpperCase();
             const endpoint = api.endpoint || api.path || (api.request && api.request.path) || '/';
@@ -2047,22 +2426,22 @@
               </div>
             `;
           })
-          .join('');
+          .join(''));
       }
     }
 
     // 3. Service Logs Results
     if (logsList) {
       if (logEvidences.length === 0) {
-        logsList.innerHTML = `
+        setPaneHtml(logsList, `
           <div class="text-center py-12 text-slate-500 text-xs">
             <i class="fa-solid fa-shield-virus text-2xl mb-2 text-slate-600 block"></i>
             <p>Không phát hiện lỗi Runtime nào từ Service Logs.</p>
             <p class="text-[11px] text-slate-600 mt-1">Dấu vết log và Exception sẽ hiển thị tại đây.</p>
           </div>
-        `;
+        `);
       } else {
-        logsList.innerHTML = logEvidences
+        setPaneHtml(logsList, logEvidences
           .map((item, idx) => {
             const serviceName = item.service_name || item.service || 'Service App';
             const level = ((item.level || (item.error || item.stack_trace ? 'ERROR' : (item.warn ? 'WARN' : 'INFO')))).toUpperCase();
@@ -2123,22 +2502,22 @@
               </div>
             `;
           })
-          .join('');
+          .join(''));
       }
     }
 
     // 4. Database Query Results
     if (dbList) {
       if (dbEvidences.length === 0) {
-        dbList.innerHTML = `
+        setPaneHtml(dbList, `
           <div class="text-center py-12 text-slate-500 text-xs">
             <i class="fa-solid fa-table-list text-2xl mb-2 text-slate-600 block"></i>
             <p>Chưa có dữ liệu đối soát Database.</p>
             <p class="text-[11px] text-slate-600 mt-1">Kết quả so khớp dữ liệu SQL assertions sẽ hiển thị tại đây.</p>
           </div>
-        `;
+        `);
       } else {
-        dbList.innerHTML = dbEvidences
+        setPaneHtml(dbList, dbEvidences
           .map((db, idx) => {
             const tableName = db.table || db.tableName || db.target || 'Database Table';
             const query = db.query || db.sql || 'SELECT * FROM ...';
@@ -2196,7 +2575,7 @@
               </div>
             `;
           })
-          .join('');
+          .join(''));
       }
     }
   }
@@ -2270,14 +2649,7 @@
     if (uptimeEl) {
       uptimeEl.textContent = formatDuration(state.systemStatus.uptimeSeconds);
     }
-    // Chỉ đếm thời lượng khi task thực sự đang chạy (PLANNING, IMPLEMENT, TESTING, VERIFY, FIXING)
-    if (state.activeJob) {
-      const status = ((state.activeJob.status || '')).toUpperCase();
-      const isRunning = ['PLANNING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING'].includes(status);
-      if (isRunning) {
-        state.activeJob.runtime_ms = (Number(state.activeJob.runtime_ms) || 0) + 1000;
-      }
-    }
+    // B11: KHÔNG cộng dồn runtime_ms ở client; server (event runtime / job details) là nguồn sự thật
     renderActiveJobDuration();
   }
 
@@ -2290,11 +2662,16 @@
     if (!durationEl) return;
 
     const runtimeMs = Number(state.activeJob.runtime_ms);
-    if (Number.isFinite(runtimeMs) && runtimeMs >= 0) {
+    const hasRuntime = state.activeJob.runtime_ms !== null
+      && state.activeJob.runtime_ms !== undefined
+      && Number.isFinite(runtimeMs)
+      && runtimeMs >= 0;
+    if (hasRuntime) {
       durationEl.textContent = formatDuration(Math.floor(runtimeMs / 1000));
       return;
     }
-    durationEl.textContent = '00:00:00';
+    // B11: chưa có runtime_ms từ server -> hiển thị '—' thay vì số liệu tự bịa
+    durationEl.textContent = '—';
   }
 
   // =========================================================================
@@ -2502,7 +2879,11 @@
   // --- Active Job Control Actions (Cancel & Rerun) ---
   async function handleCancelActiveJob() {
     if (!state.activeJobId) return;
+    // B17: chống double-submit
+    const btn = document.getElementById('btnCancelTask') || document.getElementById('btnCancelJob');
+    if (btn && btn.disabled) return;
     if (!confirm('Bạn có chắc chắn muốn hủy Job #' + state.activeJobId + '?')) return;
+    if (btn) btn.disabled = true;
 
     try {
       const res = await fetch(`/api/v1/jobs/${state.activeJobId}/cancel`, {
@@ -2513,12 +2894,15 @@
       fetchJobsList();
       fetchSystemStatus();
     } catch (err) {
-      alert('Lỗi: ' + err.message);
+      showToast('Lỗi hủy Job: ' + (err.message || 'không xác định'), 'error');
+    } finally {
+      if (btn) btn.disabled = false;
     }
   }
   async function handlePauseTask() {
     if (!state.activeJobId) return;
     const btn = document.getElementById('btnPauseTask');
+    if (btn && btn.disabled) return;
     const oldHtml = btn ? btn.innerHTML : '';
     if (btn) {
       btn.disabled = true;
@@ -2536,6 +2920,8 @@
       fetchSystemStatus();
     } catch (err) {
       showToast(err.message, 'error');
+    } finally {
+      // B4: luôn khôi phục nút (kể cả thành công) để không kẹt chữ "Đang dừng..."
       if (btn) {
         btn.disabled = false;
         btn.innerHTML = oldHtml;
@@ -2546,6 +2932,7 @@
   async function handleResumeTask() {
     if (!state.activeJobId) return;
     const btn = document.getElementById('btnResumeTask');
+    if (btn && btn.disabled) return;
     const oldHtml = btn ? btn.innerHTML : '';
     if (btn) {
       btn.disabled = true;
@@ -2563,6 +2950,8 @@
       fetchSystemStatus();
     } catch (err) {
       showToast(err.message, 'error');
+    } finally {
+      // B4: luôn khôi phục nút (kể cả thành công) để không kẹt chữ "Đang tiếp tục..."
       if (btn) {
         btn.disabled = false;
         btn.innerHTML = oldHtml;
@@ -2570,22 +2959,44 @@
     }
   }
 
+  // B3: chạy lại job qua route mới POST /api/v1/jobs/:id/rerun với body { mode }
   async function handleRerunActiveJob() {
-    if (!state.activeJobId) return;
-    if (!confirm('Bạn có muốn khởi động chạy lại Job này?')) return;
+    const jobId = state.activeJobId || (state.activeJob && state.activeJob.id);
+    if (!jobId) return;
+    const btn = document.getElementById('btnRerunJob');
+    // B17: chống double-submit
+    if (btn && btn.disabled) return;
+
+    // Mặc định resume (tiếp tục từ bước lỗi); Cancel = chạy lại từ đầu
+    const mode = confirm('Tiếp tục từ bước lỗi? OK = tiếp tục, Cancel = chạy lại từ đầu') ? 'resume' : 'restart';
+
+    state.rerunInFlight = true;
+    updateRerunButton(state.activeJob);
+    if (btn) btn.disabled = true;
     try {
-      clearTerminalScreen({ ignoreHistory: true, marker: Date.now() - 500 });
-      const res = await fetch(`/api/v1/jobs/${state.activeJobId}/rerun`, {
-        method: 'POST'
+      const res = await fetch(`/api/v1/jobs/${jobId}/rerun`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode })
       });
-      if (!res.ok) throw new Error('Rerun Job thất bại');
-      const data = await res.json();
-      const newId = data.job?.id || data.id || state.activeJobId;
-      await fetchJobsList();
-      fetchSystemStatus();
-      selectJob(newId);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showToast(data.error || 'Chạy lại thất bại', 'error');
+        return;
+      }
+      showToast(
+        data.message || (mode === 'resume' ? 'Đã yêu cầu tiếp tục chạy lại Task.' : 'Đã yêu cầu chạy lại Task từ đầu.'),
+        'success'
+      );
+      state.lastDetailFetchAt[jobId] = 0;
+      fetchJobsListSilently();
+      fetchJobDetails(jobId);
     } catch (err) {
-      alert('Lỗi khi rerun: ' + err.message);
+      showToast('Chạy lại thất bại: ' + (err.message || 'lỗi kết nối'), 'error');
+    } finally {
+      state.rerunInFlight = false;
+      if (btn) btn.disabled = false;
+      updateRerunButton(state.activeJob);
     }
   }
 
@@ -2676,6 +3087,8 @@
 
   async function handleSubmitQuestionAnswer() {
     if (!state.activeJobId) return;
+    // B1: gửi câu trả lời tới đúng job đã phát sinh câu hỏi
+    const questionJobId = (state.currentQuestion && state.currentQuestion.jobId) || state.activeJobId;
 
     const listContainer = document.getElementById('questionListContainer');
     if (!listContainer) return;
@@ -2705,7 +3118,7 @@
     }
 
     try {
-      const res = await fetch(`/api/v1/jobs/${state.activeJobId}/answer`, {
+      const res = await fetch(`/api/v1/jobs/${questionJobId}/answer`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -3325,29 +3738,43 @@
     const newVerdict = nextStatus === EVIDENCE_STATUS.PASS ? 'PASS' : (nextStatus === EVIDENCE_STATUS.FAILED ? 'FAIL' : null);
     const newStatus = nextStatus;
     
-    // 1. Fallback update local state immediately for snappy UI
+    // 1. Cập nhật local state tạm thời để UI phản hồi ngay, nhưng giữ snapshot để rollback (B9)
     const evidenceIdx = state.evidences.findIndex(e => e.filename === filename || (e.file_path && e.file_path.includes(filename)));
+    const snapshot = evidenceIdx !== -1 ? { ...state.evidences[evidenceIdx] } : null;
+    const metaKey = `evidence_meta_${jobId}_${filename}`;
+    let prevMeta = null;
+    try { prevMeta = localStorage.getItem(metaKey); } catch (e) {}
     if (evidenceIdx !== -1) {
       state.evidences[evidenceIdx].verdict = newVerdict;
       state.evidences[evidenceIdx].status = newStatus;
       try {
-        localStorage.setItem(`evidence_meta_${jobId}_${filename}`, JSON.stringify({ verdict: newVerdict, status: newStatus }));
+        localStorage.setItem(metaKey, JSON.stringify({ verdict: newVerdict, status: newStatus }));
       } catch(e){}
     }
-    
+
     // Re-render quickly
     renderEvidenceHub();
 
-    // 2. Background API call
+    // 2. Background API call - B9: kiểm tra res.ok, lỗi thì rollback
     try {
-      await fetch(`/api/v1/jobs/${jobId}/evidence/files/${encodeURIComponent(filename)}/status`, {
+      const res = await fetch(`/api/v1/jobs/${jobId}/evidence/files/${encodeURIComponent(filename)}/status`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ verdict: newVerdict, status: newStatus })
       });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
     } catch(err) {
       console.warn('Failed to persist evidence status to backend', err);
-      showToast('Không thể lưu trạng thái PASS/FAIL lên server, đã lưu local.', 'warning');
+      // B9: rollback về bản snapshot trước khi sửa
+      if (evidenceIdx !== -1 && snapshot) {
+        state.evidences[evidenceIdx] = snapshot;
+        try {
+          if (prevMeta === null) localStorage.removeItem(metaKey);
+          else localStorage.setItem(metaKey, prevMeta);
+        } catch (e) {}
+      }
+      renderEvidenceHub();
+      showToast('Không thể lưu trạng thái evidence lên server, đã hoàn tác.', 'error');
     }
   }
 
@@ -3357,25 +3784,32 @@
     const jobId = state.activeJobId || (state.activeJob && state.activeJob.id);
     if (!jobId || !filename) return;
 
-    // 1. Update local state immediately
-    state.evidences = state.evidences.filter(e => !(e.filename === filename || e.fileName === filename || (e.file_path && e.file_path.includes(filename))));
-    renderEvidenceHub();
+    // B9: giữ snapshot, chỉ xoá khỏi state khi server trả ok
+    const snapshot = state.evidences.slice();
 
-    // 2. Call backend DELETE
+    // 1. Call backend DELETE
     let deleted = false;
     try {
       const res = await fetch(`/api/v1/jobs/${jobId}/evidence/files/${encodeURIComponent(filename)}`, {
         method: 'DELETE'
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (res.ok && data.success) {
         deleted = true;
+        state.evidences = state.evidences.filter(e => !(e.filename === filename || e.fileName === filename || (e.file_path && e.file_path.includes(filename))));
+        renderEvidenceHub();
         showToast(`Đã xóa vĩnh viễn bằng chứng ${filename}`, 'success');
       } else {
+        // B9: rollback khi server từ chối
+        state.evidences = snapshot;
+        renderEvidenceHub();
         showToast(data.error || 'Lỗi khi xóa bằng chứng trên server', 'error');
       }
     } catch(err) {
       console.error('Delete evidence failed:', err);
+      // B9: rollback khi mất kết nối
+      state.evidences = snapshot;
+      renderEvidenceHub();
       showToast('Không thể kết nối đến server để xóa bằng chứng.', 'error');
     }
 
@@ -3404,25 +3838,32 @@
     const jobId = state.activeJobId || (state.activeJob && state.activeJob.id);
     if (!jobId) return;
 
-    // 1. Update local state immediately
-    state.evidences = state.evidences.filter(e => e !== item && !(e.fileName === filename || e.filename === filename || (e.file_path && e.file_path.includes(filename))));
-    renderEvidenceHub();
+    // B9: giữ snapshot, chỉ xoá khỏi state khi server trả ok
+    const snapshot = state.evidences.slice();
 
-    // 2. Call backend DELETE
+    // 1. Call backend DELETE
     let deleted = false;
     try {
       const res = await fetch(`/api/v1/jobs/${jobId}/evidence/files/${encodeURIComponent(filename)}`, {
         method: 'DELETE'
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (res.ok && data.success) {
         deleted = true;
+        state.evidences = state.evidences.filter(e => e !== item && !(e.fileName === filename || e.filename === filename || (e.file_path && e.file_path.includes(filename))));
+        renderEvidenceHub();
         showToast(`Đã xóa vĩnh viễn bằng chứng ${filename}`, 'success');
       } else {
+        // B9: rollback khi server từ chối
+        state.evidences = snapshot;
+        renderEvidenceHub();
         showToast(data.error || 'Lỗi khi xóa bằng chứng trên server', 'error');
       }
     } catch(err) {
       console.error('Delete evidence item failed:', err);
+      // B9: rollback khi mất kết nối
+      state.evidences = snapshot;
+      renderEvidenceHub();
       showToast('Không thể kết nối đến server để xóa bằng chứng.', 'error');
     }
 
@@ -3460,9 +3901,8 @@
     if (terminalToolbar) terminalToolbar.classList.toggle('hidden', tab !== 'terminal');
 
     if (tab === 'terminal') {
-      fitTerminal();
-      setTimeout(fitTerminal, 40);
-      setTimeout(fitTerminal, 150);
+      // C7: 1 lần debounce thay cho chuỗi setTimeout fitTerminal
+      scheduleFitTerminal();
     }
 
     if ((tab === 'dev-plan' || tab === 'test-plan' || tab === 'devPlan' || tab === 'testPlan') && state.activeJobId) {
@@ -3489,6 +3929,9 @@
         panes[key].classList.toggle('hidden', key !== subtab);
       }
     });
+
+    // C3: pane vừa chuyển sang được dựng lazy tại đây
+    renderEvidenceHub();
   }
 
   function toggleAutoScroll() {
@@ -3691,7 +4134,8 @@
   // =========================================================================
   async function loadSettings() {
     try {
-      const res = await fetch('/api/v1/settings');
+      // B18: timeout để không treo khi server không phản hồi
+      const res = await fetchWithTimeout('/api/v1/settings', {}, 10000);
       let data = null;
       if (res.ok) {
         data = await res.json();
@@ -3717,6 +4161,9 @@
         if (impEl) impEl.value = mapping.IMPLEMENT || mapping.implement_runner || 'claude-code';
         if (testEl) testEl.value = mapping.TESTING || mapping.testing_runner || 'claude-code';
         if (fixEl) fixEl.value = mapping.FIXING || mapping.fixing_runner || 'claude-code';
+      } else {
+        // B18: không có dữ liệu từ server lẫn cache -> báo lỗi thay vì im lặng
+        showToast('Không tải được cài đặt runner từ máy chủ.', 'warning');
       }
     } catch (err) {
       console.warn('loadSettings fallback to localStorage:', err);
@@ -3734,6 +4181,9 @@
           if (impEl) impEl.value = mapping.IMPLEMENT || mapping.implement_runner || 'claude-code';
           if (testEl) testEl.value = mapping.TESTING || mapping.testing_runner || 'claude-code';
           if (fixEl) fixEl.value = mapping.FIXING || mapping.fixing_runner || 'claude-code';
+        } else {
+          // B18: cả API lẫn cache đều lỗi -> hiển thị trạng thái lỗi
+          showToast('Không tải được cài đặt runner từ máy chủ.', 'warning');
         }
       } catch (e) {
         console.error(e);
@@ -3763,19 +4213,21 @@
     };
 
     try {
-      const res = await fetch('/api/v1/settings', {
+      // B18: timeout để nút Lưu không treo vô hạn
+      const res = await fetchWithTimeout('/api/v1/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
-      });
-      if (!res.ok) throw new Error('Không thể lưu cài đặt trên máy chủ');
+      }, 10000);
+      if (!res.ok) throw new Error('Không thể lưu cài đặt trên máy chủ (HTTP ' + res.status + ')');
       localStorage.setItem('ai_worker_settings', JSON.stringify(payload));
       showToast('Lưu cài đặt runner thành công!', 'success');
       closeSettingsModal();
     } catch (err) {
       console.warn('Lỗi saveSettings API, lưu tạm vào localStorage:', err);
       localStorage.setItem('ai_worker_settings', JSON.stringify(payload));
-      showToast('Đã lưu cài đặt runner (cục bộ)!', 'success');
+      // B18: request thất bại thì KHÔNG báo "thành công"
+      showToast('Không lưu được cài đặt lên máy chủ, đã lưu tạm cục bộ: ' + (err.message || 'lỗi kết nối'), 'warning');
       closeSettingsModal();
     }
   }
@@ -3838,7 +4290,8 @@
     try {
       let res;
       try {
-        res = await fetch('/api/v1/workspaces/browse', {
+        // B18: timeout 10s, tránh spinner quay mãi khi server treo
+        res = await fetchWithTimeout('/api/v1/workspaces/browse', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ currentPath: browsePath || '' })
@@ -3847,9 +4300,9 @@
         res = null;
       }
       if (!res || !res.ok) {
-        res = await fetch('/api/v1/workspaces/browse?path=' + encodeURIComponent(browsePath || ''));
+        res = await fetchWithTimeout('/api/v1/workspaces/browse?path=' + encodeURIComponent(browsePath || ''));
       }
-      if (!res.ok) throw new Error('Không thể duyệt thư mục');
+      if (!res.ok) throw new Error('Không thể duyệt thư mục (HTTP ' + res.status + ')');
       const data = await res.json();
       const items = data.folders || data.items || data.directories || (Array.isArray(data) ? data : []);
 
@@ -3920,6 +4373,11 @@
       return;
     }
 
+    // B17: chống double-submit
+    const btn = document.getElementById('btnSaveWorkspace');
+    if (btn && btn.disabled) return;
+    if (btn) btn.disabled = true;
+
     try {
       const res = await fetch('/api/v1/workspaces', {
         method: 'POST',
@@ -3939,6 +4397,8 @@
       }
     } catch (err) {
       showToast(err.message || 'Lỗi thêm workspace', 'error');
+    } finally {
+      if (btn) btn.disabled = false;
     }
   }
 
@@ -4060,7 +4520,16 @@
     if (!state.activeJobId) return;
     const statusSelect = document.getElementById('taskStatusSelect');
     if (!statusSelect) return;
-    const newStatus = statusSelect.value;
+    const newStatus = (statusSelect.value || '').trim();
+    // B7: không gửi status rỗng
+    if (!newStatus) {
+      showToast('Vui lòng chọn trạng thái trước khi lưu.', 'warning');
+      return;
+    }
+    // B17: chống double-submit
+    const btn = document.getElementById('btnUpdateStatus');
+    if (btn && btn.disabled) return;
+    if (btn) btn.disabled = true;
 
     try {
       let res = await fetch(`/api/v1/jobs/${state.activeJobId}/status`, {
@@ -4104,6 +4573,13 @@
       fetchJobsListSilently();
     } catch (err) {
       showToast(err.message || 'Lỗi cập nhật trạng thái', 'error');
+    } finally {
+      // B17: khôi phục nút, nhưng vẫn khoá nếu job đang chạy (B8)
+      if (btn) {
+        btn.disabled = false;
+        const curStatus = ((state.activeJob && state.activeJob.status) || '').toUpperCase();
+        if (RUNNING_STATUSES.includes(curStatus)) btn.disabled = true;
+      }
     }
   }
 
@@ -4346,7 +4822,9 @@
       if (state.activeJobId === targetId) {
         await fetchJobDetails(targetId, false);
       }
-      showToast(err.message, 'error', 7000);
+    } catch (err) {
+      // B13: trước đây gọi showToast(err...) trong try -> ReferenceError; nay báo lỗi thật ở catch
+      showToast(err.message || 'Lỗi cập nhật thông tin Task', 'error');
     } finally {
       if (submitBtn) {
         submitBtn.disabled = false;
@@ -4356,15 +4834,27 @@
   }
 
   // --- Thao tác Lưu trữ và Xóa Task ---
-  async function archiveTask(jobId) {
+  async function archiveTask(jobId, btn) {
     const targetId = jobId || state.activeJobId;
     if (!targetId) return;
+
+    // B17: chống double-submit (ưu tiên nút được bấm từ event delegation)
+    const actionBtn = btn || document.querySelector(`[data-action="archive"][data-job-id="${targetId}"]`);
+    if (actionBtn && actionBtn.disabled) return;
+
+    // B8: chặn lưu trữ khi job đang chạy
+    const job = state.jobs.find((j) => j.id === targetId) || (state.activeJob && state.activeJob.id === targetId ? state.activeJob : null);
+    if (job && RUNNING_STATUSES.includes((job.status || '').toUpperCase())) {
+      showToast('Task đang chạy Pipeline, không thể lưu trữ.', 'warning');
+      return;
+    }
+    if (actionBtn) actionBtn.disabled = true;
 
     try {
       const res = await fetch(`/api/v1/jobs/${targetId}/archive`, {
         method: 'POST'
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.success) {
         showToast(data.error || 'Thao tác lưu trữ thất bại', 'error');
         return;
@@ -4376,20 +4866,34 @@
       }
     } catch (err) {
       showToast('Lỗi kết nối khi lưu trữ: ' + err.message, 'error');
+    } finally {
+      if (actionBtn) actionBtn.disabled = false;
     }
   }
 
-  async function deleteTask(jobId) {
+  async function deleteTask(jobId, btn) {
     const targetId = jobId || state.activeJobId;
     if (!targetId) return;
 
+    // B17: chống double-submit
+    const actionBtn = btn || document.querySelector(`[data-action="delete"][data-job-id="${targetId}"]`);
+    if (actionBtn && actionBtn.disabled) return;
+
+    // B8 + B10: chỉ xoá khi trạng thái nằm trong danh sách cho phép
+    const job = state.jobs.find((j) => j.id === targetId) || (state.activeJob && state.activeJob.id === targetId ? state.activeJob : null);
+    if (job && !DELETABLE_STATUSES.includes((job.status || '').toUpperCase().trim())) {
+      showToast('Không thể xóa Task ở trạng thái hiện tại. Hãy lưu trữ hoặc dừng task trước.', 'warning');
+      return;
+    }
+
     if (!confirm('Bạn có chắc chắn muốn xóa tác vụ này không?')) return;
+    if (actionBtn) actionBtn.disabled = true;
 
     try {
       const res = await fetch(`/api/v1/jobs/${targetId}`, {
         method: 'DELETE'
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.success) {
         showToast(data.error || 'Không thể xóa task', 'error');
         return;
@@ -4405,6 +4909,8 @@
       await fetchJobsList();
     } catch (err) {
       showToast('Lỗi kết nối khi xóa: ' + err.message, 'error');
+    } finally {
+      if (actionBtn) actionBtn.disabled = false;
     }
   }
 
@@ -4413,11 +4919,15 @@
   window.aiWorker.archiveTask = archiveTask;
   window.aiWorker.deleteTask = deleteTask;
   window.aiWorker.openEditModal = openEditTaskModal;
-  async function dequeueTask(jobId) {
+  async function dequeueTask(jobId, btn) {
     if (!jobId) return;
+    // B17: chống double-submit
+    const actionBtn = btn || document.querySelector(`[data-action="dequeue"][data-job-id="${jobId}"]`);
+    if (actionBtn && actionBtn.disabled) return;
+    if (actionBtn) actionBtn.disabled = true;
     try {
       const res = await fetch(`/api/v1/jobs/${jobId}/dequeue`, { method: 'POST' });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.success) {
         showToast(data.error || 'Không thể xóa task khỏi hàng đợi', 'error');
         return;
@@ -4435,6 +4945,8 @@
       fetchSystemStatus();
     } catch (err) {
       showToast('Lỗi khi xóa khỏi hàng đợi: ' + err.message, 'error');
+    } finally {
+      if (actionBtn) actionBtn.disabled = false;
     }
   }
 
@@ -4547,6 +5059,8 @@
 
     const btnSubmit = document.getElementById("btnSaveWorkspace");
     const originalText = document.getElementById("wsSubmitBtnText").innerText;
+    // B17: chống double-submit form workspace
+    if (btnSubmit && btnSubmit.disabled) return;
     if (btnSubmit) {
       btnSubmit.disabled = true;
       document.getElementById("wsSubmitBtnText").innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang lưu...';
@@ -4651,13 +5165,15 @@
       tbody.innerHTML = '<tr><td colspan="6" class="p-4 text-center text-slate-500"><i class="fa-solid fa-spinner fa-spin mr-1"></i> Đang tải danh sách services...</td></tr>';
     }
     try {
-      const res = await fetch(`/api/v1/workspaces/${workspaceId}/services`);
-      const data = await res.json();
+      // B18: timeout để bảng services không kẹt trạng thái "Đang tải..."
+      const res = await fetchWithTimeout(`/api/v1/workspaces/${workspaceId}/services`, {}, 10000);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error('Máy chủ trả về HTTP ' + res.status);
       if (data.success) {
         currentWorkspaceServices = data.services || [];
         renderWorkspaceServicesTable(currentWorkspaceServices);
       } else {
-        if (tbody) tbody.innerHTML = `<tr><td colspan="6" class="p-4 text-center text-rose-400">Lỗi: ${escapeHtml(data.error)}</td></tr>`;
+        if (tbody) tbody.innerHTML = `<tr><td colspan="6" class="p-4 text-center text-rose-400">Lỗi: ${escapeHtml(data.error || 'không xác định')}</td></tr>`;
       }
     } catch (err) {
       if (tbody) tbody.innerHTML = `<tr><td colspan="6" class="p-4 text-center text-rose-400">Lỗi kết nối: ${escapeHtml(err.message)}</td></tr>`;
@@ -4920,11 +5436,12 @@
     try {
       if (fbList) fbList.innerHTML = `<div class="flex items-center justify-center h-full text-slate-500 text-sm"><i class="fa-solid fa-circle-notch fa-spin mr-2"></i> Đang tải danh sách thư mục...</div>`;
 
-      const res = await fetch("/api/v1/workspaces/browse", {
+      const res = await fetchWithTimeout("/api/v1/workspaces/browse", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ currentPath: targetPath })
-      });
+      }, 10000);
+      if (!res.ok) throw new Error("Máy chủ trả về HTTP " + res.status);
       const data = await res.json();
       fbCurrentPath = data.currentPath || "";
       fbParentPath = data.parentPath;
@@ -5219,7 +5736,8 @@
     }
   }
 
-  async function loadOlderLogs() {
+  // B14: đổi tên để không trùng với loadOlderLogs của Live Terminal
+  async function loadOlderWorkerLogs() {
     if (workerLogsIsLoadingOlder || !workerLogsHasMoreOlder || workerLogsStartLine <= 1) {
       return;
     }
@@ -5403,12 +5921,12 @@
   const logsContainer = document.getElementById('workerLogsContainer');
   logsContainer?.addEventListener('scroll', () => {
     if (logsContainer.scrollTop < 40 && workerLogsHasMoreOlder && !workerLogsIsLoadingOlder) {
-      loadOlderLogs();
+      loadOlderWorkerLogs();
     }
   });
 
   // Nút bấm thủ công "Tải log cũ"
-  document.getElementById('btnLoadOlderWorkerLogs')?.addEventListener('click', loadOlderLogs);
+  document.getElementById('btnLoadOlderWorkerLogs')?.addEventListener('click', loadOlderWorkerLogs);
 
   document.getElementById('btnToggleWorkerLogsAutoScroll')?.addEventListener('click', () => {
     workerLogsAutoScroll = !workerLogsAutoScroll;

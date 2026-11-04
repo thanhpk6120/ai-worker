@@ -122,14 +122,18 @@ body {
  }
 
 @keyframes pulse-ring {
+  /* C5: chỉ animate opacity/transform (tránh repaint box-shadow mỗi frame) */
   0% {
-    box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.4);
+    opacity: 0.85;
+    transform: scale(0.99);
   }
-  70% {
-    box-shadow: 0 0 0 6px rgba(245, 158, 11, 0);
+  50% {
+    opacity: 1;
+    transform: scale(1);
   }
   100% {
-    box-shadow: 0 0 0 0 rgba(245, 158, 11, 0);
+    opacity: 0.85;
+    transform: scale(0.99);
   }
 }
 
@@ -280,22 +284,26 @@ body {
 }
 
 @keyframes active-step-glow {
+  /* C5: chỉ animate opacity/transform thay vì box-shadow */
   from {
-    box-shadow: 0 0 4px rgba(56, 189, 248, 0.4);
+    opacity: 0.85;
+    transform: scale(1);
   }
   to {
-    box-shadow: 0 0 16px rgba(56, 189, 248, 0.85);
+    opacity: 1;
+    transform: scale(1.06);
   }
 }
 
 @keyframes pending-step-pulse {
+  /* C5: bỏ box-shadow, chỉ giữ transform + opacity */
   from {
     transform: scale(1);
-    box-shadow: 0 0 6px rgba(251, 191, 36, 0.5);
+    opacity: 0.85;
   }
   to {
     transform: scale(1.08);
-    box-shadow: 0 0 20px rgba(251, 191, 36, 0.9);
+    opacity: 1;
   }
 }
 
@@ -812,7 +820,8 @@ pre code {
   stroke-width: 3;
   stroke-linecap: round;
   stroke-linejoin: round;
-  transition: all 0.4s ease;
+  /* C5: chỉ transition thuộc tính rẻ (stroke/opacity), không transition all gây animate filter */
+  transition: stroke 0.4s ease, opacity 0.4s ease;
 }
 
 .stepper-svg-path.active {
@@ -841,8 +850,12 @@ pre code {
 }
 
 @keyframes svg-dash-flow {
-  to {
-    stroke-dashoffset: -12;
+  /* C5: chỉ animate opacity (trước đây đổi stroke-dashoffset -> repaint SVG mỗi frame) */
+  0%, 100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
   }
 }
 
@@ -870,9 +883,8 @@ pre code {
 }
 
 .job-card {
+  /* C5: bỏ transform: translateZ(0) để không tạo layer GPU cho MỖI card; giữ contain để cô lập layout/paint */
   contain: layout paint;
-  transform: translateZ(0);
-  backface-visibility: hidden;
 }
 
 #xtermContainer {

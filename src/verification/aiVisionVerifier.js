@@ -84,7 +84,8 @@ function getMimeType(filePath) {
  * @param {string} [params.expectedCriteria] Tiêu chí nghiệm thu cần đạt được trong ảnh
  * @param {string} [params.testCaseName] Tên test case / bước kiểm thử
  * @param {string} [params.stepName] Tên step hoặc mô tả
- * @param {number} [params.timeoutMs=45000] Timeout gọi API
+ * @param {number} [params.timeoutMs=120000] Timeout gọi API (ảnh dashboard lớn + model
+ *        reasoning có thể mất 60-90s; 45s từng làm PHUB-680 chết vì "This operation was aborted")
  * @returns {Promise<{ passed: boolean, reason: string, details: string, modelUsed: string }>}
  */
 async function verifyImageWithAI({
@@ -92,7 +93,10 @@ async function verifyImageWithAI({
   expectedCriteria = '',
   testCaseName = '',
   stepName = '',
-  timeoutMs = 45000
+  timeoutMs = 120000,
+  // `_attempt` chi dung noi bo: 1 lan goi lai DUY NHAT khi loi ha tang (khong
+  // retry khi model da tra ket luan that => van fail-closed).
+  _attempt = 1
 }) {
   if (!fs.existsSync(imagePath)) {
     return {
@@ -167,6 +171,12 @@ YÊU CẦU THẨM ĐỊNH (BẮT BUỘC):
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     const endpoint = `${baseUrl}/chat/completions`;
+    // 3 nac goi: lan 1 KHONG dat max_tokens (de gateway/model tu quyet), lan 2
+    // dat 8000, lan 3 dat 16000 (tran du phong khi gateway co cap ngam thap).
+    // Chan boi `_attempt < 3` => toi da 3 lan goi cho 1 anh, khong lap vo han.
+    const tokenBudgetField = _attempt === 2
+      ? { max_tokens: 8000 }
+      : (_attempt >= 3 ? { max_tokens: 16000 } : {});
     const response = await fetch(endpoint, {
       method: 'POST',
       headers: {
@@ -184,9 +194,12 @@ YÊU CẦU THẨM ĐỊNH (BẮT BUỘC):
             ]
           }
         ],
-        max_tokens: 400,
+        // temperature=0 de ket qua TAT DINH (truoc day bo trong => model tra loi
+        // ngau nhien, cung 1 anh luc pass luc fail).
+        temperature: 0,
         stream: false,
-        response_format: { type: 'json_object' }
+        response_format: { type: 'json_object' },
+        ...tokenBudgetField
       }),
       signal: controller.signal
     });
@@ -195,21 +208,37 @@ YÊU CẦU THẨM ĐỊNH (BẮT BUỘC):
 
     if (!response.ok) {
       const errBody = await response.text().catch(() => '');
+      const infraReason = `Lỗi kết nối AI Vision khi thẩm định ảnh ${path.basename(imagePath)}: AI Vision HTTP ${response.status} (${model}): ${errBody.slice(0, 150)}`;
+      // 5xx/429 la loi HA TANG: thu lai 1 lan truoc khi ket luan.
+      if (_attempt < 3 && (response.status >= 500 || response.status === 429)) {
+        return verifyImageWithAI({ imagePath, expectedCriteria, testCaseName, stepName, timeoutMs, _attempt: _attempt + 1 });
+      }
       return {
         passed: false,
-        reason: `Lỗi kết nối AI Vision khi thẩm định ảnh ${path.basename(imagePath)}: AI Vision HTTP ${response.status} (${model}): ${errBody.slice(0, 150)}`,
+        inconclusive: true,
+        reason: infraReason,
         details: errBody,
         modelUsed: model
       };
     }
 
     const resData = await response.json();
-    const content = resData.choices && resData.choices[0] && resData.choices[0].message && resData.choices[0].message.content;
-    if (!content) {
+    const firstChoice = resData.choices && resData.choices[0];
+    const content = firstChoice && firstChoice.message && firstChoice.message.content;
+    const truncated = !!(firstChoice && firstChoice.finish_reason === 'length');
+    if (!content || truncated) {
+      // Rong hoac bi cat vi het token: day la loi HA TANG (khong phai ket luan
+      // "anh sai") => retry 1 lan voi ngan sach token lon hon.
+      if (_attempt < 3) {
+        return verifyImageWithAI({ imagePath, expectedCriteria, testCaseName, stepName, timeoutMs, _attempt: _attempt + 1 });
+      }
       return {
         passed: false,
-        reason: `Lỗi kết nối AI Vision khi thẩm định ảnh ${path.basename(imagePath)}: AI Vision trả về rỗng (${model})`,
-        details: 'Empty choice content',
+        inconclusive: true,
+        reason: truncated
+          ? `Lỗi kết nối AI Vision khi thẩm định ảnh ${path.basename(imagePath)}: phản hồi bị cắt vì hết ngân sách token (${model})`
+          : `Lỗi kết nối AI Vision khi thẩm định ảnh ${path.basename(imagePath)}: AI Vision trả về rỗng (${model})`,
+        details: truncated ? `finish_reason=length, completion_tokens=${(resData.usage && resData.usage.completion_tokens) || '?'}` : 'Empty choice content',
         modelUsed: model
       };
     }
@@ -223,8 +252,14 @@ YÊU CẦU THẨM ĐỊNH (BẮT BUỘC):
       if (match) {
         parsedResult = JSON.parse(match[0]);
       } else {
+        // Model khong tra JSON hop le (thuong do bi cat token / reasoning loop):
+        // day la loi HA TANG, khong phai ket luan "anh sai". Thu lai 1 lan.
+        if (_attempt < 3) {
+          return verifyImageWithAI({ imagePath, expectedCriteria, testCaseName, stepName, timeoutMs, _attempt: _attempt + 1 });
+        }
         return {
           passed: false,
+          inconclusive: true,
           reason: `Không thể parse JSON từ AI Vision (${model}): ${content.slice(0, 100)}`,
           details: content,
           modelUsed: model
@@ -239,8 +274,14 @@ YÊU CẦU THẨM ĐỊNH (BẮT BUỘC):
       modelUsed: model
     };
   } catch (err) {
+    // Timeout/abort/network: loi ha tang => thu lai 1 lan, sau do tra
+    // `inconclusive` de tang tren KHONG danh dau FAILED cho loi cua harness.
+    if (_attempt < 3) {
+      return verifyImageWithAI({ imagePath, expectedCriteria, testCaseName, stepName, timeoutMs, _attempt: _attempt + 1 });
+    }
     return {
       passed: false,
+      inconclusive: true,
       reason: `Lỗi kết nối AI Vision khi thẩm định ảnh ${path.basename(imagePath)}: ${err.message}`,
       details: err.stack,
       modelUsed: model

@@ -26,6 +26,8 @@ const jobPolicy = require('./execution/jobPolicy');
 const fileContext = require('./systemone/fileContext');
 const { guardPrompt } = require('./execution/promptGuard');
 const evidenceStore = require('./verification/evidenceStore');
+const portLeaseManager = require('./execution/portLeaseManager');
+const buildProvenance = require('./execution/buildProvenance');
 const { EvidenceWatcher } = require('./verification/evidenceWatcher');
 const { verifyImageWithAI } = require('./verification/aiVisionVerifier');
 const stepGate = require('./execution/stepGate');
@@ -607,16 +609,45 @@ function evidenceChannelOf(type) {
 function hashEvidenceBuffer(buf) {
   try { return crypto.createHash('md5').update(buf).digest('hex'); } catch (e) { return null; }
 }
-// ponytail: đọc sync toàn file, đủ cho evidence nhỏ; chuyển stream khi file >50MB.
-function buildEvidenceHashes(fullFilePath, stat) {
-  let buf = null;
-  try { buf = fs.readFileSync(fullFilePath); } catch (e) {
-    const fallback = stat ? stat.size : 0;
-    return { size: fallback, sizeBytes: fallback, md5: null, contentHash: null };
+// Gioi han noi dung evidence nhung vao response (client tai full qua
+// /evidence/files/:filename khi can). Truoc day nhung ca file 8MB => 1 job
+// co the tra ve hang chuc MB JSON.
+const MAX_INLINE_EVIDENCE_CONTENT = 64 * 1024;
+// Cache doc file evidence theo (duong dan | size | mtime). Truoc day moi request
+// mo job lai doc TUNG file 3 lan (validate JSON + lay content + tinh md5) =>
+// ~10MB I/O + 20ms CPU dong bo moi lan, chan event loop cua SSE.
+const evidenceFileCache = new Map();
+const EVIDENCE_FILE_CACHE_MAX = 300;
+function getCachedEvidenceFile(fullFilePath, stat) {
+  const size = stat ? stat.size : 0;
+  const mtimeMs = stat ? stat.mtimeMs : 0;
+  const key = `${fullFilePath}|${size}|${mtimeMs}`;
+  let entry = evidenceFileCache.get(key);
+  if (!entry) {
+    let buf = null;
+    try { buf = fs.readFileSync(fullFilePath); } catch (e) { buf = null; }
+    const ext = path.extname(fullFilePath).toLowerCase();
+    // CHI giu text cua file text. Buffer anh (PNG co the vai MB) phai duoc giai
+    // phong ngay sau khi bam md5, neu giu lai se phinh RAM theo so evidence.
+    const text = (buf && TEXT_EVIDENCE_EXTS.includes(ext)) ? buf.toString('utf8') : '';
+    entry = {
+      size: buf ? buf.length : size,
+      md5: buf ? hashEvidenceBuffer(buf) : null,
+      text: text.length > 256 * 1024 ? text.slice(0, 256 * 1024) : text
+    };
+    if (evidenceFileCache.size >= EVIDENCE_FILE_CACHE_MAX) evidenceFileCache.clear();
+    evidenceFileCache.set(key, entry);
   }
-  const size = buf.length || (stat ? stat.size : 0);
-  const md5 = hashEvidenceBuffer(buf);
-  return { size, sizeBytes: size, md5, contentHash: md5 };
+  return entry;
+}
+function buildEvidenceHashes(fullFilePath, stat) {
+  const entry = getCachedEvidenceFile(fullFilePath, stat);
+  return {
+    size: entry.size,
+    sizeBytes: entry.size,
+    md5: entry.md5,
+    contentHash: entry.md5
+  };
 }
 // Chuẩn hoá gate DONE/FAILED: DONE chỉ khi passed=true và không error/timeout.
 function resolveJobGate(requestedStatus, body, job) {
@@ -1862,8 +1893,10 @@ app.get('/api/v1/jobs', (req, res) => {
     // Badge SystemOne per-task: tra `systemone_state` da parse (object, khong phai string).
     // Dong thoi tra runtime_ms: tong thoi gian thuc su worker chay task.
     const queuedJobIds = new Set(taskQueue.getQueuedJobs().map((q) => q.id));
+    // 1 query duy nhat cho toan bo steps (truoc day 1 query/job => N+1).
+    const stepsByJob = db.getStepsByJobIds(jobs.map((j) => j.id));
     const jobsWithSo = jobs.map((j) => {
-      const steps = db.getStepsByJobId(j.id) || [];
+      const steps = stepsByJob.get(j.id) || [];
       return {
         ...j,
         is_queued: queuedJobIds.has(j.id),
@@ -1928,14 +1961,16 @@ function getTaskEvidences(job) {
       if (stat.size <= 10) return; // File rỗng không coi là evidence
 
       const ext = path.extname(file).toLowerCase();
+      // Dung cache theo (path|size|mtime): tranh doc lai cung 1 file 3 lan/request.
+      const cachedFile = getCachedEvidenceFile(fullFilePath, stat);
       if (ext === '.json') {
         try {
-          const raw = fs.readFileSync(fullFilePath, 'utf8').trim();
+          const raw = String(cachedFile.text || '').trim();
           if (!raw || raw === '{}' || raw === '[]' || raw === 'null') return;
         } catch (e) { return; }
       } else if (ext === '.log' || ext === '.txt') {
         try {
-          const raw = fs.readFileSync(fullFilePath, 'utf8').trim();
+          const raw = String(cachedFile.text || '').trim();
           if (!raw) return;
         } catch (e) { return; }
       }
@@ -1952,8 +1987,8 @@ function getTaskEvidences(job) {
       if (['.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg'].includes(ext)) {
         parsedData = null;
       } else if (TEXT_EVIDENCE_EXTS.includes(ext)) {
-        // File text: doc noi dung de hien thi.
-        try { fileContent = fs.readFileSync(fullFilePath, 'utf8'); } catch (e) { fileContent = ''; }
+        // File text: lay noi dung tu cache (da doc o tren), khong doc lai dia.
+        fileContent = cachedFile.text || '';
         if (ext === '.json' && fileContent) {
           try { parsedData = JSON.parse(fileContent.replace(/^\uFEFF/, '')); } catch (e) { parsedData = null; }
         }
@@ -2007,9 +2042,14 @@ function getTaskEvidences(job) {
         currentUrl: meta.currentUrl || null,
         service_name: taskCode || 'Target Service',
         service: taskCode || 'Target Service',
-        content: fileContent,
-        rawLogs: fileContent,
-        logs: fileContent,
+        content: fileContent ? (fileContent.length > MAX_INLINE_EVIDENCE_CONTENT
+          ? fileContent.slice(0, MAX_INLINE_EVIDENCE_CONTENT)
+          : fileContent) : '',
+        // `rawLogs`/`logs` truoc day copy y nguyen `content` (them ~200KB/job).
+        // Giu alias rong de client cu khong vo, dung `content` lam nguon duy nhat.
+        rawLogs: '',
+        logs: '',
+        truncated: Boolean(fileContent && fileContent.length > MAX_INLINE_EVIDENCE_CONTENT),
         log_excerpt: fileContent ? fileContent.slice(0, 300) : '',
         // File binary (.xlsx/.pdf/...): noi dung khong doc duoc -> client bo qua
         // `content` va tai file qua /evidence/files/:filename.
@@ -2090,24 +2130,39 @@ app.get('/api/v1/jobs/:id', (req, res) => {
       // Khong phai wall-clock tu created_at (sai: tinh ca thoi gian cho queue/cho user).
       runtime_ms: computeJobRuntimeMs(job, steps),
       dual_plan: dualPlan,
-      dualPlan,
       pending_question: pendingQuestion,
       question: pendingQuestion,
       questions,
-      evidence,
-      evidences: evidence
+      evidence
     };
+
+    // Tra ve DUY NHAT 1 khoa cho moi du lieu. Truoc day response con lap lai
+    // `evidence`/`evidences` + `dual_plan`/`dualPlan` + `steps` o ca job va
+    // top-level => payload 1,7MB cho 1 job (gap ~12 lan). Client da doc theo
+    // `data.job.*` nen khong can alias nua.
+    // `?compat=1` giu shape cu cho consumer ben ngoai chua kip cap nhat.
+    if (String(req.query.compat || '') === '1') {
+      const legacy = {
+        ...fullJobData,
+        dualPlan: dualPlan,
+        evidences: evidence
+      };
+      return res.json({
+        success: true,
+        job: legacy,
+        evidence,
+        evidences: evidence,
+        dual_plan: dualPlan,
+        dualPlan,
+        question: pendingQuestion,
+        questions,
+        steps
+      });
+    }
 
     return res.json({
       success: true,
-      job: fullJobData,
-      evidence: fullJobData.evidence,
-      evidences: fullJobData.evidences,
-      dual_plan: fullJobData.dual_plan,
-      dualPlan: fullJobData.dualPlan,
-      question: fullJobData.question,
-      questions: fullJobData.questions,
-      steps: fullJobData.steps
+      job: fullJobData
     });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
@@ -3170,9 +3225,12 @@ const verifyTaskEvidenceAsync = async ({ jobId, evidenceDir, featureDir, taskCod
   const reasons = [...(syncRes.reasons || [])];
   const failedEvidenceFiles = new Set(syncRes.failedEvidenceFiles || []);
   const validFiles = syncRes.validFiles || [];
+  // Lỗi HẠ TẦNG của verifier (timeout/abort/5xx/rỗng) không phải kết luận "ảnh sai".
+  // Tách riêng để pause job chờ hồi phục thay vì đốt một vòng FIXING vô nghĩa.
+  const infraFailures = [];
 
   if (skipAiVision) {
-    return { failed: agentFailed, reasons, failedEvidenceFiles };
+    return { failed: agentFailed, reasons, failedEvidenceFiles, infraBlocked: false };
   }
 
   // Lọc các file ảnh UI để thẩm định bằng AI Vision
@@ -3204,7 +3262,11 @@ const verifyTaskEvidenceAsync = async ({ jobId, evidenceDir, featureDir, taskCod
       const statusEntry = priorStatusMap[img] || {};
       const alreadyPassed = statusEntry.status === 'PASS' && statusEntry.verified === true;
       const wasFailed = lastFailedEvidences.has(img);
-      if (alreadyPassed && !wasFailed) {
+      // Thiếu passCriteria => KHÔNG được bỏ qua: phải vào danh sách thẩm định để
+      // bị đánh FAILED (buộc agent bổ sung tiêu chí cụ thể).
+      const recMeta = metaRecords.find(r => r.fileName === img || r.name === img) || {};
+      const hasCriteria = String(recMeta.passCriteria || recMeta.pass_criteria || recMeta.expected || '').trim().length > 0;
+      if (alreadyPassed && !wasFailed && hasCriteria) {
         jobEventBus.emitJobLog(jobId, {
           text: `[VERIFY-AI-VISION] ⏭️ Bỏ qua thẩm định lại ảnh ${img} (đã đạt PASS ở lượt trước và không thay đổi).\n`
         });
@@ -3222,8 +3284,22 @@ const verifyTaskEvidenceAsync = async ({ jobId, evidenceDir, featureDir, taskCod
     for (const img of imagesToVerify) {
       const fullImgPath = path.join(evidenceDir, img);
       const rec = metaRecords.find(r => r.fileName === img || r.name === img || (r.filePath && r.filePath.includes(img))) || {};
-      const expectedCriteria = rec.passCriteria || rec.pass_criteria || rec.expected || rec.description || '';
+      // `note`/`description` KHÔNG được dùng làm tiêu chí: nó là mô tả kết quả phía agent,
+      // dùng nó thay passCriteria sẽ vô hiệu hoá luật "thiếu passCriteria ⇒ FAILED".
+      const expectedCriteria = rec.passCriteria || rec.pass_criteria || rec.expected || '';
       const testCaseName = rec.testCase || rec.caseName || rec.stepName || img;
+      if (!String(expectedCriteria).trim()) {
+        // Không có tiêu chí cụ thể => AI Vision chỉ còn câu chung "không trắng trang",
+        // nghĩa là PASS không chứng minh được nội dung đúng yêu cầu. Fail-closed.
+        agentFailed = true;
+        failedEvidenceFiles.add(img);
+        const missMsg = `Ảnh ${img} thiếu passCriteria trong metadata.json — không có căn cứ thẩm định nội dung`;
+        if (!reasons.includes(missMsg)) reasons.push(missMsg);
+        jobEventBus.emitJobLog(jobId, {
+          text: `[VERIFY-AI-VISION] ❌ FAILED: ${img} — thiếu \`passCriteria\`. Khai báo tiêu chí cụ thể cho ảnh này trong metadata.json (mục tests[].passCriteria hoặc passCriteria của file) rồi chạy lại VERIFY.\n`
+        });
+        continue;
+      }
       try {
         const visionResult = await verifyImageWithAI({
           imagePath: fullImgPath,
@@ -3232,7 +3308,20 @@ const verifyTaskEvidenceAsync = async ({ jobId, evidenceDir, featureDir, taskCod
           stepName: rec.stepName || ''
         });
 
-        if (!visionResult.passed) {
+        if (visionResult.inconclusive) {
+          // Da thu 3 lan (khong cap -> 8000 -> 16000) van khong lay duoc ket luan.
+          // Day la loi HA TANG (timeout/abort/5xx/rỗng), KHONG phai ket luan anh sai:
+          //  - Đánh dấu ảnh chưa thẩm định (để lượt sau verify lại, không bị skip PASS).
+          //  - KHÔNG set agentFailed => job không bị đẩy sang FIXING oan.
+          //  - Bật infraBlocked => tầng trên pause job chờ hồi phục.
+          failedEvidenceFiles.add(img);
+          const incMsg = `Ảnh ${img} không thẩm định được (AI Vision thất bại sau 3 lần thử): ${visionResult.reason}`;
+          infraFailures.push(incMsg);
+          if (!reasons.includes(incMsg)) reasons.push(incMsg);
+          jobEventBus.emitJobLog(jobId, {
+            text: `[VERIFY-AI-VISION] ⚠️ KHÔNG KẾT LUẬN ĐƯỢC: ${img} — ${visionResult.reason}\n  (Lỗi hạ tầng verifier, không phải ảnh sai. Job sẽ được tạm dừng và thử lại thay vì chuyển FIXING.)\n`
+          });
+        } else if (!visionResult.passed) {
           agentFailed = true;
           failedEvidenceFiles.add(img);
           const failMsg = `Ảnh ${img} không đạt thẩm định AI Vision: ${visionResult.reason}`;
@@ -3273,7 +3362,7 @@ const verifyTaskEvidenceAsync = async ({ jobId, evidenceDir, featureDir, taskCod
     } catch (e) {}
   }
 
-  return { failed: agentFailed, reasons, failedEvidenceFiles };
+  return { failed: agentFailed, reasons, failedEvidenceFiles, infraBlocked: infraFailures.length > 0 };
 };
 
 // === Evidence realtime (TASK-PIPELINE-FIX C-1..C-3) ===
@@ -3352,6 +3441,259 @@ function stopAllEvidenceWatchers() {
 //     user bi tinh nham. Bay `endStepTimeline` duoc goi khi job ngung chay.
 const stepTimeline = new Map(); // jobId -> { stepId, phase, startedAt }
 
+// ============================================================================
+// PORT LEASE THEO JOB
+// Mỗi job thuê port trong lúc chạy step có khởi động service (TESTING/FIXING),
+// thay vì để agent tự chọn port mới. Port được bơm qua env + prompt contract.
+// ============================================================================
+const jobPortAssignments = new Map(); // jobId -> { phase, ports, leases, contract }
+// Cho port theo cau hinh worker (mac dinh 30 phut), job co the override bang
+// pipeline_config.port_wait_timeout_minutes.
+const PORT_WAIT_MAX_MS = (() => {
+  const raw = Number(config.PORT_WAIT_TIMEOUT_MS);
+  // Fallback đồng bộ với config mặc định (60 phút).
+  return Number.isFinite(raw) && raw > 0 ? raw : 60 * 60 * 1000;
+})();
+function resolvePortWaitMs(job) {
+  try {
+    const pipe = jobPolicy.parsePipelineConfig(job || {});
+    const minutes = Number(pipe.port_wait_timeout_minutes);
+    if (Number.isFinite(minutes) && minutes > 0) return minutes * 60 * 1000;
+  } catch (e) {}
+  return PORT_WAIT_MAX_MS;
+}
+
+/**
+ * Xác minh service đang chạy đúng build của worktree (sau khi agent chạy xong).
+ * strict: sai => coi như bước test thất bại. warn: chỉ log. off: bỏ qua.
+ */
+async function verifyRuntimeProvenance(jobId, portCtx, phase) {
+  const mode = config.RUNTIME_PROVENANCE_MODE;
+  if (mode === 'off' || !portCtx || !portCtx.ports || Object.keys(portCtx.ports).length === 0) {
+    return { ok: true, skipped: true, mode };
+  }
+  const job = db.getJobById(jobId);
+  let res;
+  try {
+    res = await buildProvenance.checkRuntimeProvenance({
+      job,
+      ports: portCtx.ports,
+      stepStartedAt: portCtx.stepStartedAt,
+      expectedHash: portCtx.buildHash,
+      markerWritten: portCtx.markerWritten
+    });
+  } catch (e) {
+    res = { ok: false, mode: 'error', services: [], reason: e.message };
+  }
+  const detail = (res.services || [])
+    .map((s) => `${s.serviceKey}:${s.port} pid=${s.pid || '—'} restarted=${s.restartedInThisStep} hash=${s.servedHash || '—'} ${s.ok ? 'OK' : `[${s.problems.join('+')}]`}`)
+    .join(' | ');
+  if (res.ok) {
+    jobEventBus.emitJobLog(jobId, { text: `\n[PROVENANCE] ✅ ${phase}: service đúng build ${portCtx.buildHash} (mode=${res.mode}). ${detail}\n` });
+  } else {
+    jobEventBus.emitJobLog(jobId, {
+      text: `\n[PROVENANCE] ${mode === 'strict' ? '⛔' : '⚠️'} ${phase}: KHÔNG xác minh được build đang chạy. ${detail || ''}${res.reason ? `\n  Lý do: ${res.reason}` : ''}\n`,
+      level: 'warn'
+    });
+  }
+  return res;
+}
+
+/**
+ * Tạm dừng job khi không lấy được port (chờ hết hạn / port còn bị chiếm).
+ * Dùng pause_kind=PORT_WAIT để vòng tự động chờ hồi phục KHÔNG thử lại liên tục.
+ */
+function pauseJobForPortWait(job, phase, reason) {
+  const pipe = jobPolicy.parsePipelineConfig(job);
+  pipe.paused_step = phase;
+  pipe.pause_kind = 'PORT_WAIT';
+  pipe.waiting_reason = reason;
+  delete pipe.retry_at;
+  delete pipe.last_error_kind;
+  // Lên lịch tự chạy lại (backoff tăng dần) để job không nằm chờ vô hạn khi
+  // port đã được nhả mà không ai bấm "Chạy lại".
+  const attempts = (Number(pipe.port_wait_auto_attempt) || 0) + 1;
+  pipe.port_wait_auto_attempt = attempts;
+  const backoffMs = Math.min(2 * 60 * 60 * 1000, 60 * 1000 * Math.pow(2, Math.min(attempts - 1, 6)));
+  pipe.next_auto_resume_at = Date.now() + backoffMs;
+  db.updateJob(job.id, { status: 'PAUSED', current_step: phase, error_message: `[PORT-WAIT] ${reason}`, pipeline_config: pipe });
+  endStepTimeline(job.id, { status: 'CANCELLED' });
+  jobEventBus.emitJobStatus(job.id, { status: 'PAUSED', current_step: phase, waiting: false, pause_kind: 'PORT_WAIT' });
+  jobEventBus.emitJobLog(job.id, {
+    text: `\n[PORT-WAIT] ⛔ ${reason}\nJob đã tạm dừng. Sẽ tự thử lại sau ${Math.round(backoffMs / 1000)}s (lần ${attempts}), hoặc bấm "Chạy lại" để thử ngay.\n`,
+    level: 'warn'
+  });
+  return { blocked: true, ports: {}, leases: [], contract: '' };
+}
+
+/**
+ * Vòng quét 30s: job PAUSED vì chờ port => tự chạy lại khi đến hạn backoff.
+ * Có trần 12 lần để không quay vòng vô hạn; quá trần thì chờ người dùng.
+ */
+function startPortWaitRecoveryLoop() {
+  if (global.__aiWorkerPortWaitRecovery) return global.__aiWorkerPortWaitRecovery;
+  const timer = setInterval(async () => {
+    if (!config.PORT_WAIT_AUTO_RESUME) return;
+    try {
+      const paused = db.listJobs({ status: 'PAUSED', limit: 50 }) || [];
+      for (const job of paused) {
+        const pipe = jobPolicy.parsePipelineConfig(job);
+        if (String(pipe.pause_kind || '') !== 'PORT_WAIT') continue;
+        const attempts = Number(pipe.port_wait_auto_attempt) || 0;
+        if (attempts > 12) continue;
+        const nextAt = Number(pipe.next_auto_resume_at) || 0;
+        if (!nextAt || nextAt > Date.now()) continue;
+        if (taskQueue.isJobEnqueuedOrRunning(job.id)) continue;
+        console.log(`[PORT-WAIT] Tự động chạy lại job ${job.task_code || job.id} (lần ${attempts}) sau backoff.`);
+        await resumeJobInternal(job.id, { mode: 'resume', auto: true });
+      }
+    } catch (e) {
+      console.warn('[PORT-WAIT] Lỗi vòng tự chạy lại:', e.message);
+    }
+  }, 30000);
+  if (timer.unref) timer.unref();
+  global.__aiWorkerPortWaitRecovery = timer;
+  return timer;
+}
+
+/**
+ * Cấp port cho job trước khi agent chạy. Nếu hết thời gian chờ thì pause job
+ * (KHÔNG tự kill job đang giữ port, không tự đổi port).
+ * @param {string} jobId
+ * @param {string} phase
+ * @returns {Promise<{blocked?:boolean, ports?:object, leases?:Array, contract?:string}>}
+ */
+async function acquireJobPortsForStep(jobId, phase) {
+  const existing = jobPortAssignments.get(jobId);
+  if (existing && existing.leases && existing.leases.length) return existing;
+
+  const job = db.getJobById(jobId);
+  if (!job) return { blocked: true, ports: {}, leases: [], contract: '' };
+
+  const plannedServices = portLeaseManager.resolveServicesForJob(job);
+  if (!plannedServices.length) {
+    // Job không có worktree nào còn tồn tại trên đĩa => không có gì để chạy.
+    // Trước đây vẫn thuê 3 port lấy từ danh sách workspace, khiến job KHÁC
+    // chờ hàng chục phút cho một port không ai dùng.
+    jobEventBus.emitJobLog(jobId, {
+      text: `\n[PORT-LEASE] ℹ️ Job không có worktree/service nào cần chạy — bỏ qua thuê port cho ${phase}.\n`
+    });
+    return { blocked: false, ports: {}, leases: [], contract: '', buildHash: '', markerWritten: false, stepStartedAt: Date.now() };
+  }
+
+  const portWaitMs = resolvePortWaitMs(job);
+  const res = await portLeaseManager.acquireForJob(job, {
+    timeoutMs: portWaitMs,
+    onWait: ({ waitedMs, holders }) => {
+      const who = (holders || [])
+        .map((h) => `${h.service_key}:${h.port}${h.task_code ? ` (${h.task_code})` : ''}`)
+        .join(', ');
+      jobEventBus.emitJobLog(jobId, {
+        text: `\n[PORT-WAIT] ⏳ Đang chờ port cho ${phase} — đã chờ ${Math.round(waitedMs / 1000)}s/${Math.round(portWaitMs / 1000)}s. Port đang bị giữ: ${who || 'không xác định'}.\n`,
+        level: 'warn'
+      });
+      // Cho UI biết job đang CHỜ (không phải đang chạy bình thường).
+      try {
+        const cur = db.getJobById(jobId);
+        jobEventBus.emitJobStatus(jobId, {
+          status: cur ? cur.status : phase,
+          waiting: true,
+          waiting_for: 'PORT',
+          waiting_ms: waitedMs,
+          waiting_holders: who || null
+        });
+      } catch (e) {}
+    }
+  });
+
+  if (!res.ok) {
+    const holders = (res.holders || []).map((h) => `${h.service_key}:${h.port}${h.task_code ? ` (${h.task_code})` : ''}`).join(', ');
+    const reason = `Hết thời gian chờ port cho ${phase} sau ${Math.round((res.waitedMs || 0) / 1000)}s. Port đang bị giữ: ${holders || 'không xác định'}.`;
+    return pauseJobForPortWait(job, phase, reason);
+  }
+
+  // BẮT BUỘC: dừng service cũ trong worktree trước khi test/verify.
+  // Không được dùng lại instance đang chạy (có thể là code/build cũ).
+  const prep = await portLeaseManager.prepareServicesForTest(job, res.ports);
+  if (!prep.ok) {
+    const reason = `Port ${prep.busyPorts.join(', ')} vẫn bị process khác chiếm sau khi dừng service cũ; không thể test trên port này.`;
+    return pauseJobForPortWait(job, phase, reason);
+  }
+
+  const contract = portLeaseManager.buildPortContract(res.ports);
+  // Ghi marker build vào static dir của worktree: marker nằm trong đầu vào build,
+  // nên chỉ khi agent build lại thì service mới phục vụ được hash hiện tại.
+  let buildHash = '';
+  let markerWritten = false;
+  try {
+    const wtHash = buildProvenance.computeWorktreeHash(job);
+    buildHash = wtHash.hash || '';
+    const marker = buildProvenance.writeBuildMarker(job, res.ports, buildHash);
+    markerWritten = Boolean(marker.written);
+    jobEventBus.emitJobLog(jobId, {
+      text: `[PROVENANCE] Build hash worktree: ${buildHash || 'n/a'}${markerWritten ? ` — đã ghi ${buildProvenance.MARKER_NAME} vào ${marker.files.map((f) => path.basename(path.dirname(f))).join(', ')}` : ' — KHÔNG ghi được marker (app không có static dir), chỉ kiểm tra process-start-time'}\n`
+    });
+  } catch (e) {
+    console.warn('[PROVENANCE] Không tạo được marker build:', e.message);
+  }
+
+  const entry = { phase, ports: res.ports, leases: res.leases, contract, buildHash, markerWritten, stepStartedAt: Date.now() };
+  // Gia hạn lease định kỳ: bước TESTING/FIXING có thể 20-60 phút, nếu không
+  // heartbeat thì lease TTL 10 phút sẽ hết hạn GIỮA lúc job đang test và job
+  // khác có thể chiếm đúng service/port đó.
+  try {
+    entry.heartbeat = portLeaseManager.startLeaseHeartbeat(res.leases);
+  } catch (e) {
+    console.warn('[PORT-LEASE] Không khởi động được heartbeat:', e.message);
+  }
+  jobPortAssignments.set(jobId, entry);
+  // Báo UI đã hết chờ (nếu trước đó có báo waiting).
+  try {
+    const cur = db.getJobById(jobId);
+    jobEventBus.emitJobStatus(jobId, { status: cur ? cur.status : phase, waiting: false });
+  } catch (e) {}
+  jobEventBus.emitJobLog(jobId, {
+    text: `\n[PORT-LEASE] 🔌 Cấp port cho ${phase}: ${JSON.stringify(res.ports)}${res.waitedMs ? ` (chờ ${Math.round(res.waitedMs / 1000)}s)` : ''}.\n`
+  });
+  if (prep.killedCount > 0) {
+    jobEventBus.emitJobLog(jobId, {
+      text: `[PORT-RESTART] ♻️ Đã dừng ${prep.killedCount} service cũ (${prep.killed.map((k) => `${k.name}#${k.pid}`).join(', ')}). Agent BẮT BUỘC build lại và khởi động service mới trên port vừa cấp.\n`,
+      level: 'warn'
+    });
+  }
+  return entry;
+}
+
+/** Giải phóng port khi kết thúc đoạn chạy (service do agent start phải nhả). */
+function releaseJobPorts(jobId, reason = '') {
+  try {
+    if (!jobPortAssignments.has(jobId) && portLeaseManager.listLeases().every((l) => l.job_id !== jobId)) {
+      return;
+    }
+  } catch (e) {}
+  try {
+    const entry = jobPortAssignments.get(jobId);
+    if (entry && entry.heartbeat && typeof entry.heartbeat.stop === 'function') {
+      entry.heartbeat.stop();
+    }
+    jobPortAssignments.delete(jobId);
+    const job = db.getJobById(jobId);
+    const statusNorm = String((job && job.status) || '').toUpperCase();
+    const terminal = ['DONE', 'FAILED', 'CANCELLED', 'TIMED_OUT', 'ARCHIVED'].includes(statusNorm);
+    if (job && terminal) {
+      // Job kết thúc => dọn luôn service rác (vite/java) còn sống trong worktree,
+      // nếu không port bị giữ và `git worktree remove` bị Permission denied.
+      setImmediate(() => {
+        try { portLeaseManager.releaseJobPortsAndCleanup(job, reason); } catch (e) {}
+      });
+    } else {
+      portLeaseManager.releaseJobPorts(jobId, reason);
+    }
+  } catch (e) {
+    console.warn('[PORT-LEASE] Không giải phóng được port:', e.message);
+  }
+}
+
 /**
  * Chuan hoa id job ve UUID canonical trong bang `jobs`.
  * `db.getJobById` ho tro tra ve theo prefix/task_code, nhung `steps.job_id` la
@@ -3375,6 +3717,9 @@ function beginStepTimeline(jobId, phase, runner) {
     // Dong doan dang chay truoc (neu co) => moi lan chay la 1 doan rieng bi biet.
     // KHONG duoc bo qua khi cung phase: retry/chay lai cung la 1 doan thoi gian moi.
     if (stepTimeline.has(key)) endStepTimeline(key, { exitCode: null });
+    // Sau restart/cancel, Map RAM rong nhung DB van con row RUNNING cua job nay.
+    // Dong chung truoc khi tao doan moi, neu khong se tich tu step "ma".
+    try { db.closeOrphanRunningSteps({ jobId: key, status: 'CANCELLED' }); } catch (e) {}
     const steps = db.getStepsByJobId(key) || [];
     const created = db.createStep({
       job_id: key,
@@ -3404,6 +3749,8 @@ function endStepTimeline(jobId, { exitCode, status } = {}) {
   } catch (e) {
     console.warn('[STEP-TIMELINE] Khong cap nhat duoc step:', e.message);
   }
+  // Nha port cua job khi doan chay ket thuc (service agent da start phai tra slot).
+  releaseJobPorts(key, 'step-end');
   stepTimeline.delete(key);
 }
 
@@ -3478,6 +3825,57 @@ const scheduleNextStep = (id, opts, delayMs = 100) => {
   }, delayMs);
   return timer;
 };
+/**
+ * Tạo lại worktree cho các service của job khi worktree cũ đã bị dọn
+ * (ví dụ job đã merge xong, worktree bị remove, sau đó được mở lại để FIXING).
+ *
+ * Vì sao bắt buộc: không có worktree thì `workspacePath` rơi về repo chính, agent sẽ sửa
+ * trực tiếp cây dev — thay đổi không thuộc branch nào và không thể merge lại.
+ *
+ * Chỉ áp dụng cho job THỰC SỰ có bản ghi job_worktrees; job docs-only không có worktree
+ * là hợp lệ nên bỏ qua im lặng.
+ *
+ * @returns {string|null} đường dẫn worktree vừa tạo lại, null nếu không tạo được
+ */
+function restoreMissingJobWorktree(job, docBasePath, taskCode) {
+  let rows = [];
+  try { rows = db.listJobWorktrees(job.id) || []; } catch (e) { return null; }
+  if (!rows.length) return null;
+
+  for (const row of rows) {
+    if (!row || !row.service_key || !row.task_branch) continue;
+    let repoPath = null;
+    try {
+      const svcConf = job.workspace_id ? db.getWorkspaceServiceByKey(job.workspace_id, row.service_key) : null;
+      repoPath = svcConf
+        ? (path.isAbsolute(svcConf.repo_path) ? svcConf.repo_path : path.resolve(docBasePath, svcConf.repo_path))
+        : path.resolve(docBasePath, row.service_key);
+    } catch (e) { repoPath = null; }
+    if (!repoPath || !fs.existsSync(path.join(repoPath, '.git'))) continue;
+
+    const destPath = path.join(repoPath, '.worktrees', taskCode);
+    const crRes = worktreeManager.createTaskWorktree({
+      repoFullPath: repoPath,
+      worktreeDestPath: destPath,
+      taskBranch: row.task_branch,
+      baseDevBranch: row.base_dev_branch || 'main'
+    });
+    if (!crRes || !crRes.success) {
+      const reason = (crRes && crRes.error) || 'unknown';
+      console.warn(`[WORKTREE-RESTORE-WARN] ${taskCode}/${row.service_key}: ${reason}`);
+      jobEventBus.emitJobLog(job.id, {
+        text: `\n[WORKTREE-RESTORE] ⚠️ Không tạo lại được worktree ${row.task_branch}: ${reason}. Agent sẽ chạy trong repo chính!\n`
+      });
+      continue;
+    }
+    try { db.updateJobWorktreeRestore(row.id, crRes.worktree_path, 'ACTIVE'); } catch (e) {}
+    jobEventBus.emitJobLog(job.id, {
+      text: `\n[WORKTREE-RESTORE] ♻️ Đã tạo lại worktree ${row.task_branch} tại ${crRes.worktree_path}\n`
+    });
+    return crRes.worktree_path;
+  }
+  return null;
+}
 const executeStep = async (id, opts) => {
   const job = db.getJobById(id);
   if (!job || job.status === 'CANCELLED' || job.status === 'PAUSED') return;
@@ -3502,6 +3900,19 @@ const executeStep = async (id, opts) => {
 
   // Thư mục tài liệu (features & evidence) luôn nằm tại docBasePath của Workspace
   const { dir: featureDir, evidenceDir } = fileManager.ensureFeatureDirectory(docBasePath, taskCode, { allowExisting: true, featuresDir: wsFeaturesDir });
+  // [WORKTREE-RESTORE] Job được mở lại (FIXING/TESTING) sau khi worktree đã bị dọn ở bước MERGING
+  // => tạo lại worktree TRƯỚC khi chạy bước để agent không sửa nhầm vào cây dev của repo chính.
+  if (!job.worktree_path || !fs.existsSync(job.worktree_path)) {
+    try {
+      const restoredPath = restoreMissingJobWorktree(job, docBasePath, taskCode);
+      if (restoredPath) {
+        job.worktree_path = restoredPath;
+        db.updateJob(id, { worktree_path: restoredPath });
+      }
+    } catch (restoreErr) {
+      console.warn('[WORKTREE-RESTORE-WARN]', (restoreErr && restoreErr.message) || restoreErr);
+    }
+  }
   // Thư mục thực thi của Runner: ưu tiên worktree bên trong service nếu đã được tạo
   const workspacePath = (job.worktree_path && fs.existsSync(job.worktree_path)) ? job.worktree_path : docBasePath;
 
@@ -3663,20 +4074,27 @@ const executeStep = async (id, opts) => {
       jobEventBus.emitJobLog(id, { text: `\n[1/5] >>> 🤖 [PLANNING] Kích hoạt lập kế hoạch song song (Dual Planning) với Agent: ${planningAgent}\n[PLANNING] Nạp template prompt planning.md...\n[PLANNING] Agent đang phân tích mã nguồn và thiết lập Kế hoạch (Vui lòng đợi khoảng 15-30 giây)...\n` });
       const planStartTime = Date.now();
       const planProgressTimer = setInterval(() => {
-        const cur = db.getJobById(id);
-        if (!cur || cur.status === 'CANCELLED') {
-          clearInterval(planProgressTimer);
-          return;
+        try {
+          const cur = db.getJobById(id);
+          if (!cur || cur.status === 'CANCELLED') {
+            clearInterval(planProgressTimer);
+            return;
+          }
+          const elapsedSec = Math.floor((Date.now() - planStartTime) / 1000);
+          jobEventBus.emitJobLog(id, { text: `\x1b[90m🤖 [PLANNING] ⏱️ ${elapsedSec}s - Agent đang tiếp tục xử lý phân tích và tổng hợp Kế hoạch...\x1b[0m\r\n` });
+        } catch (tickErr) {
+          // Callback interval khong duoc throw: uncaughtException se giet server.
+          console.warn('[PLANNING-TICK] Lỗi khi cập nhật tiến độ:', tickErr.message);
         }
-        const elapsedSec = Math.floor((Date.now() - planStartTime) / 1000);
-        jobEventBus.emitJobLog(id, { text: `\x1b[90m🤖 [PLANNING] ⏱️ ${elapsedSec}s - Agent đang tiếp tục xử lý phân tích và tổng hợp Kế hoạch...\x1b[0m\r\n` });
       }, 12000);
       const runner = runnerRegistry.getAvailableRunner(planningAgent);
       if (runner) {
         let outBuffer = '';
         let planningResult = null;
         let planningRunnerError = null;
-        const planningPromptFile = path.join(featureDir, 'prompt_planning.md');
+        // Tên file kèm jobId: 2 job cùng task_code chạy song song sẽ ghi đè
+        // prompt của nhau nếu dùng tên cố định.
+        const planningPromptFile = path.join(featureDir, `prompt_planning.${id}.md`);
         try {
           fs.writeFileSync(planningPromptFile, planningGuard.promptToUse, 'utf8');
         } catch (err) {
@@ -3924,12 +4342,16 @@ const executeStep = async (id, opts) => {
           // Moi vong retry tao interval rieng, luon clear trong finally cua vong do
           // (tranh ro timer giua cac vong retry).
           const impProgressTimer = setInterval(() => {
-            const cur = db.getJobById(id);
-            if (!cur || cur.status === 'CANCELLED') {
-              clearInterval(impProgressTimer);
-              return;
+            try {
+              const cur = db.getJobById(id);
+              if (!cur || cur.status === 'CANCELLED') {
+                clearInterval(impProgressTimer);
+                return;
+              }
+              jobEventBus.emitJobLog(id, { text: `🤖 [IMPLEMENT] Agent đang tiếp tục viết mã nguồn...\n` });
+            } catch (tickErr) {
+              console.warn('[IMPLEMENT-TICK] Lỗi khi cập nhật tiến độ:', tickErr.message);
             }
-            jobEventBus.emitJobLog(id, { text: `🤖 [IMPLEMENT] Agent đang tiếp tục viết mã nguồn...\n` });
           }, 6000);
 
           let attemptExpired = false;
@@ -3945,7 +4367,7 @@ const executeStep = async (id, opts) => {
               attemptExpired = true;
             } else {
               implementResult = null;
-              const implementPromptFile = path.join(featureDir, 'prompt_implement.md');
+              const implementPromptFile = path.join(featureDir, `prompt_implement.${id}.md`);
               try {
                 fs.writeFileSync(implementPromptFile, implementGuard.promptToUse, 'utf8');
               } catch (err) {
@@ -4099,12 +4521,15 @@ const executeStep = async (id, opts) => {
       const checkBeforeTest = db.getJobById(id);
       if (checkBeforeTest && checkBeforeTest.status === 'CANCELLED') return;
       const testAgent = agentMapping.TESTING || 'claude-code';
+      // Cấp port TRƯỚC khi agent khởi động service để 2 job không tranh port.
+      const portCtx = await acquireJobPortsForStep(id, 'TESTING');
+      if (portCtx.blocked) return;
       const testingPrompt = promptTemplateManager.buildPrompt({
         step: 'testing', taskCode, userPrompt: job.prompt || '', workspacePath, featureDir,
         previousContext: fileManager.loadPreviousContext(workspacePath, taskCode, 'testing'),
         errorLogs: ''
       });
-      const testingGuard = guardPrompt(testingPrompt);
+      const testingGuard = guardPrompt(`${portCtx.contract || ''}${testingPrompt}`);
       if (testingGuard.scrubbed || testingGuard.injection) {
         jobEventBus.emitJobLog(id, { text: `\n[GUARD] ⚠ Prompt TESTING: secret=${testingGuard.hasSecret ? 'có' : 'không'} injection=${testingGuard.injection ? 'có' : 'không'}. Tiếp tục bằng prompt đã scrub, không FAILED job.\n` });
       }
@@ -4112,12 +4537,16 @@ const executeStep = async (id, opts) => {
       jobEventBus.emitJobLog(id, { text: `\n[3/5] >>> 🤖 [TESTING] Bắt đầu kiểm thử thật với Runner/Agent: ${testAgent}...\n` });
 
       const testProgressTimer = setInterval(() => {
-        const cur = db.getJobById(id);
-        if (!cur || cur.status === 'CANCELLED') {
-          clearInterval(testProgressTimer);
-          return;
+        try {
+          const cur = db.getJobById(id);
+          if (!cur || cur.status === 'CANCELLED') {
+            clearInterval(testProgressTimer);
+            return;
+          }
+          jobEventBus.emitJobLog(id, { text: `🤖 [TESTING] Agent đang tiếp tục kiểm thử...\n` });
+        } catch (tickErr) {
+          console.warn('[TESTING-TICK] Lỗi khi cập nhật tiến độ:', tickErr.message);
         }
-        jobEventBus.emitJobLog(id, { text: `🤖 [TESTING] Agent đang tiếp tục kiểm thử...\n` });
       }, 6000);
 
       const runner = runnerRegistry.getAvailableRunner(testAgent);
@@ -4142,6 +4571,8 @@ const executeStep = async (id, opts) => {
             cwd: workspacePath,
             jobId: id,
             timeoutMs: stepTimeoutMs,
+            // Port đã thuê: agent phải dùng đúng các port này.
+            env: { AIWORKER_PORT_MAP: JSON.stringify(portCtx.ports || {}) },
             onStdout: (text) => jobEventBus.emitJobLog(id, { text }),
             onStderr: (text) => jobEventBus.emitJobLog(id, { text })
           });
@@ -4156,6 +4587,19 @@ const executeStep = async (id, opts) => {
         const checkAfterTest = db.getJobById(id);
         if (checkAfterTest && (checkAfterTest.status === 'CANCELLED' || checkAfterTest.status === 'PAUSED')) {
           return;
+        }
+
+        // Chặn "test trên bản build cũ": chỉ chấp nhận evidence khi service
+        // đang chạy đúng hash worktree và vừa được restart trong bước này.
+        const provTesting = await verifyRuntimeProvenance(id, portCtx, 'TESTING');
+        if (!provTesting.ok && config.RUNTIME_PROVENANCE_MODE === 'strict') {
+          const provReason = `Xác minh build thất bại: ${provTesting.reason || 'unknown'}`;
+          testingResult = {
+            ...(testingResult || {}),
+            exitCode: 1,
+            output: `${(testingResult && (testingResult.output || testingResult.stdout)) || ''}\n[PROVENANCE] ${provReason}`
+          };
+          jobEventBus.emitJobLog(id, { text: `[PROVENANCE] ⛔ ${provReason} — không chấp nhận evidence của bản build cũ.\n` });
         }
 
         if (!testingResult || testingResult.timedOut || testingResult.exitCode !== 0) {
@@ -4181,18 +4625,26 @@ const executeStep = async (id, opts) => {
       if (agentFailed) {
         const fixAgentAfterTest = agentMapping.FIXING || 'claude-code';
         const failReasonText = !testingResult ? 'khong co ket qua kiem thu' : (testingResult.timedOut ? ('vuot qua gioi han thoi gian ('+(testingResult.timeoutMs || stepTimeoutMs)+'ms)') : ('exit code '+testingResult.exitCode));
-        const failGate = { passed: false, error: 'Kiem thu that bai ('+failReasonText+')', timeout: !!(testingResult && testingResult.timedOut), decided_at: new Date().toISOString(), mapped_from: 'TESTING', source: 'pipeline-testing-failed' };
+        const failGate = { passed: false, error: `Kiem thu that bai (${failReasonText})`, timeout: !!(testingResult && testingResult.timedOut), decided_at: new Date().toISOString(), mapped_from: 'TESTING', source: 'pipeline-testing-failed' };
         // Rate-limit provider: retry vong FIXING sau chi lai lai mot vong ~1h vô ich.
         // runner.execute() tra { stdout, stderr } (khong phai `output`); log 429 cua CLI
         // nam trong stderr => phai gom ca hai.
         const testRateLimit = jobPolicy.detectRateLimit(jobPolicy.collectAgentOutput(testingResult));
         if (testRateLimit.limited) {
           const retryAfter = testRateLimit.retryAfterMs ? ` (retry-after ${Math.round(testRateLimit.retryAfterMs / 1000)}s)` : '';
-          const msg = `Provider rate-limit${retryAfter}. Dung pipeline, khong retry lai.`;
-          jobEventBus.emitJobLog(id, { text: `\n[RATE-LIMIT] ${msg}\n` });
-          db.updateJob(id, { status: 'FAILED', current_step: 'TESTING', error_message: msg, gate_result: failGate });
-          jobEventBus.emitJobStatus(id, { status: 'FAILED' });
-          jobEventBus.emitJobError(id, { error: msg });
+          const msg = `Provider rate-limit${retryAfter}`;
+          // Loi HA TANG: cho hoi phuc roi tu chay lai thay vi FAILED ngay.
+          // Chi 1 lan goi, khong day job sang FIXING (code khong sai).
+          jobEventBus.emitJobLog(id, { text: `\n[RATE-LIMIT] ${msg} — tạm dừng chờ hồi phục, không retry mù.\n` });
+          pauseJobForTransient(id, { step: 'TESTING', reason: msg, retryAfterMs: testRateLimit.retryAfterMs });
+          return;
+        }
+        // Loi ha tang khac (timeout CLI, spawn ENOENT, 5xx, output rong...) cung
+        // phai cho hoi phuc thay vi tinh la code sai.
+        const testFailureKind = jobPolicy.classifyFailure(jobPolicy.collectAgentOutput(testingResult));
+        if (testFailureKind === 'TRANSIENT') {
+          const infraMsg = `TESTING lỗi hạ tầng (exit ${testingResult && testingResult.exitCode}): ${String(jobPolicy.collectAgentOutput(testingResult)).slice(-400) || 'không có output'}`;
+          pauseJobForTransient(id, { step: 'TESTING', reason: infraMsg });
           return;
         }
         // Het tong ngan sach thoi gian cua job: dung, khong vao vong FIXING moi.
@@ -4205,10 +4657,13 @@ const executeStep = async (id, opts) => {
           jobEventBus.emitJobError(id, { error: msg });
           return;
         }
-        jobEventBus.emitJobLog(id, { text: `\n[TESTING] Agent kiểm thử báo lỗi ('+failReasonText+'), chuyển sang [FIXING]...` });
-        db.updateJob(id, { status: 'FIXING', current_step: 'FIXING', had_fixing: 1, runner: fixAgentAfterTest, error_message: 'Kiểm thử thất bại ('+failReasonText+').', gate_result: failGate });
+        jobEventBus.emitJobLog(id, { text: `\n[TESTING] Agent kiểm thử báo lỗi (${failReasonText}), chuyển sang [FIXING]...` });
+        db.updateJob(id, { status: 'FIXING', current_step: 'FIXING', had_fixing: 1, runner: fixAgentAfterTest, error_message: `Kiểm thử thất bại (${failReasonText}).`, gate_result: failGate });
         jobEventBus.emitJobStatus(id, { status: 'FIXING', runner: fixAgentAfterTest });
         scheduleNextStep(id, opts, 100);
+        // BẮT BUỘC return: nếu rơi tiếp xuống dưới sẽ ghi đè sang VERIFY và
+        // chạy SONG SONG cả FIXING lẫn VERIFY (double AI Vision + tranh port).
+        return;
       }
       jobEventBus.emitJobLog(id, { text: `\n[TESTING] Hoan tat kiem thu qua Agent, chuyen sang [VERIFY] de doi soat evidence...` });
       const verifyAgent = 'verify-gate';
@@ -4225,10 +4680,24 @@ const executeStep = async (id, opts) => {
       if (checkVerify && checkVerify.status === 'CANCELLED') return;
       // PreJudge: BO - chi ghi log, khong quyet dinh gi (verifyTaskEvidence la nguon su that).
       // Ton 1 network call moi vong FIXING ma khong doi hanh vi gi => ton tai, cham.
-      const { failed: verifyFailed, reasons: verifyReasons } = await verifyTaskEvidenceAsync({
+      const { failed: verifyFailed, reasons: verifyReasons, infraBlocked: verifyInfraBlocked } = await verifyTaskEvidenceAsync({
         jobId: id, evidenceDir, featureDir, taskCode,
         emit: (text) => jobEventBus.emitJobLog(id, { text })
       });
+      // Lỗi hạ tầng verifier (timeout/abort/5xx) KHÔNG phải nội dung sai: tạm dừng job
+      // để vòng tự hồi phục thử lại, không chuyển FIXING (đốt ngân sách vô ích) và
+      // tuyệt đối không cho qua MERGING với ảnh chưa thẩm định.
+      if (verifyInfraBlocked && !verifyFailed) {
+        const infraText = (Array.isArray(verifyReasons) && verifyReasons.length > 0)
+          ? verifyReasons.join('; ')
+          : 'AI Vision không kết luận được do lỗi hạ tầng verifier.';
+        jobEventBus.emitJobLog(id, {
+          text: `\n[VERIFY] ⏳ Không có lỗi nội dung, chỉ lỗi hạ tầng verifier: ${infraText}\n→ Tạm dừng job để tự thử lại (không chuyển FIXING).\n`,
+          level: 'warn'
+        });
+        pauseJobForTransient(id, { step: 'VERIFY', reason: infraText });
+        return;
+      }
       if (verifyFailed) {
         const fixAgent = agentMapping.FIXING || 'claude-code';
         const reasonText = (Array.isArray(verifyReasons) && verifyReasons.length > 0)
@@ -4279,12 +4748,26 @@ const executeStep = async (id, opts) => {
     if (job.status === 'FIXING') {
       const fixingAgent = agentMapping.FIXING || 'claude-code';
       beginStepTimeline(id, 'FIXING', fixingAgent);
+      // FIXING cũng khởi động lại service để chụp/kiểm tra lại => cũng phải thuê port.
+      const fixingPortCtx = await acquireJobPortsForStep(id, 'FIXING');
+      if (fixingPortCtx.blocked) return;
+      // resumeJobInternal xoa error_message khi chay lai => agent FIXING mat context loi.
+      // Fallback sang gate_result.error / last_verify_reasons de van biet phai sua gi.
+      const parseMaybeJson = (v) => {
+        try { return typeof v === 'string' ? JSON.parse(v) : v; } catch (e) { return null; }
+      };
+      const gateSnapshot = parseMaybeJson(job.gate_result) || {};
+      const pipeSnapshot = jobPolicy.parsePipelineConfig(job) || {};
+      const fixingErrorContext = job.error_message
+        || (gateSnapshot && gateSnapshot.error)
+        || (Array.isArray(pipeSnapshot.last_verify_reasons) ? pipeSnapshot.last_verify_reasons.join('; ') : '')
+        || '';
       const fixingPrompt = promptTemplateManager.buildPrompt({
         step: 'fixing', taskCode, userPrompt: job.prompt || '', workspacePath, featureDir,
         previousContext: fileManager.loadPreviousContext(workspacePath, taskCode, 'fixing'),
-        errorLogs: job.error_message || ''
+        errorLogs: fixingErrorContext
       });
-      const fixingGuard = guardPrompt(fixingPrompt);
+      const fixingGuard = guardPrompt(`${fixingPortCtx.contract || ''}${fixingPrompt}`);
       logSystemOneFallback(id, 'guard/FIXING', fixingGuard.decision);
       if (fixingGuard.scrubbed || fixingGuard.injection) {
         jobEventBus.emitJobLog(id, { text: `\n[GUARD] ⚠ Prompt FIXING: secret=${fixingGuard.hasSecret ? 'có' : 'không'} injection=${fixingGuard.injection ? 'có' : 'không'}. Tiếp tục bằng prompt đã scrub, không FAILED job.\n` });
@@ -4363,6 +4846,7 @@ const executeStep = async (id, opts) => {
             fixingResult = await runner.execute({
               prompt: fixingGuard.promptToUse,
               promptFilePath: fixingPromptFile,
+              env: { AIWORKER_PORT_MAP: JSON.stringify(fixingPortCtx.ports || {}) },
               featureDir,
               step: 'FIXING',
               taskCode,
@@ -4386,6 +4870,17 @@ const executeStep = async (id, opts) => {
             jobEventBus.emitJobStatus(id, { status: 'FAILED' });
             jobEventBus.emitJobError(id, { error: msg });
             return;
+          }
+          // Xác minh service chạy đúng build worktree (chống test trên bản cũ).
+          if (fixingResult && !fixingResult.timedOut && fixingResult.exitCode === 0) {
+            const provFix = await verifyRuntimeProvenance(id, fixingPortCtx, 'FIXING');
+            if (!provFix.ok && config.RUNTIME_PROVENANCE_MODE === 'strict') {
+              fixingResult = {
+                ...fixingResult,
+                exitCode: 1,
+                stderr: `${fixingResult.stderr || ''}\n[PROVENANCE] Xác minh build thất bại: ${provFix.reason || 'unknown'}`
+              };
+            }
           }
           if (fixingResult && !fixingResult.timedOut && fixingResult.exitCode === 0) {
             fixingOk = true;
@@ -4557,11 +5052,18 @@ const executeStep = async (id, opts) => {
             preMergeSha = require('node:child_process').execSync('git rev-parse HEAD', { cwd: repoFullPath, stdio: 'pipe', encoding: 'utf-8' }).trim();
           } catch (_) {}
 
+          // Message merge = NỘI DUNG ĐÃ LÀM của task (report.md, fallback summary/title).
+          const mergeJob = db.getJobById(id) || job;
+          const mergeFeatureDir = (() => {
+            try { return resolveFeatureDirForJob(mergeJob); } catch (e) { return null; }
+          })();
+          const taskMergeMessage = worktreeManager.buildTaskMergeMessage(mergeJob, taskCode, mergeFeatureDir);
           jobEventBus.emitJobLog(id, { text: `[MERGING] Merge nhánh '${taskBranch}' vào nhánh phát triển '${targetDevBranch}'...\n` });
           const mRes = worktreeManager.mergeBranch({
             repoFullPath,
             targetDevBranch,
-            taskBranch
+            taskBranch,
+            message: taskMergeMessage
           });
 
           if (mRes.conflict) {
@@ -4604,7 +5106,7 @@ const executeStep = async (id, opts) => {
 
             if (testResult.passed) {
               jobEventBus.emitJobLog(id, { text: `[MERGING] ✅ RE-TEST PASS trên repo gốc sau khi gỡ conflict!\n` });
-              worktreeManager.finalizeMergeCommit(repoFullPath, `Merge task ${taskCode} into ${targetDevBranch} and resolve conflicts`);
+              worktreeManager.finalizeMergeCommit(repoFullPath, taskMergeMessage);
               worktreeManager.restoreWorkingTree(repoFullPath, stashInfo);
               worktreeManager.removeTaskWorktree(repoFullPath, wt.worktree_path);
               db.updateJobWorktreeStatus(wt.id, 'MERGED');
@@ -4747,8 +5249,13 @@ const runJobPipeline = (jobId, opts) => {
     // (sai), va `fix_attempt` cu lam FIXING nhay o vong da het han muc.
     if (!jobToStart.status || RESTARTABLE_JOB_STATUSES.has(currentStatus)) {
       const freshPipe = jobPolicy.clearFailureHistory(jobPolicy.parsePipelineConfig(jobToStart));
-      delete freshPipe.fix_attempt;
-      delete freshPipe.fixAttempt;
+      // KHONG xoa `fix_attempt` o day: truoc day moi lan Start lai deu reset
+      // => max_retries vo hieu (job da chay 15 vong FIXING du khai 10).
+      // Chi /rerun?mode=restart moi duoc reset ngan sach.
+      delete freshPipe.last_error_kind;
+      delete freshPipe.last_error_reason;
+      delete freshPipe.retry_at;
+      delete freshPipe.transient_retry;
       // Xoa deadline cu: lan chay moi phai co ngan sach thoi gian MOI
       // (neu giu deadline da het han, job moi se chet ngay o buoc dau tien).
       delete freshPipe.deadline_at;
@@ -5219,6 +5726,204 @@ app.post('/api/v1/jobs/:id/cancel', async (req, res) => {
   }
 });
 /**
+ * Tinh thu muc feature cua job (dung cho marker plan + prompt file).
+ */
+function resolveFeatureDirForJob(job) {
+  let workspacePath = job.repo_path || job.worktree_path || './';
+  let wsFeaturesDir = 'docs/features';
+  try {
+    let ws = job.workspace_id ? db.getWorkspaceById(job.workspace_id) : null;
+    if (!ws && typeof db.listWorkspaces === 'function') {
+      ws = db.listWorkspaces().find((w) => path.resolve(w.path) === path.resolve(workspacePath));
+    }
+    if (ws) {
+      if (ws.path) workspacePath = ws.path;
+      if (ws.features_dir) wsFeaturesDir = ws.features_dir;
+    }
+  } catch (e) {}
+  return fileManager.getFeatureDirectory(workspacePath, job.task_code || job.id, wsFeaturesDir);
+}
+
+// Cac trang thai duoc phep "chay lai / tiep tuc" tu dong hoac thu cong.
+const RESUMABLE_JOB_STATUSES = new Set(['FAILED', 'TIMED_OUT', 'CANCELLED', 'PAUSED', 'PLANNING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING', 'MERGING']);
+const PHASE_STEP_NAMES = new Set(['PLANNING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING', 'MERGING']);
+
+/**
+ * Job bi loi HA TANG (model/CLI/rate-limit) => PAUSED de CHO HOI PHUC thay vi
+ * FAILED/FIXING. Khong tang `fix_attempt`, nho vay khong dot ngan sach retry
+ * va khong day agent vao vong FIXING vo nghia.
+ * @returns {object|null} job sau cap nhat
+ */
+function pauseJobForTransient(jobId, { step, reason, retryAfterMs } = {}) {
+  const job = db.getJobById(jobId);
+  if (!job) return null;
+  const resumeStep = PHASE_STEP_NAMES.has(String(step || '').toUpperCase())
+    ? String(step).toUpperCase()
+    : (PHASE_STEP_NAMES.has(String(job.current_step || '').toUpperCase()) ? String(job.current_step).toUpperCase() : 'PLANNING');
+  const attempt = (Number(jobPolicy.parsePipelineConfig(job).transient_retry) || 0) + 1;
+  if (attempt > jobPolicy.MAX_TRANSIENT_RETRIES) {
+    // Da cho hoi phuc qua so lan cho phep => coi la loi that.
+    db.updateJob(jobId, {
+      status: 'FAILED',
+      current_step: resumeStep,
+      error_message: `Lỗi hạ tầng kéo dài sau ${jobPolicy.MAX_TRANSIENT_RETRIES} lần chờ hồi phục: ${String(reason || '').slice(0, 300)}`
+    });
+    endStepTimeline(jobId, { status: 'FAILED' });
+    jobEventBus.emitJobStatus(jobId, { status: 'FAILED' });
+    return db.getJobById(jobId);
+  }
+  const pipe = jobPolicy.markTransientFailure({ ...job, pipeline_config: JSON.stringify(jobPolicy.parsePipelineConfig(job)) }, {
+    step: resumeStep,
+    reason,
+    retryAfterMs
+  });
+  const updated = db.updateJob(jobId, {
+    status: 'PAUSED',
+    current_step: resumeStep,
+    error_message: `[TRANSIENT] ${String(reason || '').slice(0, 400)}`,
+    pipeline_config: pipe
+  });
+  endStepTimeline(jobId, { status: 'CANCELLED' });
+  try {
+    if (taskQueue.isJobEnqueuedOrRunning(jobId)) taskQueue.cancel(jobId);
+  } catch (e) {}
+  jobEventBus.emitJobStatus(jobId, { status: 'PAUSED', current_step: resumeStep });
+  jobEventBus.emitJobLog(jobId, {
+    text: `\n[TRANSIENT] ⏳ Lỗi hạ tầng (không phải lỗi code). Tạm dừng job và chờ hồi phục lần ${attempt}/${jobPolicy.MAX_TRANSIENT_RETRIES}, dự kiến thử lại sau ${Math.round(jobPolicy.resolveTransientBackoffMs(attempt) / 1000)}s.\nLý do: ${String(reason || '').slice(0, 300)}\n`,
+    level: 'warn'
+  });
+  return updated;
+}
+
+/**
+ * Tiep tuc / chay lai 1 job.
+ * @param {string} jobId
+ * @param {object} [options]
+ * @param {'resume'|'restart'} [options.mode='resume'] resume = giu plan+ngan sach;
+ *        restart = xoa marker plan + fix_attempt, chay lai tu PLANNING.
+ * @param {boolean} [options.auto] do vong cho hoi phuc goi (khong kiem tra lai quyen)
+ * @returns {{ok: boolean, code?: number, message?: string, job?: object, resumedStep?: string}}
+ */
+async function resumeJobInternal(jobId, { mode = 'resume', auto = false } = {}) {
+  const job = db.getJobById(jobId);
+  if (!job) return { ok: false, code: 404, message: `Job with ID '${jobId}' not found` };
+  const statusNorm = (job.status || '').toString().trim().toUpperCase();
+  if (taskQueue.isJobEnqueuedOrRunning(jobId)) {
+    return { ok: false, code: 409, message: `Task đang chạy hoặc trong hàng đợi (${job.status}), không thể chạy lại.` };
+  }
+  if (!RESUMABLE_JOB_STATUSES.has(statusNorm)) {
+    return { ok: false, code: 409, message: `Không thể chạy lại task ở trạng thái ${job.status}. Hãy Clone sang mã mới.` };
+  }
+  // Preflight: runner phai that su san sang, neu khong bao ro thay vi chay roi fail.
+  try {
+    const detected = runnerRegistry.detectAll() || [];
+    const hasInstalled = detected.some((r) => r.installed);
+    if (!hasInstalled) {
+      return { ok: false, code: 409, message: 'RUNNER_UNAVAILABLE: không có AI CLI nào sẵn sàng (claude/codex/omp/opencode). Kiểm tra lại môi trường rồi thử lại.' };
+    }
+  } catch (e) {}
+
+  let pipe = jobPolicy.parsePipelineConfig(job);
+  // UU TIEN BUOC DANG DO cua job, KHONG uu tien `paused_step` cu.
+  // `paused_step` chi duoc ghi luc user bam Dung; neu job sau do da chay tiep
+  // (vd dang FIXING) thi gia tri cu (PLANNING) se keo job ve dau pipeline.
+  const currentPhase = String(job.current_step || '').trim().toUpperCase();
+  const statusPhase = String(job.status || '').trim().toUpperCase();
+  const pausedPhase = String(pipe.paused_step || '').trim().toUpperCase();
+  let resumeStep = PHASE_STEP_NAMES.has(currentPhase)
+    ? currentPhase
+    : (PHASE_STEP_NAMES.has(statusPhase)
+      ? statusPhase
+      : (PHASE_STEP_NAMES.has(pausedPhase) ? pausedPhase : 'PLANNING'));
+
+  if (mode === 'restart') {
+    // Chay lai tu dau: xoa marker plan + implement + ngan sach fix cu.
+    delete pipe.fix_attempt;
+    delete pipe.fixAttempt;
+    delete pipe.implement_status;
+    delete pipe.paused_step;
+    delete pipe.pause_kind;
+    delete pipe.waiting_reason;
+    delete pipe.next_auto_resume_at;
+    delete pipe.last_error_kind;
+    delete pipe.last_error_reason;
+    delete pipe.retry_at;
+    delete pipe.transient_retry;
+    pipe = jobPolicy.clearFailureHistory(pipe);
+    try { stepGate.clearPlanOkMarker(resolveFeatureDirForJob(job)); } catch (e) {}
+    resumeStep = 'PLANNING';
+  } else {
+    // resume: GIU fix_attempt (ngan sach retry khong bi reset) + cho ngan sach thoi gian moi.
+    delete pipe.paused_step;
+    delete pipe.pause_kind;
+    delete pipe.waiting_reason;
+    delete pipe.next_auto_resume_at;
+    delete pipe.last_error_kind;
+    delete pipe.last_error_reason;
+    delete pipe.retry_at;
+    delete pipe.transient_retry;
+  }
+  // Moi lan chay lai duoc cap ngan sach thoi gian moi (deadline cu da het).
+  delete pipe.deadline_at;
+  delete pipe.deadlineAt;
+
+  const updatedJob = db.updateJob(jobId, {
+    status: resumeStep,
+    current_step: resumeStep,
+    error_message: null,
+    completed_at: null,
+    pipeline_config: pipe
+  });
+
+  jobEventBus.emitJobStatus(jobId, { status: resumeStep, current_step: resumeStep });
+  jobEventBus.emitJobLog(jobId, {
+    text: `\n[${mode === 'restart' ? 'RERUN-RESTART' : 'RERUN-RESUME'}] ${auto ? 'Tự động ' : ''}Tiếp tục thực thi tại bước [${resumeStep}]${mode === 'resume' ? ' (giữ nguyên ngân sách retry)' : ' (đã reset ngân sách retry)'}.\n`
+  });
+  if (taskQueue.isJobEnqueuedOrRunning(jobId)) {
+    scheduleNextStep(jobId, {}, 100);
+  } else {
+    taskQueue.enqueue(updatedJob, (queuedJob, queueOpts) => runJobPipeline(jobId, queueOpts), (updatedJob && updatedJob.priority) || 0);
+  }
+  return { ok: true, job: updatedJob, resumedStep: resumeStep };
+}
+
+/**
+ * Vong quet 15s: job PAUSED do loi HA TANG va da den gio thu lai => tu chay tiep.
+ * KHONG dung toi cac job PAUSED do nguoi dung bam Dung (khong co last_error_kind).
+ */
+function startTransientRecoveryLoop() {
+  if (global.__aiWorkerTransientRecovery) return global.__aiWorkerTransientRecovery;
+  const timer = setInterval(async () => {
+    try {
+      const paused = db.listJobs({ status: 'PAUSED', limit: 50 }) || [];
+      for (const job of paused) {
+        const pipe = jobPolicy.parsePipelineConfig(job);
+        if (String(pipe.last_error_kind || '') !== 'TRANSIENT') continue;
+        const retryAt = Number(pipe.retry_at) || 0;
+        if (!retryAt || retryAt > Date.now()) continue;
+        if (taskQueue.isJobEnqueuedOrRunning(job.id)) continue;
+        const attempt = Number(pipe.transient_retry) || 1;
+        if (attempt > jobPolicy.MAX_TRANSIENT_RETRIES) {
+          db.updateJob(job.id, {
+            status: 'FAILED',
+            error_message: `Lỗi hạ tầng kéo dài sau ${jobPolicy.MAX_TRANSIENT_RETRIES} lần chờ hồi phục.`
+          });
+          jobEventBus.emitJobStatus(job.id, { status: 'FAILED' });
+          continue;
+        }
+        console.log(`[RECOVERY] Tự động chạy lại job ${job.task_code || job.id} sau khi hết backoff (lần ${attempt}).`);
+        await resumeJobInternal(job.id, { mode: 'resume', auto: true });
+      }
+    } catch (e) {
+      console.warn('[RECOVERY] Lỗi vòng quét chờ hồi phục:', e.message);
+    }
+  }, 15000);
+  if (timer.unref) timer.unref();
+  global.__aiWorkerTransientRecovery = timer;
+  return timer;
+}
+
+/**
  * POST /api/v1/jobs/:id/pause và POST /api/v1/tasks/:id/pause
  * Tạm dừng ngay tại bước đang làm và ngắt tiến trình con đang chạy
  */
@@ -5327,6 +6032,36 @@ app.post(['/api/v1/jobs/:id/resume', '/api/v1/tasks/:id/resume'], async (req, re
       message: `Đã tiếp tục task tại bước ${resumeStep}`,
       resumed_step: resumeStep,
       job: updatedJob
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * POST /api/v1/jobs/:id/rerun
+ * Chạy lại / tiếp tục một job sau khi môi trường hoặc model đã hồi phục.
+ * Body: { mode: 'resume' | 'restart' }
+ *  - resume  (mặc định): giữ kế hoạch + evidence + ngân sách retry, chạy tiếp từ bước đang dở.
+ *  - restart: xoá marker plan/implement + fix_attempt, chạy lại từ PLANNING.
+ */
+app.post(['/api/v1/jobs/:id/rerun', '/api/v1/tasks/:id/rerun'], async (req, res) => {
+  try {
+    const { id } = req.params;
+    const rawMode = String((req.body && (req.body.mode || req.body.action)) || 'resume').toLowerCase();
+    const mode = rawMode === 'restart' ? 'restart' : 'resume';
+    const result = await resumeJobInternal(id, { mode });
+    if (!result.ok) {
+      return res.status(result.code || 400).json({ success: false, error: result.message, mode });
+    }
+    return res.json({
+      success: true,
+      mode,
+      message: mode === 'restart'
+        ? 'Đã chạy lại task từ đầu (reset ngân sách retry).'
+        : `Đã tiếp tục task tại bước ${result.resumedStep}.`,
+      resumed_step: result.resumedStep,
+      job: result.job
     });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
@@ -5867,11 +6602,10 @@ app.get('/api/v1/jobs/:id/logs/stream', (req, res) => {
   jobEventBus.on(`job:${id}:done`, doneListener);
   jobEventBus.on(`job:${id}:error`, errorListener);
   jobEventBus.on(`job:${id}:systemone`, systemOneListener);
-  // 4b. Tick "Thoi luong" realtime: gui runtime_ms moi giay cho client
+  // 4b. Tick "Thoi luong" realtime: gui runtime_ms moi 5 giay cho client
   // (thoi gian worker THUC SU chay, da cong don tu cac doan `steps`).
-  // Client tinh san 1s => khong can polling lai endpoint job chi tiet.
-  // CHI tick khi job DANG CHAY: job terminal/FAILED/PENDING khong doi runtime
-  // nua => khong ton 2 query SQLite/giay cho moi connection (dang mo).
+  // Truoc day 1s => 2 query SQLite dong bo/giay cho MOI ket noi SSE, chen giua
+  // write cua pipeline. 5s la du muot cho dong ho hien thi.
   const runtimeTickInterval = setInterval(() => {
     try {
       const fresh = db.getJobById(id);
@@ -5887,7 +6621,7 @@ app.get('/api/v1/jobs/:id/logs/stream', (req, res) => {
     } catch (e) {
       // Bỏ qua lỗi tick (job có thể vừa bị xóa)
     }
-  }, 1000);
+  }, 5000);
 
   // 5. Heartbeat Ping giữ kết nối không bị timeout
   const keepAliveInterval = setInterval(() => {
@@ -6242,9 +6976,15 @@ module.exports = {
   getTaskEvidences,
   evaluateRepeatedCause,
   executeStep,
+  restoreMissingJobWorktree,
   // Runtime accounting (thoi gian worker thuc su chay task) - export de test.
   computeJobRuntimeMs,
   beginStepTimeline,
   endStepTimeline,
-  stepTimeline
+  stepTimeline,
+  // Cho phep khoi dong vong tu dong cho hoi phuc sau loi ha tang (index.js goi).
+  startTransientRecoveryLoop,
+  startPortWaitRecoveryLoop,
+  resumeJobInternal,
+  pauseJobForTransient
 };

@@ -116,10 +116,14 @@
             <option value="PLANNING">PLANNING</option>
             <option value="IMPLEMENT">IMPLEMENT</option>
             <option value="TESTING">TESTING</option>
+            <option value="VERIFY">VERIFY</option>
             <option value="FIXING">FIXING</option>
+            <option value="MERGING">MERGING</option>
             <option value="PENDING">Chờ giải đáp / Pending</option>
+            <option value="PAUSED">PAUSED (Tạm dừng)</option>
             <option value="DONE">DONE (Hoàn thành)</option>
             <option value="FAILED">FAILED (Thất bại)</option>
+            <option value="TIMED_OUT">TIMED_OUT (Quá thời gian)</option>
             <option value="CANCELLED">CANCELLED (Đã hủy)</option>
             <option value="ARCHIVED">ARCHIVED (Lưu trữ)</option>
           </select>
@@ -227,11 +231,15 @@
                   <option value="PLANNING">PLANNING</option>
                   <option value="IMPLEMENT">IMPLEMENT</option>
                   <option value="TESTING">TESTING</option>
+                  <option value="VERIFY">VERIFY</option>
                   <option value="FIXING">FIXING</option>
+                  <option value="MERGING">MERGING</option>
                   <option value="PENDING">PENDING</option>
+                  <option value="PAUSED">PAUSED</option>
                   <option value="DONE">DONE</option>
                   <option value="FAILED">FAILED</option>
                   <option value="CANCELLED">CANCELLED</option>
+                  <option value="TIMED_OUT">TIMED_OUT</option>
                 </select>
                 <button id="btnUpdateStatus" class="px-2 py-0.5 rounded bg-brand-600 hover:bg-brand-500 text-white text-[11px] font-semibold transition flex items-center gap-1 shadow" title="Lưu Status">
                   <i class="fa-solid fa-floppy-disk"></i>
@@ -283,6 +291,12 @@
                 <span>Hủy bỏ</span>
               </button>
 
+              <!-- B3: Nút Chạy lại Task (chỉ hiện với FAILED / TIMED_OUT / CANCELLED / PAUSED) -->
+              <button id="btnRerunJob" class="hidden px-3 py-1.5 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/30 text-xs font-semibold transition flex items-center gap-1.5 active:scale-95 disabled:opacity-40 disabled:pointer-events-none" title="Chạy lại task: tiếp tục từ bước lỗi hoặc chạy lại từ đầu">
+                <i class="fa-solid fa-rotate-right"></i>
+                <span>Chạy lại</span>
+              </button>
+
               <!-- Nút Refresh thủ công -->
               <button id="btnRefreshActiveJob" class="p-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-400 hover:text-white border border-slate-700 text-xs transition" title="Làm mới trạng thái">
                 <i class="fa-solid fa-arrows-rotate"></i>
@@ -312,6 +326,39 @@
               <span>Duyệt kế hoạch & Chạy IMPLEMENT</span>
             </button>
           </div>
+        </div>
+        <!-- B3: BANNER CHỜ HỒI PHỤC (PAUSED + lỗi TRANSIENT) -->
+        <div id="recoveryAlertBanner" class="hidden p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg">
+          <div class="flex items-start gap-3">
+            <div class="w-8 h-8 rounded-lg bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0 border border-amber-500/40">
+              <i class="fa-solid fa-arrows-rotate text-base"></i>
+            </div>
+            <div>
+              <div class="font-bold text-xs sm:text-sm text-amber-300">Provider/môi trường tạm lỗi — đang chờ hồi phục</div>
+              <p class="text-xs text-amber-200/80 mt-0.5">Task đang tạm dừng (PAUSED) do lỗi tạm thời. Bạn có thể thử lại ngay hoặc chờ hệ thống tự phục hồi.</p>
+            </div>
+          </div>
+          <button id="btnRetryRecovery" class="px-3.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-semibold text-xs shadow transition flex items-center gap-1.5 shrink-0 active:scale-95">
+            <i class="fa-solid fa-rotate-right"></i>
+            <span>Thử lại ngay</span>
+          </button>
+        </div>
+
+        <!-- PORT WAIT BANNER: đang chờ port hoặc đã tạm dừng vì hết thời gian chờ -->
+        <div id="portWaitBanner" class="hidden p-3.5 rounded-xl bg-sky-500/10 border border-sky-500/30 text-sky-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg">
+          <div class="flex items-start gap-3">
+            <div class="w-8 h-8 rounded-lg bg-sky-500/20 text-sky-400 flex items-center justify-center shrink-0 border border-sky-500/40">
+              <i class="fa-solid fa-plug-circle-bolt text-base"></i>
+            </div>
+            <div>
+              <div class="font-bold text-xs sm:text-sm text-sky-300">Task đang chờ PORT để kiểm thử</div>
+              <p id="portWaitText" class="text-xs text-sky-200/80 mt-0.5">Service của workspace đang được task khác sử dụng. Task sẽ tự chạy lại khi port được nhả.</p>
+            </div>
+          </div>
+          <button id="btnRetryPortWait" class="px-3.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold text-xs shadow transition flex items-center gap-1.5 shrink-0 active:scale-95">
+            <i class="fa-solid fa-rotate-right"></i>
+            <span>Thử lại ngay</span>
+          </button>
         </div>
         <!-- 2. PIPELINE STEPPER BAR COMPONENT -->
         <section class="bg-surface-900 border border-slate-800 rounded-xl p-4 shadow-md">

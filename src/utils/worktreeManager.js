@@ -1,6 +1,8 @@
 const { execSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
+const crypto = require('node:crypto');
 
 /**
  * Di chuyển file hoặc thư mục vào thùng rác (Recycle Bin / Trash) an toàn,
@@ -559,14 +561,37 @@ function hasMergeConflict(repoFullPath) {
 }
 
 /**
+ * Dựng message merge từ NỘI DUNG ĐÃ LÀM của task.
+ * Ưu tiên `report.md` (báo cáo thay đổi thực tế), fallback summary/title của job.
+ * @param {object} job
+ * @param {string} taskCode
+ * @param {string} [featureDir] thư mục docs/features/<taskCode>
+ * @returns {string}
+ */
+function buildTaskMergeMessage(job, taskCode, featureDir) {
+  let report = '';
+  try {
+    const reportPath = featureDir ? path.join(featureDir, 'report.md') : null;
+    if (reportPath && fs.existsSync(reportPath)) {
+      report = fs.readFileSync(reportPath, 'utf8').replace(/^\uFEFF/, '').trim();
+    }
+  } catch (e) {}
+  const summary = String((job && job.summary) || '').replace(/\s+/g, ' ').trim();
+  const subject = `[${taskCode || (job && job.task_code) || 'TASK'}] ${summary || (job && job.title) || 'hoàn thành task'}`.slice(0, 150);
+  const body = report.replace(/^---[\s\S]*?---\s*/, '').slice(0, 4000).trim();
+  return body ? `${subject}\n\n${body}` : subject;
+}
+
+/**
  * Thực hiện merge branch task vào target_dev_branch trên repo gốc
  * @param {object} params
  * @param {string} params.repoFullPath Đường dẫn tuyệt đối repo gốc
  * @param {string} params.targetDevBranch Nhánh phát triển gốc (vd: develop)
  * @param {string} params.taskBranch Nhánh task (vd: feature/TASK-1024)
+ * @param {string} [params.message] Nội dung commit merge (mặc định: mô tả branch)
  * @returns {{ success: boolean, conflict: boolean, conflictFiles?: string[], error?: string }}
  */
-function mergeBranch({ repoFullPath, targetDevBranch, taskBranch }) {
+function mergeBranch({ repoFullPath, targetDevBranch, taskBranch, message }) {
   if (!repoFullPath || !fs.existsSync(repoFullPath)) {
     return { success: false, conflict: false, error: 'Repo không tồn tại' };
   }
@@ -588,13 +613,21 @@ function mergeBranch({ repoFullPath, targetDevBranch, taskBranch }) {
     };
   }
   // 2. Thử merge
+  // Message do caller truyền vào = nội dung đã làm của task (report.md/summary).
+  // Ghi ra file tạm rồi dùng `-F` để không vỡ quote/xuống dòng trên Windows.
+  const finalMessage = (typeof message === 'string' && message.trim())
+    ? message.trim()
+    : `Merge task branch '${taskBranch}' into '${targetDevBranch}'`;
+  let messageFile = null;
   try {
-    execSync(`git merge --no-ff "${taskBranch}" -m "Merge task branch '${taskBranch}' into '${targetDevBranch}'"`, {
+    messageFile = path.join(os.tmpdir(), `aiworker-merge-${crypto.randomUUID()}.txt`);
+    fs.writeFileSync(messageFile, finalMessage, 'utf8');
+    execSync(`git merge --no-ff "${taskBranch}" -F "${messageFile}"`, {
       cwd: repoFullPath,
       stdio: 'pipe',
       encoding: 'utf-8'
     });
-    return { success: true, conflict: false };
+    return { success: true, conflict: false, message: finalMessage };
   } catch (err) {
     // Kiểm tra xem có conflict không
     const conflictCheck = hasMergeConflict(repoFullPath);
@@ -611,6 +644,10 @@ function mergeBranch({ repoFullPath, targetDevBranch, taskBranch }) {
       conflict: false,
       error: err.stderr ? err.stderr.toString() : err.message
     };
+  } finally {
+    if (messageFile) {
+      try { fs.unlinkSync(messageFile); } catch (e) {}
+    }
   }
 }
 
@@ -876,6 +913,7 @@ module.exports = {
   restoreWorkingTree,
   hasMergeConflict,
   mergeBranch,
+  buildTaskMergeMessage,
   abortMerge,
   saveTaskManifest,
   loadTaskManifest,

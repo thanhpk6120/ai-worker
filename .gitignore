@@ -36,3 +36,6 @@ Thumbs.db
 .vscode/
 *.suo
 *.user
+
+# Ban sao luu DB (giu ngoai git)
+ai-worker.sqlite.backup*

@@ -266,6 +266,14 @@ function initDb() {
     CREATE INDEX IF NOT EXISTS idx_jobs_task_code    ON jobs(task_code);
     CREATE INDEX IF NOT EXISTS idx_steps_job_id      ON steps(job_id);
     CREATE INDEX IF NOT EXISTS idx_questions_job_id  ON questions(job_id);
+    -- Hieu nang: dual_plans chiem phan lon dung luong DB nhung truoc day bi
+    -- full-scan moi lan mo job (khong co index tren job_id).
+    CREATE INDEX IF NOT EXISTS idx_dual_plans_job    ON dual_plans(job_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_evidence_job      ON evidence(job_id);
+    -- Loc step dang mo cua 1 job (reconciliation luc boot + dong step khi cancel).
+    CREATE INDEX IF NOT EXISTS idx_steps_job_status  ON steps(job_id, status);
+    -- Sap xep danh sach job theo uu tien roi moi den thoi gian tao.
+    CREATE INDEX IF NOT EXISTS idx_jobs_priority_created ON jobs(priority DESC, created_at DESC);
   `);
 
   // Checkpoint WAL định kỳ để file WAL không phình to (T3P.1)
@@ -456,6 +464,13 @@ function archiveJob(id) {
   if (!job) {
     return { success: false, error: 'Task không tồn tại' };
   }
+  // Khong cho luu tru task dang chay: neu khong pipeline van chay ngam trong khi
+  // UI coi nhu da luu tru (task bien mat khoi danh sach).
+  const status = (job.status || '').toString().trim().toUpperCase();
+  const runningStatuses = ['PLANNING', 'PENDING', 'IMPLEMENT', 'TESTING', 'VERIFY', 'FIXING', 'MERGING'];
+  if (runningStatuses.includes(status)) {
+    return { success: false, error: `Không thể lưu trữ task đang chạy (${job.status}). Hãy dừng task trước.` };
+  }
   const newStatus = job.status === 'ARCHIVED' ? 'TO DO' : 'ARCHIVED';
   const updated = updateJobStatus(id, newStatus);
   return { success: true, status: newStatus, job: updated };
@@ -535,8 +550,54 @@ function updateStep(id, updates) {
 
 function getStepsByJobId(jobId) {
   const db = getDb();
-  const stmt = db.prepare('SELECT * FROM steps WHERE job_id = ? ORDER BY step_index ASC');
+  const stmt = getStmt('SELECT * FROM steps WHERE job_id = ? ORDER BY step_index ASC');
   return stmt.all(jobId);
+}
+
+/**
+ * Lay steps cua NHIEU job trong 1 query duy nhat (chong N+1 khi render danh sach).
+ * @param {string[]} jobIds
+ * @returns {Map<string, Array<object>>} jobId -> steps (sap xep theo step_index)
+ */
+function getStepsByJobIds(jobIds) {
+  const result = new Map();
+  const ids = Array.isArray(jobIds) ? jobIds.filter(Boolean) : [];
+  if (ids.length === 0) return result;
+  const db = getDb();
+  const placeholders = ids.map(() => '?').join(', ');
+  const rows = db.prepare(
+    `SELECT * FROM steps WHERE job_id IN (${placeholders}) ORDER BY job_id ASC, step_index ASC`
+  ).all(...ids);
+  for (const row of rows) {
+    if (!result.has(row.job_id)) result.set(row.job_id, []);
+    result.get(row.job_id).push(row);
+  }
+  return result;
+}
+
+/**
+ * Dong cac step con treo o trang thai RUNNING (orphan).
+ *
+ * VI SAO CAN: `stepTimeline` chi la Map trong RAM (giu 1 step/job). Khi server
+ * restart hoac job bi cancel/start lai, row RUNNING cu khong con ai dong =>
+ * ton dong "RUNNING" vinh vien, UI hien nhieu buoc dang chay va runtime bi sai.
+ *
+ * @param {object} [options]
+ * @param {string} [options.status='CANCELLED'] trang thai ghi de
+ * @param {Date}   [options.now]
+ * @param {string} [options.jobId] chi dong step cua 1 job (bo trong = tat ca)
+ * @returns {number} so row da dong
+ */
+function closeOrphanRunningSteps(options = {}) {
+  const db = getDb();
+  const status = options.status || 'CANCELLED';
+  const nowIso = (options.now instanceof Date ? options.now : new Date()).toISOString();
+  const jobId = options.jobId;
+  const stmt = jobId
+    ? getStmt(`UPDATE steps SET status = ?, finished_at = ? WHERE status = 'RUNNING' AND finished_at IS NULL AND job_id = ?`)
+    : getStmt(`UPDATE steps SET status = ?, finished_at = ? WHERE status = 'RUNNING' AND finished_at IS NULL`);
+  const result = jobId ? stmt.run(status, nowIso, jobId) : stmt.run(status, nowIso);
+  return Number(result && result.changes) || 0;
 }
 
 // ==========================================
@@ -992,6 +1053,17 @@ function updateJobWorktreeStatus(id, status) {
   stmt.run(status, now, id);
   return getJobWorktreeById(id);
 }
+/**
+ * Khôi phục một worktree đã bị dọn (status CANCELLED/REMOVED) khi job được mở lại.
+ * Cập nhật lại đúng bản ghi cũ thay vì tạo bản ghi trùng lặp cho cùng service_key.
+ */
+function updateJobWorktreeRestore(id, worktreePath, status = 'ACTIVE') {
+  const db = getDb();
+  const now = new Date().toISOString();
+  const stmt = db.prepare('UPDATE job_worktrees SET worktree_path = ?, status = ?, updated_at = ? WHERE id = ?');
+  stmt.run(worktreePath, status, now, id);
+  return getJobWorktreeById(id);
+}
 
 function deleteJobWorktree(id) {
   const db = getDb();
@@ -1058,6 +1130,7 @@ module.exports = {
   listActiveJobWorktrees,
   getJobWorktree,
   updateJobWorktreeStatus,
+  updateJobWorktreeRestore,
   deleteJobWorktree,
   getSetting,
   setSetting,
@@ -1065,6 +1138,8 @@ module.exports = {
   createStep,
   updateStep,
   getStepsByJobId,
+  getStepsByJobIds,
+  closeOrphanRunningSteps,
   // DualPlans
   saveDualPlan,
   getDualPlanByJobId,

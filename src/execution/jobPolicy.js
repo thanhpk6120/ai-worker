@@ -345,6 +345,76 @@ function clearFailureHistory(pipe) {
 }
 
 
+// ============================================================================
+// Phan loai loi: HA TANG (tam thoi, cho hoi phuc roi chay lai) vs LOI THAT
+// ============================================================================
+// Muc tieu: model/CLI chap chon (429, 5xx, timeout, spawn fail, output rong)
+// KHONG duoc coi la "code sai" => khong duoc day job vao vong FIXING va khong
+// duoc tieu ton ngan sach max_retries. Loi that (test fail, build fail) van
+// fail-closed nhu cu.
+const TRANSIENT_PATTERNS = [
+  /\b429\b/,
+  /rate[_\s-]?limit/i,
+  /too many requests/i,
+  /\b5\d{2}\b\s*(?:internal|bad gateway|service unavailable|gateway timeout)/i,
+  /\bECONNRESET\b|\bETIMEDOUT\b|\bEPIPE\b|\bEAI_AGAIN\b|\bENOTFOUND\b/i,
+  /spawn\s+\w+\s+ENOENT/i,
+  /socket hang up/i,
+  /service temporarily unavailable/i,
+  /overloaded/i,
+  /empty (?:response|output)/i,
+  /AI Vision trả về rỗng|Không thể parse JSON từ AI Vision/i
+];
+
+/**
+ * Phan loai 1 lan that bai cua agent.
+ * @param {string} output stdout+stderr+message cua lan chay
+ * @returns {'TRANSIENT'|'REAL'}
+ */
+function classifyFailure(output) {
+  const text = typeof output === 'string' ? output : (output == null ? '' : String(output));
+  if (!text.trim()) return 'TRANSIENT'; // khong co output cung la bat thuong ve ha tang
+  for (const re of TRANSIENT_PATTERNS) {
+    if (re.test(text)) return 'TRANSIENT';
+  }
+  return 'REAL';
+}
+
+/**
+ * Backoff cho cac lan cho hoi phuc (tinh bang ms theo so lan da cho).
+ * 30s -> 2m -> 5m -> 15m -> 30m (toi da 30 phut).
+ */
+const TRANSIENT_BACKOFF_STEPS_MS = [30000, 120000, 300000, 900000, 1800000];
+function resolveTransientBackoffMs(attempt) {
+  const n = toFiniteNumber(attempt);
+  if (n === null || n < 1) return TRANSIENT_BACKOFF_STEPS_MS[0];
+  const idx = Math.min(Math.floor(n) - 1, TRANSIENT_BACKOFF_STEPS_MS.length - 1);
+  return TRANSIENT_BACKOFF_STEPS_MS[idx];
+}
+
+/**
+ * Gioi han so lan cho hoi phuc truoc khi coi la loi that.
+ */
+const MAX_TRANSIENT_RETRIES = 5;
+
+/**
+ * Ghi chu trang thai cho 1 lan that bai HA TANG (khong tang fix_attempt).
+ * @returns {object} pipeline_config moi
+ */
+function markTransientFailure(job, { step, reason, retryAfterMs } = {}) {
+  const pipe = parsePipelineConfig(job);
+  const attempt = (toFiniteNumber(pipe.transient_retry) || 0) + 1;
+  const delay = toFiniteNumber(retryAfterMs) !== null && Number(retryAfterMs) > 0
+    ? Number(retryAfterMs)
+    : resolveTransientBackoffMs(attempt);
+  pipe.paused_step = step || pipe.paused_step || 'PLANNING';
+  pipe.last_error_kind = 'TRANSIENT';
+  pipe.last_error_reason = String(reason || '').slice(0, 500);
+  pipe.transient_retry = attempt;
+  pipe.retry_at = Date.now() + delay;
+  return pipe;
+}
+
 module.exports = {
   parsePipelineConfig,
   resolveMaxRetries,
@@ -362,6 +432,11 @@ module.exports = {
   pauseDeadlineForPending,
   resumeDeadlineAfterPending,
   collectAgentOutput,
+  classifyFailure,
+  resolveTransientBackoffMs,
+  markTransientFailure,
+  MAX_TRANSIENT_RETRIES,
+  TRANSIENT_BACKOFF_STEPS_MS,
   QUICK_STEP_DEFAULT_MS,
   QUICK_STEP_MIN_MS,
   DEFAULT_JOB_DEADLINE_MS,

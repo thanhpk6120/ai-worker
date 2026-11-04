@@ -57,6 +57,10 @@ function treeKillAsync(pid, signal = 'SIGTERM') {
 /**
  * Lớp ProcessManager quản lý tập trung toàn bộ tiến trình Agent CLI
  */
+// Gioi han tong so ky tu giu trong RAM cho moi stream cua 1 job.
+// Truoc day buffer khong gioi han: 1 job co log 27MB giu ca buffer + ban join
+// (~54MB) trong khi record khong bao gio duoc xoa khoi map.
+const MAX_STREAM_BUFFER_CHARS = 2 * 1024 * 1024; // 2 MB
 class ProcessManager extends EventEmitter {
   constructor() {
     super();
@@ -223,6 +227,7 @@ class ProcessManager extends EventEmitter {
         const cleanText = maskSecrets(rawText);
 
         record.stdoutBuffer.push(cleanText);
+        this._trimBuffer(record.stdoutBuffer);
 
         if (typeof onStdout === 'function') {
           try {
@@ -248,6 +253,7 @@ class ProcessManager extends EventEmitter {
         const cleanText = maskSecrets(rawText);
 
         record.stderrBuffer.push(cleanText);
+        this._trimBuffer(record.stderrBuffer);
 
         if (typeof onStderr === 'function') {
           try {
@@ -500,6 +506,20 @@ class ProcessManager extends EventEmitter {
    * @param {object} record
    * @returns {object}
    */
+  /**
+   * Giu buffer trong gioi han bo nho: khi vuot nguong thi bo cac chunk CU nhat.
+   * Van giu phan cuoi (loi thuong nam o cuoi output) nen chan doan khong bi mat.
+   * @private
+   * @param {string[]} buffer
+   */
+  _trimBuffer(buffer) {
+    let total = buffer.reduce((sum, chunk) => sum + chunk.length, 0);
+    while (total > MAX_STREAM_BUFFER_CHARS && buffer.length > 1) {
+      total -= buffer[0].length;
+      buffer.shift();
+    }
+  }
+
   _formatProcessInfo(record) {
     return {
       pid: record.pid,

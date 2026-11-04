@@ -564,7 +564,7 @@ class BaseAdapter {
       OMP_MCP_TIMEOUT_MS: mcpHandshakeTimeout,
       ENABLE_TOOL_SEARCH: mcpToolSearch
     } : {};
-    const procEnv = Object.assign({}, process.env, mcpEnv);
+    const procEnv = Object.assign({}, process.env, mcpEnv, (options && options.env) || {});
 
     proc = defaultProcessManager.spawnProcess({
       command: effectiveCommand,

@@ -24,9 +24,9 @@ process.on('unhandledRejection', (reason) => {
   // Không thoát: promise lỗi lẻ không nhất thiết làm hỏng server.
 });
 
-const { initDb, getDb } = require('./storage/db');
+const { initDb, getDb, closeOrphanRunningSteps } = require('./storage/db');
 const { runnerRegistry } = require('./runners/runnerRegistry');
-const { app } = require('./server');
+const { app, startTransientRecoveryLoop, startPortWaitRecoveryLoop } = require('./server');
 const config = require('./config');
 const { taskQueue } = require('./queue/taskQueue');
 // 1. Khởi tạo Database SQLite
@@ -37,6 +37,31 @@ try {
 } catch (dbErr) {
   console.error('>>> [BOOT ERROR] Không thể khởi tạo SQLite:', dbErr);
   process.exit(1);
+}
+
+// 1b. Đối soát step mồ côi: `stepTimeline` chỉ nằm trong RAM nên sau khi restart
+// mọi row `steps` còn RUNNING đều không còn ai đóng. Không dọn thì UI hiển thị
+// nhiều bước "đang chạy" cùng lúc và "Thời lượng" bị tính sai vĩnh viễn.
+try {
+  const closedSteps = closeOrphanRunningSteps({ status: 'CANCELLED' });
+  if (closedSteps > 0) {
+    console.log(`>>> [BOOT] Đã đóng ${closedSteps} step RUNNING mồ côi từ lần chạy trước (status=CANCELLED).`);
+  }
+} catch (reconcileErr) {
+  console.warn('>>> [BOOT WARN] Không đối soát được step RUNNING mồ côi:', reconcileErr.message);
+}
+
+// 1c. Thu hồi toàn bộ port lease của lần chạy trước. Restart đã kill cây tiến
+// trình nên các port này phải được trả lại pool; port nào còn bị process rác
+// giữ sẽ được `isPortFree` phát hiện và bỏ qua khi cấp phát.
+try {
+  const portLeaseManager = require('./execution/portLeaseManager');
+  const clearedLeases = portLeaseManager.clearAllLeases();
+  if (clearedLeases > 0) {
+    console.log(`>>> [BOOT] Đã thu hồi ${clearedLeases} port lease từ lần chạy trước.`);
+  }
+} catch (leaseErr) {
+  console.warn('>>> [BOOT WARN] Không thu hồi được port lease:', leaseErr.message);
 }
 
 // 2. Kiểm tra Runners Availability
@@ -78,6 +103,14 @@ const server = app.listen(PORT, () => {
 ========================================================================
 `;
   console.log(banner);
+  // 3b. Vòng tự động chạy lại job khi lỗi hạ tầng (rate-limit, CLI timeout...)
+  // đã hết backoff. Không đụng job PAUSED do người dùng tự bấm Dừng.
+  try {
+    startTransientRecoveryLoop();
+    startPortWaitRecoveryLoop();
+  } catch (recoveryErr) {
+    console.warn('>>> [BOOT WARN] Không khởi động được vòng chờ hồi phục:', recoveryErr.message);
+  }
 });
 
 // 4. Xử lý Graceful Shutdown

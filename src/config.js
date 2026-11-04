@@ -117,6 +117,30 @@ const AI_TRIAGE_CACHE_TTL_MS = process.env.AI_TRIAGE_CACHE_TTL_MS ? parseInt(pro
 // duong chay job (truoc moi pipeline step), khong chi tren duong UI.
 const DETECT_TTL_MS = process.env.DETECT_TTL_MS ? parseInt(process.env.DETECT_TTL_MS, 10) : 60000;
 
+// Thoi gian CHO port dich vu (TESTING/FIXING) truoc khi tam dung job.
+// Mac dinh 30 phut. Cau hinh qua env (uu tien ms, sau do phut) hoac pipeline_config
+// cua tung job (`port_wait_timeout_minutes`).
+const PORT_WAIT_TIMEOUT_MINUTES = (() => {
+  const rawMinutes = Number(process.env.PORT_WAIT_TIMEOUT_MINUTES);
+  if (Number.isFinite(rawMinutes) && rawMinutes > 0) return rawMinutes;
+  return 60;
+})();
+const PORT_WAIT_TIMEOUT_MS = (() => {
+  const rawMs = Number(process.env.PORT_WAIT_TIMEOUT_MS);
+  if (Number.isFinite(rawMs) && rawMs > 0) return rawMs;
+  return PORT_WAIT_TIMEOUT_MINUTES * 60 * 1000;
+})();
+// Che do xac minh service dang chay dung build cua worktree:
+//  strict (mac dinh): sai provenance => coi nhu buoc test that bai
+//  warn: chi ghi log
+//  off: tat hoan toan
+const RUNTIME_PROVENANCE_MODE = (() => {
+  const raw = String(process.env.RUNTIME_PROVENANCE_MODE || 'strict').toLowerCase();
+  return ['strict', 'warn', 'off'].includes(raw) ? raw : 'strict';
+})();
+// Tu dong chay lai job dang PAUSED vi cho port, khi port da duoc nha.
+const PORT_WAIT_AUTO_RESUME = process.env.PORT_WAIT_AUTO_RESUME !== 'false';
+
 // Tự động tạo thư mục nếu chưa có
 [WORKTREE_BASE_DIR, LOG_DIR, EVIDENCE_DIR].forEach((dir) => {
   if (!fs.existsSync(dir)) {
@@ -130,6 +154,10 @@ module.exports = {
   CONCURRENCY,
   DEFAULT_TIMEOUT,
   MAX_FIXING_RETRIES,
+  PORT_WAIT_TIMEOUT_MS,
+  PORT_WAIT_TIMEOUT_MINUTES,
+  RUNTIME_PROVENANCE_MODE,
+  PORT_WAIT_AUTO_RESUME,
   WORKTREE_BASE_DIR,
   LOG_DIR,
   EVIDENCE_DIR,
