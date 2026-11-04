@@ -141,6 +141,23 @@ const RUNTIME_PROVENANCE_MODE = (() => {
 // Tu dong chay lai job dang PAUSED vi cho port, khi port da duoc nha.
 const PORT_WAIT_AUTO_RESUME = process.env.PORT_WAIT_AUTO_RESUME !== 'false';
 
+// ==========================================
+// PROCESS JANITOR - don tien trinh rac dinh ky
+// ==========================================
+// Bat/tat vong don dep tu dong (khong anh huong nut "Chay ngay" tren UI).
+const JANITOR_ENABLED = process.env.JANITOR_ENABLED !== 'false';
+// Chu ky quet: mac dinh 10 phut.
+const JANITOR_INTERVAL_MS = Math.max(60000, Number(process.env.JANITOR_INTERVAL_MS) || 10 * 60 * 1000);
+// Chi kill tien trinh song lau hon nguong nay (tranh giet service vua khoi dong cua job dang chay).
+const JANITOR_GRACE_MINUTES = Math.max(1, Number(process.env.JANITOR_GRACE_MINUTES) || 10);
+// Chi mo phong, khong kill that (dung khi can kiem chung).
+const JANITOR_DRY_RUN = process.env.JANITOR_DRY_RUN === 'true';
+// Quet cay agent CLI bo hoang (omp/claude/codex + MCP) dang idle.
+// MAC DINH TAT: cac tien trinh nay thuong thuoc phien lam viec tuong tac cua nguoi
+// dung, giet nham se lam hong phien. Bat bang JANITOR_IDLE_AGENT_TREES=true.
+const JANITOR_IDLE_AGENT_TREES = process.env.JANITOR_IDLE_AGENT_TREES === 'true';
+const JANITOR_IDLE_AGENT_HOURS = Math.max(1, Number(process.env.JANITOR_IDLE_AGENT_HOURS) || 6);
+
 // Tự động tạo thư mục nếu chưa có
 [WORKTREE_BASE_DIR, LOG_DIR, EVIDENCE_DIR].forEach((dir) => {
   if (!fs.existsSync(dir)) {
@@ -158,6 +175,12 @@ module.exports = {
   PORT_WAIT_TIMEOUT_MINUTES,
   RUNTIME_PROVENANCE_MODE,
   PORT_WAIT_AUTO_RESUME,
+  JANITOR_ENABLED,
+  JANITOR_INTERVAL_MS,
+  JANITOR_GRACE_MINUTES,
+  JANITOR_DRY_RUN,
+  JANITOR_IDLE_AGENT_TREES,
+  JANITOR_IDLE_AGENT_HOURS,
   WORKTREE_BASE_DIR,
   LOG_DIR,
   EVIDENCE_DIR,

@@ -244,6 +244,25 @@ function initDb() {
     );
   `);
 
+  // Bảng janitor_runs: lịch sử các lần dọn tiến trình rác (Process Janitor).
+  // Lưu nguyên report JSON + log dạng text để màn hình "Dọn tiến trình" hiển thị lại.
+  dbInstance.exec(`
+    CREATE TABLE IF NOT EXISTS janitor_runs (
+      id TEXT PRIMARY KEY,
+      started_at TEXT NOT NULL,
+      finished_at TEXT,
+      trigger TEXT NOT NULL,
+      duration_ms INTEGER DEFAULT 0,
+      scanned INTEGER DEFAULT 0,
+      killed INTEGER DEFAULT 0,
+      protected_count INTEGER DEFAULT 0,
+      freed_ports TEXT,
+      report TEXT,
+      log TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_janitor_runs_started ON janitor_runs(started_at DESC);
+  `);
+
   // Khởi tạo agent_mapping mặc định nếu chưa có
   try {
     const existingMapping = dbInstance.prepare("SELECT value FROM settings WHERE key = 'agent_mapping'").get();
@@ -1099,6 +1118,90 @@ function setSetting(key, val) {
   return getSetting(key);
 }
 
+// ==========================================
+// JANITOR RUNS (lich su don tien trinh rac)
+// ==========================================
+function createJanitorRun(run) {
+  const db = getDb();
+  const id = (run && run.id) || crypto.randomUUID();
+  const stmt = db.prepare(`
+    INSERT INTO janitor_runs (id, started_at, finished_at, trigger, duration_ms, scanned, killed, protected_count, freed_ports, report, log)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  stmt.run(
+    id,
+    (run && run.started_at) || new Date().toISOString(),
+    (run && run.finished_at) || null,
+    (run && run.trigger) || 'auto',
+    Number((run && run.duration_ms) || 0),
+    Number((run && run.scanned) || 0),
+    Number((run && run.killed) || 0),
+    Number((run && run.protected_count) || 0),
+    JSON.stringify((run && run.freed_ports) || []),
+    run && run.report ? JSON.stringify(run.report) : null,
+    run && run.log ? JSON.stringify(run.log) : null
+  );
+  return getJanitorRun(id);
+}
+
+/** Cập nhật kết quả cuối của 1 lần chạy (idempotent theo id). */
+function finishJanitorRun(id, patch) {
+  const db = getDb();
+  const p = patch || {};
+  const stmt = db.prepare(`
+    UPDATE janitor_runs SET
+      finished_at = ?, duration_ms = ?, scanned = ?, killed = ?,
+      protected_count = ?, freed_ports = ?, report = ?, log = ?
+    WHERE id = ?
+  `);
+  stmt.run(
+    p.finished_at || new Date().toISOString(),
+    Number(p.duration_ms || 0),
+    Number(p.scanned || 0),
+    Number(p.killed || 0),
+    Number(p.protected_count || 0),
+    JSON.stringify(p.freed_ports || []),
+    p.report ? JSON.stringify(p.report) : null,
+    p.log ? JSON.stringify(p.log) : null,
+    id
+  );
+  return getJanitorRun(id);
+}
+
+function parseJanitorRow(row) {
+  if (!row) return null;
+  const out = { ...row };
+  for (const key of ['freed_ports', 'report', 'log']) {
+    try { out[key] = row[key] ? JSON.parse(row[key]) : (key === 'log' ? [] : (key === 'freed_ports' ? [] : null)); } catch (e) {
+      out[key] = key === 'log' ? [] : (key === 'freed_ports' ? [] : null);
+    }
+  }
+  return out;
+}
+
+function getJanitorRun(id) {
+  const db = getDb();
+  return parseJanitorRow(db.prepare('SELECT * FROM janitor_runs WHERE id = ?').get(id));
+}
+
+function listJanitorRuns(limit = 30) {
+  const db = getDb();
+  const n = Math.min(Math.max(Number(limit) || 30, 1), 200);
+  const rows = db.prepare('SELECT * FROM janitor_runs ORDER BY started_at DESC LIMIT ?').all(n);
+  return rows.map(parseJanitorRow);
+}
+
+/** Giữ bảng gọn: chỉ giữ N bản ghi mới nhất. */
+function pruneJanitorRuns(keep = 200) {
+  const db = getDb();
+  const n = Math.max(Number(keep) || 200, 10);
+  const r = db.prepare(`
+    DELETE FROM janitor_runs
+    WHERE id NOT IN (SELECT id FROM janitor_runs ORDER BY started_at DESC LIMIT ?)
+  `).run(n);
+  return Number(r && r.changes) || 0;
+}
+
 module.exports = {
   initDb,
   getDb,
@@ -1159,5 +1262,11 @@ module.exports = {
   // RunnerConfigs
   upsertRunnerConfig,
   getRunnerConfigs,
-  getRunnerConfig
+  getRunnerConfig,
+  // Janitor (don tien trinh rac)
+  createJanitorRun,
+  finishJanitorRun,
+  getJanitorRun,
+  listJanitorRuns,
+  pruneJanitorRuns
 };

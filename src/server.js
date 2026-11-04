@@ -28,6 +28,7 @@ const { guardPrompt } = require('./execution/promptGuard');
 const evidenceStore = require('./verification/evidenceStore');
 const portLeaseManager = require('./execution/portLeaseManager');
 const buildProvenance = require('./execution/buildProvenance');
+const processJanitor = require('./execution/processJanitor');
 const { EvidenceWatcher } = require('./verification/evidenceWatcher');
 const { verifyImageWithAI } = require('./verification/aiVisionVerifier');
 const stepGate = require('./execution/stepGate');
@@ -788,6 +789,98 @@ function handleHealthCheck(req, res) {
 app.get('/api/v1/health', handleHealthCheck);
 app.get('/api/v1/status', handleHealthCheck);
 
+// ==========================================
+// PROCESS JANITOR - dọn tiến trình rác (dev server / BE bỏ hoang)
+// ==========================================
+/**
+ * GET /api/v1/janitor/status
+ * Trạng thái vòng dọn dẹp: bật/tắt, chu kỳ, lần chạy tới, kết quả gần nhất.
+ */
+app.get('/api/v1/janitor/status', (req, res) => {
+  try {
+    res.json(processJanitor.getStatus());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/v1/janitor/runs?limit=30
+ * Lịch sử các lần chạy (mới nhất trước).
+ */
+app.get('/api/v1/janitor/runs', (req, res) => {
+  try {
+    const limit = Number(req.query.limit) || 30;
+    const runs = db.listJanitorRuns(limit).map((r) => ({
+      id: r.id,
+      started_at: r.started_at,
+      finished_at: r.finished_at,
+      trigger: r.trigger,
+      duration_ms: r.duration_ms,
+      scanned: r.scanned,
+      killed: r.killed,
+      protected_count: r.protected_count,
+      protected_system_count: (r.report && r.report.protected_system_count) || 0,
+      freed_ports: r.freed_ports || []
+    }));
+    res.json({ runs });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/v1/janitor/runs/:id
+ * Chi tiết 1 lần chạy: danh sách đã kill, danh sách được bảo vệ, log đầy đủ.
+ */
+app.get('/api/v1/janitor/runs/:id', (req, res) => {
+  try {
+    const run = db.getJanitorRun(req.params.id);
+    if (!run) return res.status(404).json({ error: 'Không tìm thấy lần chạy này.' });
+    const report = run.report || {};
+    res.json({
+      run: {
+        id: run.id,
+        started_at: run.started_at,
+        finished_at: run.finished_at,
+        trigger: run.trigger,
+        duration_ms: run.duration_ms,
+        scanned: run.scanned,
+        killed: run.killed,
+        protected_count: run.protected_count,
+        protected_system_count: (report.protected_system_count || 0),
+        freed_ports: run.freed_ports || [],
+        killed_list: report.killed_list || [],
+        protected_list: report.protected_list || [],
+        errors: report.errors || [],
+        dry_run: Boolean(report.dry_run),
+        log: run.log || []
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/v1/janitor/run
+ * Chạy dọn dẹp ngay (body: { dryRun?: boolean }).
+ */
+app.post('/api/v1/janitor/run', async (req, res) => {
+  try {
+    const dryRun = req.body && req.body.dryRun !== undefined ? Boolean(req.body.dryRun) : undefined;
+    const result = await processJanitor.runAndPersist({ trigger: 'manual', dryRun });
+    if (!result.ok) {
+      return res.status(result.skipped ? 409 : 500).json({
+        ok: false,
+        error: result.error || result.reason
+      });
+    }
+    res.json({ ok: true, report: result.report, record: { id: result.report.id } });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
 
 /**
  * GET /api/v1/systemone/status
@@ -6122,6 +6215,14 @@ function startTransientRecoveryLoop() {
 }
 
 /**
+ * Vòng dọn tiến trình rác: mỗi 10 phút quét và kill dev server/BE bỏ hoang
+ * (tiến trình đang phục vụ job chạy thật luôn được bảo vệ - xem processJanitor).
+ */
+function startProcessJanitorLoop() {
+  return processJanitor.startJanitorLoop();
+}
+
+/**
  * POST /api/v1/jobs/:id/pause và POST /api/v1/tasks/:id/pause
  * Tạm dừng ngay tại bước đang làm và ngắt tiến trình con đang chạy
  */
@@ -7183,6 +7284,8 @@ module.exports = {
   // Cho phep khoi dong vong tu dong cho hoi phuc sau loi ha tang (index.js goi).
   startTransientRecoveryLoop,
   startPortWaitRecoveryLoop,
+  // Vòng dọn tiến trình rác (dev server/BE bỏ hoang) - index.js gọi lúc boot.
+  startProcessJanitorLoop,
   resumeJobInternal,
   pauseJobForTransient,
   // Cho test: phan loai ket qua xac minh build (NO_LISTENER vs build cu).

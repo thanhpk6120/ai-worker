@@ -26,7 +26,7 @@ process.on('unhandledRejection', (reason) => {
 
 const { initDb, getDb, closeOrphanRunningSteps } = require('./storage/db');
 const { runnerRegistry } = require('./runners/runnerRegistry');
-const { app, startTransientRecoveryLoop, startPortWaitRecoveryLoop } = require('./server');
+const { app, startTransientRecoveryLoop, startPortWaitRecoveryLoop, startProcessJanitorLoop } = require('./server');
 const config = require('./config');
 const { taskQueue } = require('./queue/taskQueue');
 // 1. Khởi tạo Database SQLite
@@ -110,6 +110,13 @@ const server = app.listen(PORT, () => {
     startPortWaitRecoveryLoop();
   } catch (recoveryErr) {
     console.warn('>>> [BOOT WARN] Không khởi động được vòng chờ hồi phục:', recoveryErr.message);
+  }
+  // 3c. Vòng dọn tiến trình rác (dev server / BE bỏ hoang) mỗi 10 phút.
+  // Không kill tiến trình của job đang chạy: xem src/execution/processJanitor.js.
+  try {
+    startProcessJanitorLoop();
+  } catch (janitorErr) {
+    console.warn('>>> [BOOT WARN] Không khởi động được vòng dọn tiến trình:', janitorErr.message);
   }
 });
 
